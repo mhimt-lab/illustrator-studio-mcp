@@ -1,0 +1,8 @@
+# ~/.codex/config.toml
+[mcp_servers.illustrator-studio]
+command = "illustrator-studio-mcp"
+args = []
+
+# Illustrator Beta:
+# [mcp_servers.illustrator-studio.env]
+# ILLUSTRATOR_APPLICATION = "id:com.adobe.illustratorBeta"

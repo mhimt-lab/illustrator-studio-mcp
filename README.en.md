@@ -1,0 +1,149 @@
+# Illustrator Studio MCP
+
+**Public Beta — 0.1.0-beta.1.** A trial release, not production-ready. Try it on a copy of your artwork.
+
+> **Requirement: keep Illustrator in the foreground with the screen unlocked.** Continuous editing of saved files (edit sessions), export, and many other operations are verified only in this state. In the background or with the screen locked, operations are refused or fail with an unclear reason.
+
+
+[日本語](README.md) | **English**
+
+**Plan, apply, and check Illustrator work with an AI assistant.**
+
+Ask a compatible AI app such as Claude Code to replace a headline, align shapes, or swap a photo. MCP is the connection between that app and Illustrator.
+
+The tool identifies what will change, checks the target again immediately before writing, and reads the result back from Illustrator. If a response is lost and the outcome is unclear, it stops further edits.
+
+**Public Beta 0.1.0-beta.1. Mac only.** Distributed through the npm `beta` tag and a GitHub prerelease.
+
+[What you can do](#what-you-can-do) · [Beta scope](#beta-scope) · [Try it](#quick-start) · [How changes are checked](#how-changes-are-checked) · [Verification and limitations](#verification-and-limitations)
+
+## What you can do
+
+| A request from your workflow | Supported work and conditions |
+| --- | --- |
+| “Replace this headline.” | Replace supported single-line point text directly on a layer, preserving the supported formatting |
+| “Space these shapes evenly.” | Align, distribute, and reorder supported paths |
+| “Move this group of text and photos together.” | Check and translate supported text, paths, and linked images inside a group. Group scaling and rotation are excluded |
+| “Swap this photo for the latest version.” | Relink an image with identical pixel dimensions, checking position, size, and stacking order |
+| “Check the fonts and anything that needs attention before print.” | Read fonts, image links, resolution, and other supported properties, reporting incomplete checks too |
+
+Other work includes creating shapes and text, adjusting supported text formatting, and saving with a verified backup. Conditions differ by operation: see [supported work and limits](#verification-and-limitations). The number of available functions does not mean every input or environment has been verified.
+
+## Beta scope
+
+| Area | Details |
+| --- | --- |
+| In scope | Reading and inspection; non-destructive edits of supported shapes, text, and images (including CMYK documents); continuous editing of saved files (edit sessions, experimental); backup and overwrite save; outlined AI/PDF export; placing, relinking, embedding (JPEG/PNG in RGB documents only), and optimizing images; stdio transport (MCP 2026-07-28) |
+| Out of scope | The Claude Desktop extension (`.mcpb`, planned for the next Beta), PNG/JPEG/SVG export, artboard operations, paragraph styles, MCP Tasks, Windows, deleting several objects at once (one object per delete), missing-link repair, ungrouping |
+| Streamable HTTP | Covered by automated tests and client connection checks only. No Illustrator operation over HTTP has been recorded. Loopback (`127.0.0.1`) only; not for external exposure |
+| CMYK documents | Stacking-order changes support bring-to-front (`front`) only. Creating compound paths is not supported (refused) |
+| Known intermittent issue | Reading groups can intermittently lose the reference to an item. The operation then stops on the safe side (fails closed) instead of guessing. It is not hidden by retries, and restarting Illustrator is not guaranteed to fix it |
+| CI | Automated tests on GitHub Actions have not passed for this release (the full suite was run locally). They are planned to pass on a self-hosted runner |
+
+## How changes are checked
+
+1. **Plan** — Identify the document, objects, and proposed edits.
+2. **Check immediately before writing** — Confirm that the target still matches the plan.
+3. **Apply** — Perform the approved change and retain an execution record to prevent duplicate application.
+4. **Verify** — Read text, positions, colors, and other relevant values back from Illustrator and compare them with the plan.
+5. **Reconcile or recover when needed** — Follow the operation's state-checking or restoration procedure. Stop when the outcome is unknown; do not guess that recovery succeeded.
+
+Editing operations separate planning from applying. Opening, saving, and backing up a document use different call patterns. Review what your AI app proposes to execute before proceeding.
+
+**“Verified” means the values checked by that operation matched the plan.** It does not guarantee complete document restoration, every appearance effect, visual quality, or print readiness. Inspect the result in Illustrator. See [Safety and recovery](#verification-and-limitations).
+
+## Quick Start
+
+### 1. Prepare your Mac
+
+You need a Mac, stable Adobe Illustrator, Node.js 20 or newer, and a compatible AI app that can launch local tools. Node.js runs this tool. The server needs no API key; your AI app's terms and fees are separate.
+
+In Terminal, run:
+
+```bash
+npm install -g illustrator-studio-mcp@beta
+illustrator-studio-mcp --version
+```
+
+The second command should print `0.1.0-beta.1`. You can also install from the distribution file (`.tgz`) attached to the GitHub prerelease. For updating and uninstalling, see [Install](docs/install.md). The one-click Claude Desktop extension (`.mcpb`) is planned for the next Beta. This version has a known issue: under Desktop's built-in Node it cannot start the helper process that drives Illustrator, so connect Claude Desktop through its configuration file.
+
+### 2. Connect your AI app
+
+For Claude Code, run this in Terminal, then restart the app:
+
+```bash
+claude mcp add illustrator-studio -- illustrator-studio-mcp
+```
+
+Other AI apps use different settings. See [connection examples](docs/install.md#register-the-installed-command). A successful connection test is separate from completing production work through that app.
+
+### 3. Start without changing a document
+
+Open a test document in stable Illustrator, bring it to the foreground, and unlock the screen. Check the required environment in Terminal:
+
+```bash
+illustrator-studio-mcp doctor
+```
+
+This does not edit the document. If macOS asks permission to control Illustrator, review and allow the request. Skipped or unknown checks do not establish a working connection; see [the diagnostic guide](docs/setup.md#doctor).
+
+In your AI app's conversation, enter this. You do not need to write code or know tool names:
+
+```text
+Tell me which documents are open in Illustrator and which text or shapes are selected.
+Only look. Do not change, save, or export anything.
+```
+
+Compare the answer with Illustrator. “No selection” is valid when nothing is selected.
+
+### 4. Ask for a proposed edit
+
+Select one line of point text outside a group. Point text is created by clicking with the Type tool, rather than dragging a text box.
+
+```text
+I'd like to change the selected headline to “Weekend Special”, keeping its size and color.
+Show me what you would change and where. Do not change or save anything yet.
+If its formatting is unsupported, tell me why.
+```
+
+Check the target and proposed text before asking the AI to apply it. See [Usage and examples](#verification-and-limitations) for more requests.
+
+## Verification and limitations
+
+Recent live checks used macOS 27.0 and stable Illustrator 30.8.1, foreground and unlocked. RGB and CMYK test documents each completed 103 consecutive changes and 108 total changes including recovery checks. There are 45 major execution records, supplemented by new measurements for operations whose code subsequently changed.
+
+These are bounded tests through a dedicated connection program. They do not establish arbitrary artwork support, every AI app, or long-running production use. Do not extend the results to Beta, background operation, or a locked screen.
+
+| Limitation | Current state |
+| --- | --- |
+| Reading groups | Known intermittent issue: a group reference can become unreadable, and the operation then stops on the safe side (fails closed). The cause is unresolved; restarting Illustrator is not an established repair |
+| Long document identifiers | Long information identifying a document, including its path, can make a saved execution record unreadable. Replay and recovery are not guaranteed for arbitrary documents |
+| Continuous editing | With a verified backup and exclusive document use, 36 of 39 editing operations are supported. Delete, embed, and vector import are excluded. The backup a session needs stops at 1,000 items (extrapolated from one 600-item live run, not measured), so that is the effective session ceiling. Performance, finished-record retention, and recovery usability remain unfinished |
+| Stroke after saving text | Newly created point text acquiring a stroke after save was corrected and rechecked in RGB/CMYK. Existing stroked text remains unsupported |
+| Character-style restoration | An incorrect restoration result was corrected. Forcing a failure through the actual tool and completing live rollback remains unverified |
+| Unsupported work | Path text, paragraph-style mutation, ungrouping, missing-link repair, and outlining in the original document, among other limits |
+
+If a response stops, do not bypass it by sending the edit as a new request or deleting execution records. See [detailed verification and known limits](#verification-and-limitations).
+
+## Documentation
+
+See [Install](docs/install.md) and [connection and recovery settings](docs/setup.md). See the contact below; receipt and handling remain unverified. Do not post vulnerabilities or private materials in ordinary Issues.
+
+## License
+
+[Business Source License 1.1](LICENSE). The Additional Use Grant permits ordinary internal business use and design services where clients receive creative outputs. Providing a Competitive Offering to third parties is restricted. This is not an OSI-approved open source license. Read the [license summary](#verification-and-limitations) and the full LICENSE.
+
+<details>
+<summary>Connection reference: tool identifiers (not needed for everyday requests)</summary>
+
+`illustrator_align_objects`, `illustrator_apply_character_style`, `illustrator_apply_pathfinder`, `illustrator_capture_preview`, `illustrator_capture_structure_snapshot`, `illustrator_check_contrast`, `illustrator_check_text_consistency`, `illustrator_close_document`, `illustrator_close_edit_session`, `illustrator_compare_images`, `illustrator_create_area_text`, `illustrator_create_backup`, `illustrator_create_batch`, `illustrator_create_character_style`, `illustrator_create_clipping_mask`, `illustrator_create_document`, `illustrator_create_layer`, `illustrator_create_point_text`, `illustrator_create_rectangle`, `illustrator_create_shape`, `illustrator_create_swatch_resource`, `illustrator_delete_objects`, `illustrator_diff_structure`, `illustrator_duplicate_object`, `illustrator_edit_path_points`, `illustrator_embed_image`, `illustrator_export_outlined`, `illustrator_extract_design_tokens`, `illustrator_find_color_usages`, `illustrator_find_fonts`, `illustrator_get_area_text_options`, `illustrator_get_context`, `illustrator_get_edit_session`, `illustrator_get_object`, `illustrator_get_path_points`, `illustrator_group_objects`, `illustrator_import_vector_artwork`, `illustrator_list_documents`, `illustrator_list_layers`, `illustrator_list_objects`, `illustrator_list_recipes`, `illustrator_list_selection`, `illustrator_list_swatches`, `illustrator_list_text_styles`, `illustrator_make_compound_path`, `illustrator_move_object_to_layer`, `illustrator_mutate_batch`, `illustrator_open_document`, `illustrator_open_edit_session`, `illustrator_optimize_images`, `illustrator_place_image`, `illustrator_plan_color_replacement`, `illustrator_plan_recipe`, `illustrator_preflight_images`, `illustrator_preflight_print`, `illustrator_read_structure_diff`, `illustrator_reconcile`, `illustrator_reconcile_backup`, `illustrator_reconcile_delete`, `illustrator_reconcile_export`, `illustrator_release_clipping_mask`, `illustrator_relink_image`, `illustrator_reorder_layer`, `illustrator_replace_font`, `illustrator_replace_point_text`, `illustrator_replace_point_text_batch`, `illustrator_replace_text_range`, `illustrator_run_m6_appearance_preview_recipe`, `illustrator_run_recipe`, `illustrator_save_document`, `illustrator_save_document_as`, `illustrator_save_recipe`, `illustrator_set_area_text_columns`, `illustrator_set_layer_state`, `illustrator_set_no_break`, `illustrator_set_object_state`, `illustrator_set_path_appearance`, `illustrator_set_stacking_order`, `illustrator_set_text_orientation`, `illustrator_set_text_style`, `illustrator_transform_object`, `illustrator_update_character_style`
+
+</details>
+
+## Contact
+
+The approved maintainer identity is **mhimt**, with contact [sporks-framer9t@icloud.com](mailto:sporks-framer9t@icloud.com). Receipt and handling have not yet been tested. Keep vulnerabilities and private materials out of ordinary Issues; send only a redacted initial summary by email.
+
+## Clients and transports
+
+The first Beta is published only after this exact package was installed and checked in Claude Code and Claude Desktop, from installation through save, reopen, and read-back. In Codex CLI, connection, approval, discovery, reads, save, and a backup of the unchanged document were checked; edits (plan and apply) and later steps are not verified. During that check the model guessed argument names and the server's input validation refused the call. Other apps (such as ChatGPT Work) are experimental. [Client-specific and transport evidence](docs/compatibility.md) are tracked separately. Configuration examples do not establish support.

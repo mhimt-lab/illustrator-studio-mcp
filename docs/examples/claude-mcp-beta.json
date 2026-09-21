@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "illustrator-studio": {
+      "command": "illustrator-studio-mcp",
+      "args": [],
+      "env": {
+        "ILLUSTRATOR_APPLICATION": "id:com.adobe.illustratorBeta"
+      }
+    }
+  }
+}

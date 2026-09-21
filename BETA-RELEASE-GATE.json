@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "decision": "ready",
+  "reviewer": "mhimt",
+  "version": "0.1.0-beta.1",
+  "candidateSha256": "61e268350f540d027b27dca87ba8a45f1ab9eb10bad739746cf7579c3b450726",
+  "packageSha256": "8b967f21ce1de573a2845ba2c2e004af71a76cbc15834f3d22475f50b80adb44",
+  "distTag": "beta",
+  "prerelease": true,
+  "checks": {
+    "lint": {
+      "status": "pass",
+      "evidenceSha256": "16fb3a02a06d1f94b6bdb5b9dafd6dc8d5774b30ba73a2f1c16def4a4199cb90"
+    },
+    "build": {
+      "status": "pass",
+      "evidenceSha256": "193fe173a1554fcbd3c0857b7b3fa729a8687003b82a28f24a5bfff1b21f56d7"
+    },
+    "tests": {
+      "status": "pass",
+      "evidenceSha256": "f12ccbee9726455cd8ca1009b3e2f097837d1cd2fa764f94f1527126d67c4555"
+    },
+    "publicAudit": {
+      "status": "pass",
+      "evidenceSha256": "1d40cc25e3b89b21b2a9a1a902a7b47f67923d35b07e0dcf16716b3cd81892be"
+    },
+    "packageReproducibility": {
+      "status": "pass",
+      "evidenceSha256": "a0a98f429d4977c46ca42d15b1922b7580c056850c1d4b0769b1cb4747649e3b"
+    },
+    "isolatedInstall": {
+      "status": "pass",
+      "evidenceSha256": "b42beb671777d8f70c6c31f13f9535d2c3306f83bc9e5d15217ab2a250e0b8c0"
+    },
+    "doctor": {
+      "status": "pass",
+      "evidenceSha256": "769b3ce1088a0f6fad20539dd09cb58675c5a2b21b80b73c0e0e02e1a514920e"
+    },
+    "stdio": {
+      "status": "pass",
+      "evidenceSha256": "ff626523d7c9d588c6eb80985add698daea396c0fd787f170ed5a08876c5ac88"
+    },
+    "liveEvidence": {
+      "status": "pass",
+      "evidenceSha256": "72a98c22b043cf259e8de44c15537f915505ef4a4dbf0d4e81367ddb4642fd01"
+    },
+    "rightsReview": {
+      "status": "pass",
+      "evidenceSha256": "e0e1d7ff3aa72c5b669626989635a6f6de1bd5e3708b0ad294eddd05e497955e"
+    },
+    "privateReporting": {
+      "status": "pass",
+      "evidenceSha256": "dbc762dee0783da761f834a3fed95c397271b10eae4fd5155378931349b45bc2"
+    },
+    "claudeCode": {
+      "status": "pass",
+      "evidenceSha256": "e8e227f379b8d183b9628c765a89b35778b11f25dbe9105696b34af942c340be"
+    },
+    "claudeDesktop": {
+      "status": "pass",
+      "evidenceSha256": "f55c3a3e5ff4e1e491a8a2cc882555eadfc43b60732922bf497b2f4e1bb9ef66"
+    },
+    "codexCli": {
+      "status": "partial",
+      "evidenceSha256": "18fdf491f768eaeb3caaaa93beaabf0da79dd0ac9053884a430c30bf09f3ba02"
+    }
+  }
+}
