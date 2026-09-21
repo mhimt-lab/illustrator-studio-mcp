@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="370" viewBox="0 0 1200 370" role="img" aria-labelledby="title desc">
+<title id="title">Your words. Your artwork. A checked result.</title><desc id="desc">Describe the change, review the plan, then apply and verify. A workflow illustration, not an application screenshot or a customer result.</desc>
+<rect width="1200" height="370" rx="24" fill="#f5f3ee"/>
+<g font-family="-apple-system, BlinkMacSystemFont, 'Hiragino Kaku Gothic ProN', 'Yu Gothic', sans-serif">
+<text x="42" y="60" font-size="30" font-weight="700" fill="#24342e">Your words. Your artwork. A checked result.</text>
+<rect x="42" y="94" width="352" height="210" rx="16" fill="#ffffff"/>
+<text x="67" y="139" font-size="22" font-weight="700" fill="#58665e">01</text>
+<text x="67" y="195" font-size="39" font-weight="700" fill="#24342e">Describe</text>
+<text x="67" y="249" font-size="21" fill="#58665e">Say what you want to change</text>
+<path d="M401 199h15m-6-6 6 6-6 6" fill="none" stroke="#76887b" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="424" y="94" width="352" height="210" rx="16" fill="#ffffff"/>
+<text x="449" y="139" font-size="22" font-weight="700" fill="#58665e">02</text>
+<text x="449" y="195" font-size="39" font-weight="700" fill="#24342e">Review</text>
+<text x="449" y="249" font-size="21" fill="#58665e">Check the targets and edits</text>
+<path d="M783 199h15m-6-6 6 6-6 6" fill="none" stroke="#76887b" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="806" y="94" width="352" height="210" rx="16" fill="#263e34"/>
+<text x="831" y="139" font-size="22" font-weight="700" fill="#d9e8d8">03</text>
+<text x="831" y="195" font-size="39" font-weight="700" fill="#ffffff">Apply &amp; verify</text>
+<text x="831" y="249" font-size="21" fill="#d9e8d8">Read the result from Illustrator</text>
+<text x="42" y="343" font-size="18" fill="#58665e">Workflow illustration · Not an application screenshot</text></g></svg>

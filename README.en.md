@@ -21,6 +21,11 @@ The tool identifies what will change, checks the target again immediately before
 
 [What you can do](#what-you-can-do) · [Beta scope](#beta-scope) · [Try it](#quick-start) · [How changes are checked](#how-changes-are-checked) · [Verification and limitations](#verification-and-limitations)
 
+<picture>
+  <source media="(max-width: 600px)" srcset="docs/images/readme-workflow-en-mobile.svg">
+  <img src="docs/images/readme-workflow-en.svg" alt="Workflow: describe the change, review the plan, then apply it and read the result back from Illustrator. An illustration, not an application screenshot.">
+</picture>
+
 ## What you can do
 
 | A request from your workflow | Supported work and conditions |
@@ -31,7 +36,20 @@ The tool identifies what will change, checks the target again immediately before
 | “Swap this photo for the latest version.” | Relink an image with identical pixel dimensions, checking position, size, and stacking order |
 | “Check the fonts and anything that needs attention before print.” | Read fonts, image links, resolution, and other supported properties, reporting incomplete checks too |
 
-Other work includes creating shapes and text, adjusting supported text formatting, and saving with a verified backup. Conditions differ by operation: see [supported work and limits](#verification-and-limitations). The number of available functions does not mean every input or environment has been verified.
+Supported functions by type of work:
+
+| Work | Summary of functions |
+| --- | --- |
+| Inspect | Read documents, layers, selections, text, images, and colors |
+| Refine text | Create point and area text; targeted replacement, fonts, formatting, text orientation, and columns |
+| Create and arrange | Create shapes and curves; edit paths; move, align, duplicate, and group; conditional clipping masks, compound paths, and Pathfinder (in CMYK documents, compound-path creation is unsupported and stacking-order changes support bring-to-front only) |
+| Work with color | Path fill and stroke; RGB/CMYK process swatches; spot colors and gradients in RGB documents; color search and replacement planning |
+| Work with images | Place and relink linked images; embedding (JPEG/PNG in RGB documents only); downsampling on a working copy |
+| Documents and layers | Edit layers; create, open, close, and save documents; continuous editing of saved files (experimental) |
+| Batch work | Batch replacement, multiple edits in one request, and planning and running saved recipes |
+| Check and recover | Print preflight, structure diffs, previews, comparison of existing PNGs, verified backups, outlined export to new AI/PDF files, and reconciliation after unknown outcomes |
+
+Conditions differ by operation: see [Verification and limitations](#verification-and-limitations) and the [tool catalog](docs/tools.en.md). The number of available functions does not mean every input or environment has been verified. For example requests, see [Usage and examples](docs/usage.en.md).
 
 ## Beta scope
 
@@ -54,7 +72,7 @@ Other work includes creating shapes and text, adjusting supported text formattin
 
 Editing operations separate planning from applying. Opening, saving, and backing up a document use different call patterns. Review what your AI app proposes to execute before proceeding.
 
-**“Verified” means the values checked by that operation matched the plan.** It does not guarantee complete document restoration, every appearance effect, visual quality, or print readiness. Inspect the result in Illustrator. See [Safety and recovery](docs/runbook.en.md).
+**“Verified” means the values checked by that operation matched the plan.** It does not guarantee complete document restoration, every appearance effect, visual quality, or print readiness. Inspect the result in Illustrator. See [Safety](docs/safety.en.md) for details, and the [recovery steps](docs/runbook.en.md) if an operation stops.
 
 ## Quick Start
 
@@ -112,7 +130,7 @@ Show me what you would change and where. Do not change or save anything yet.
 If its formatting is unsupported, tell me why.
 ```
 
-Check the target and proposed text before asking the AI to apply it. See the [tool catalog](docs/tools.en.md) for other tasks and tool identifiers.
+Check the target and proposed text before asking the AI to apply it. See [Usage and examples](docs/usage.en.md) for requests that replace several text frames or photos, and the [tool catalog](docs/tools.en.md) for other tasks and tool identifiers.
 
 ## Verification and limitations
 
@@ -135,8 +153,10 @@ If a response stops, do not bypass it by sending the edit as a new request or de
 
 | 文書 / Document | 日本語 | English |
 | --- | --- | --- |
+| 使い方・依頼例 / Usage | [日本語](docs/usage.md) | [English](docs/usage.en.md) |
 | 導入 / Installation | [日本語](docs/install.md) | [English](docs/install.en.md) |
 | 接続・診断 / Setup | [日本語](docs/setup.md) | [English](docs/setup.en.md) |
+| 安全の仕組み / Safety | [日本語](docs/safety.md) | [English](docs/safety.en.md) |
 | 復旧 / Recovery | [日本語](docs/runbook.md) | [English](docs/runbook.en.md) |
 | 互換性 / Compatibility | [日本語](docs/compatibility.md) | [English](docs/compatibility.en.md) |
 | ツール / Tools | [日本語](docs/tools.md) | [English](docs/tools.en.md) |

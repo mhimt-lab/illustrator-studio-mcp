@@ -2,6 +2,8 @@
 
 [日本語](runbook.md) | **English**
 
+For the change flow, retries, and backup conditions in detail, see [Safety](safety.en.md).
+
 ## Stopped before making a change
 
 If an operation is refused because the target changed, is locked, or has unsupported formatting, do not force the change. Read the current target again and review a new plan. Do not reuse the old plan unchanged.
