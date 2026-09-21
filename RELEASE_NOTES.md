@@ -1,12 +1,8 @@
-# Changelog
+# Public Beta 0.1.0-beta.1
 
-**日本語** | [English](CHANGELOG.en.md)
+**日本語** | [English](RELEASE_NOTES.en.md)
 
-日付は JST（Asia/Tokyo）です。
-
-## [0.1.0-beta.1] - 2026-09-22
-
-**日本語** | [English](https://github.com/mhimt-lab/illustrator-studio-mcp/blob/main/RELEASE_NOTES.en.md)
+公開日: 2026-09-22 JST（Asia/Tokyo）。
 
 Mac上の通常版Illustratorを、AIアプリから計画・直前照合・適用・結果の読み直しの順で操作する初回Betaです。本番運用向けの完成版ではありません。
 

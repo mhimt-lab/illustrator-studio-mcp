@@ -1,5 +1,7 @@
 # Illustrator Studio MCP
 
+[![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg) ![Node.js >=20](https://img.shields.io/badge/node-%3E%3D20-339933.svg) ![MCP: 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-blue.svg) ![Status: beta](https://img.shields.io/badge/status-beta-orange.svg) [![npm beta version](https://img.shields.io/npm/v/illustrator-studio-mcp/beta)](https://www.npmjs.com/package/illustrator-studio-mcp)
+
 **Public Beta — 0.1.0-beta.1.** A trial release, not production-ready. Try it on a copy of your artwork.
 
 > **Requirement: keep Illustrator in the foreground with the screen unlocked.** Continuous editing of saved files (edit sessions), export, and many other operations are verified only in this state. In the background or with the screen locked, operations are refused or fail with an unclear reason.
@@ -52,7 +54,7 @@ Other work includes creating shapes and text, adjusting supported text formattin
 
 Editing operations separate planning from applying. Opening, saving, and backing up a document use different call patterns. Review what your AI app proposes to execute before proceeding.
 
-**“Verified” means the values checked by that operation matched the plan.** It does not guarantee complete document restoration, every appearance effect, visual quality, or print readiness. Inspect the result in Illustrator. See [Safety and recovery (Japanese)](docs/runbook.md).
+**“Verified” means the values checked by that operation matched the plan.** It does not guarantee complete document restoration, every appearance effect, visual quality, or print readiness. Inspect the result in Illustrator. See [Safety and recovery](docs/runbook.en.md).
 
 ## Quick Start
 
@@ -89,7 +91,7 @@ Open a test document in stable Illustrator, bring it to the foreground, and unlo
 illustrator-studio-mcp doctor
 ```
 
-This does not edit the document. If macOS asks permission to control Illustrator, review and allow the request. Skipped or unknown checks do not establish a working connection; see [the diagnostic guide (Japanese)](docs/setup.md#doctor).
+This does not edit the document. If macOS asks permission to control Illustrator, review and allow the request. Skipped or unknown checks do not establish a working connection; see [the diagnostic guide](docs/setup.en.md#doctor).
 
 In your AI app's conversation, enter this. You do not need to write code or know tool names:
 
@@ -127,11 +129,26 @@ These are bounded tests through a dedicated connection program. They do not esta
 | Character-style restoration | An incorrect restoration result was corrected. Forcing a failure through the actual tool and completing live rollback remains unverified |
 | Unsupported work | Path text, paragraph-style mutation, ungrouping, missing-link repair, and outlining in the original document, among other limits |
 
-If a response stops, do not bypass it by sending the edit as a new request or deleting execution records. See [client verification](docs/compatibility.en.md) and [recovery steps (Japanese)](docs/runbook.md).
+If a response stops, do not bypass it by sending the edit as a new request or deleting execution records. See [client verification](docs/compatibility.en.md) and [recovery steps](docs/runbook.en.md).
 
 ## Documentation
 
-See [Install](docs/install.en.md), [connection settings (Japanese)](docs/setup.md), and [recovery steps (Japanese)](docs/runbook.md). See the contact below. Do not post vulnerabilities or private materials in ordinary Issues.
+| 文書 / Document | 日本語 | English |
+| --- | --- | --- |
+| 導入 / Installation | [日本語](docs/install.md) | [English](docs/install.en.md) |
+| 接続・診断 / Setup | [日本語](docs/setup.md) | [English](docs/setup.en.md) |
+| 復旧 / Recovery | [日本語](docs/runbook.md) | [English](docs/runbook.en.md) |
+| 互換性 / Compatibility | [日本語](docs/compatibility.md) | [English](docs/compatibility.en.md) |
+| ツール / Tools | [日本語](docs/tools.md) | [English](docs/tools.en.md) |
+| 変更履歴 / Changelog | [日本語](CHANGELOG.md) | [English](CHANGELOG.en.md) |
+| リリースノート / Release notes | [日本語](RELEASE_NOTES.md) | [English](RELEASE_NOTES.en.md) |
+| セキュリティ / Security | [日本語](SECURITY.ja.md) | [English](SECURITY.md) |
+| サポート / Support | [日本語](SUPPORT.ja.md) | [English](SUPPORT.md) |
+| 行動規範 / Conduct | [日本語](CODE_OF_CONDUCT.ja.md) | [English](CODE_OF_CONDUCT.md) |
+| 貢献 / Contributing | [日本語](CONTRIBUTING.md) | [English](CONTRIBUTING.en.md) |
+| ライセンス / License | [日本語](LICENSE.ja.md) | [English](LICENSE.en.md) |
+
+See [Install](docs/install.en.md), [connection settings](docs/setup.en.md), and [recovery steps](docs/runbook.en.md). See the contact below. Do not post vulnerabilities or private materials in ordinary Issues.
 
 ## License
 

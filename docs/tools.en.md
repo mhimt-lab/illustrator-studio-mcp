@@ -2,7 +2,7 @@
 
 [日本語](tools.md) | **English**
 
-This is the complete tool-name catalog for Public Beta 0.1.0-beta.1: 82 tools discovered from the installed package. It lists availability, not live verification of every input. Ask your AI app for the current input schema; do not guess argument names. See [verified scope](compatibility.en.md), [installation](install.en.md), and [recovery (Japanese)](runbook.md).
+This is the complete tool-name catalog for Public Beta 0.1.0-beta.1: 82 tools discovered from the installed package. It lists availability, not live verification of every input. Ask your AI app for the current input schema; do not guess argument names. See [verified scope](compatibility.en.md), [installation](install.en.md), and [recovery](runbook.en.md).
 
 Keep stable Illustrator in the foreground and the screen unlocked. Sessions cover 36 of 39 editing operations; delete, embed, and vector import are excluded. Backup and the effective session ceiling are 1,000 items, extrapolated from a 600-item run. PNG/JPEG/SVG export, artboards, paragraph styles, ungrouping, missing-link repair, and Windows remain outside Beta scope. A preview capture is not a general export tool. Deleting one object requires its explicit backup and confirmation contract.
 

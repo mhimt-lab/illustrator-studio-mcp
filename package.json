@@ -32,6 +32,15 @@
     "SUPPORT.md",
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",
+    "CHANGELOG.en.md",
+    "RELEASE_NOTES.md",
+    "RELEASE_NOTES.en.md",
+    "LICENSE.ja.md",
+    "LICENSE.en.md",
+    "SECURITY.ja.md",
+    "SUPPORT.ja.md",
+    "CONTRIBUTING.en.md",
+    "CODE_OF_CONDUCT.ja.md",
     "npm-shrinkwrap.json"
   ],
   "publishConfig": {

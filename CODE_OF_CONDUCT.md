@@ -1,5 +1,7 @@
 # Code of conduct
 
+[日本語](CODE_OF_CONDUCT.ja.md) | **English**
+
 Discuss the work respectfully. Critique code and ideas, not people. Harassment, threats, discriminatory abuse, and sharing another person's private information are not acceptable.
 
 Use synthetic examples and share only material you have permission to disclose. Keep customer artwork, credentials, licensed fonts, and private execution records out of public discussions.

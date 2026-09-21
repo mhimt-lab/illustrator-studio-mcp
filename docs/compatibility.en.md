@@ -9,7 +9,7 @@
 | Client | Connection | Checks on this exact distribution | Status |
 | --- | --- | --- | --- |
 | Claude Code 2.1.278 | stdio | Install, registration, discovery, doctor, reads, backup, rectangle plan/apply/verification, save, reopen, independent read-back | Beta client |
-| Claude Desktop 2.2553.1 | stdio, configuration file | Registration, discovery, reads, backup, rectangle plan/apply/verification, save, reopen, read-back. Desktop-issued doctor and new failure-path checks were not performed | Beta client; no `.mcpb` in beta.1. Desktop's built-in Node cannot launch the Illustrator helper |
+| Claude Desktop 2.2553.1 | stdio, configuration file | Registration, discovery, reads, backup, rectangle plan/apply/verification, save, reopen, read-back. Desktop-issued doctor and new failure-path checks were not performed | Beta client; no `.mcpb` in beta.1. Desktop's built-in Node cannot launch the Illustrator helper; the extension is planned for the next Beta |
 | Codex CLI 0.155.1 | stdio | Connection, approval, discovery, reads, initial save, and verified backup. The final seven calls completed without refusal. Editing plan/apply and subsequent save/reopen, and client-issued doctor, remain unverified | Partial; further Beta verification |
 | ChatGPT Work Local | Local stdio | User-operated backup, rectangle apply/read-back, save and reopen, after correcting state-directory permissions and an invalid command_id following explicit user instruction | Experimental; additional verification, separate from the required Beta client evidence |
 | ChatGPT Work Cloud | Remote MCP | Not run | Verification deferred until after Beta |
@@ -36,4 +36,4 @@ HTTP is restricted to `127.0.0.1`. Tokens need at least 32 characters; only expl
 
 ## Beta and Stable
 
-Beta is for trials within measured conditions and known limits. Stable requires separate acceptance for sustained use, recovery, updates, record retention, performance, and support. Built JavaScript is shipped without post-processing. Replaying unresolved commands from an older version is not guaranteed safe. See [recovery (Japanese)](runbook.md).
+Beta is for trials within measured conditions and known limits. Stable requires separate acceptance for sustained use, recovery, updates, record retention, performance, and support. Built JavaScript is shipped without post-processing. Replaying unresolved commands from an older version is not guaranteed safe. See [recovery](runbook.en.md).

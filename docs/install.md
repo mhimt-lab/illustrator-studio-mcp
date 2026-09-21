@@ -124,3 +124,5 @@ ILLUSTRATOR_APPLICATION = "id:com.adobe.illustrator"
 GitHubのmain上の案内は公開後にも訂正されます。npmに公開済みの0.1.0-beta.1のREADMEとtgzは、この文書修正では変わりません。最新の案内は[公開README](../README.md)を参照してください。
 
 設定形式の出典: [Claude Code](https://code.claude.com/docs/en/mcp)、[Claude DesktopのローカルMCP](https://modelcontextprotocol.io/docs/develop/connect-local-servers)、[Codex MCP](https://learn.chatgpt.com/docs/extend/mcp)、[npm exec / npx](https://docs.npmjs.com/cli/v11/commands/npm-exec/)。接続例の仕様と実機確認範囲は別です。
+
+公開済みnpm 0.1.0-beta.1のtgz内のCHANGELOGは差し替えできません。収録済みの日付はそのままで、GitHub上の公開日は2026-09-22 JST（Asia/Tokyo）に訂正しています。

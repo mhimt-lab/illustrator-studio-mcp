@@ -1,5 +1,7 @@
 # Illustrator Studio MCP
 
+[![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg) ![Node.js >=20](https://img.shields.io/badge/node-%3E%3D20-339933.svg) ![MCP: 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-blue.svg) ![Status: beta](https://img.shields.io/badge/status-beta-orange.svg) [![npm beta version](https://img.shields.io/npm/v/illustrator-studio-mcp/beta)](https://www.npmjs.com/package/illustrator-studio-mcp)
+
 **Public Beta — 0.1.0-beta.1。** 試用版です。本番運用向けの完成版ではありません。制作ファイルのコピーで試してください。
 
 > **前提: Illustratorを前面に表示し、画面ロックを解除した状態で使ってください。** 保存済みファイルの連続編集（edit session）や書き出しなど多くの操作は、この状態でだけ動作を確認しています。背面で動かしたり画面をロックしたりすると、操作が拒否されるか、理由の分かりにくい失敗になります。
@@ -130,6 +132,21 @@ Illustratorで開いている書類と、いま選択している文字や図形
 応答が止まったときは、同じ変更を別の依頼として送り直したり、実行記録を削除したりしないでください。[アプリ別の確認状況](docs/compatibility.md)と[復旧手順](docs/runbook.md)を参照してください。
 
 ## 詳しい案内
+
+| 文書 / Document | 日本語 | English |
+| --- | --- | --- |
+| 導入 / Installation | [日本語](docs/install.md) | [English](docs/install.en.md) |
+| 接続・診断 / Setup | [日本語](docs/setup.md) | [English](docs/setup.en.md) |
+| 復旧 / Recovery | [日本語](docs/runbook.md) | [English](docs/runbook.en.md) |
+| 互換性 / Compatibility | [日本語](docs/compatibility.md) | [English](docs/compatibility.en.md) |
+| ツール / Tools | [日本語](docs/tools.md) | [English](docs/tools.en.md) |
+| 変更履歴 / Changelog | [日本語](CHANGELOG.md) | [English](CHANGELOG.en.md) |
+| リリースノート / Release notes | [日本語](RELEASE_NOTES.md) | [English](RELEASE_NOTES.en.md) |
+| セキュリティ / Security | [日本語](SECURITY.ja.md) | [English](SECURITY.md) |
+| サポート / Support | [日本語](SUPPORT.ja.md) | [English](SUPPORT.md) |
+| 行動規範 / Conduct | [日本語](CODE_OF_CONDUCT.ja.md) | [English](CODE_OF_CONDUCT.md) |
+| 貢献 / Contributing | [日本語](CONTRIBUTING.md) | [English](CONTRIBUTING.en.md) |
+| ライセンス / License | [日本語](LICENSE.ja.md) | [English](LICENSE.en.md) |
 
 [導入手順](docs/install.md)、[接続・診断設定](docs/setup.md)、[復旧手順](docs/runbook.md)を参照してください。連絡先は下記に記載しています。脆弱性や私的な資料を通常のIssueへ投稿しないでください。
 
