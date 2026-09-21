@@ -1,6 +1,6 @@
 # Setup / 接続と診断
 
-まず[導入手順](install.md)で配布用tgzを入れます。配布用snapshotはビルド済みで、開発用テストの実行は必要ありません。
+まず[導入手順](install.md)でnpmの`@beta`または配布用tgzから入れます。配布用snapshotはビルド済みで、開発用テストの実行は必要ありません。
 
 ## Stable Illustrator
 

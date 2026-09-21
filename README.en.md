@@ -13,7 +13,9 @@ Ask a compatible AI app such as Claude Code to replace a headline, align shapes,
 
 The tool identifies what will change, checks the target again immediately before writing, and reads the result back from Illustrator. If a response is lost and the outcome is unclear, it stops further edits.
 
-**Public Beta 0.1.0-beta.1. Mac only.** Distributed through the npm `beta` tag and a GitHub prerelease.
+**Public Beta 0.1.0-beta.1. Mac only.** Distributed through the [npm `beta` tag](https://www.npmjs.com/package/illustrator-studio-mcp) and a [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.1).
+
+[82 MCP tools](docs/tools.en.md) · [Verified per operation on Illustrator 30.8.x](docs/compatibility.en.md)
 
 [What you can do](#what-you-can-do) · [Beta scope](#beta-scope) · [Try it](#quick-start) · [How changes are checked](#how-changes-are-checked) · [Verification and limitations](#verification-and-limitations)
 
@@ -38,7 +40,7 @@ Other work includes creating shapes and text, adjusting supported text formattin
 | Streamable HTTP | Covered by automated tests and client connection checks only. No Illustrator operation over HTTP has been recorded. Loopback (`127.0.0.1`) only; not for external exposure |
 | CMYK documents | Stacking-order changes support bring-to-front (`front`) only. Creating compound paths is not supported (refused) |
 | Known intermittent issue | Reading groups can intermittently lose the reference to an item. The operation then stops on the safe side (fails closed) instead of guessing. It is not hidden by retries, and restarting Illustrator is not guaranteed to fix it |
-| CI | Automated tests on GitHub Actions have not passed for this release (the full suite was run locally). They are planned to pass on a self-hosted runner |
+| CI | Automated tests on GitHub Actions have not passed for this release (the full suite was run locally). This describes the frozen distribution, separately from later CI results |
 
 ## How changes are checked
 
@@ -50,7 +52,7 @@ Other work includes creating shapes and text, adjusting supported text formattin
 
 Editing operations separate planning from applying. Opening, saving, and backing up a document use different call patterns. Review what your AI app proposes to execute before proceeding.
 
-**“Verified” means the values checked by that operation matched the plan.** It does not guarantee complete document restoration, every appearance effect, visual quality, or print readiness. Inspect the result in Illustrator. See [Safety and recovery](#verification-and-limitations).
+**“Verified” means the values checked by that operation matched the plan.** It does not guarantee complete document restoration, every appearance effect, visual quality, or print readiness. Inspect the result in Illustrator. See [Safety and recovery (Japanese)](docs/runbook.md).
 
 ## Quick Start
 
@@ -65,17 +67,19 @@ npm install -g illustrator-studio-mcp@beta
 illustrator-studio-mcp --version
 ```
 
-The second command should print `0.1.0-beta.1`. You can also install from the distribution file (`.tgz`) attached to the GitHub prerelease. For updating and uninstalling, see [Install](docs/install.md). The one-click Claude Desktop extension (`.mcpb`) is planned for the next Beta. This version has a known issue: under Desktop's built-in Node it cannot start the helper process that drives Illustrator, so connect Claude Desktop through its configuration file.
+The second command should print `0.1.0-beta.1`. You can also install from the distribution file (`.tgz`) attached to the GitHub prerelease. For updating and uninstalling, see [Install](docs/install.en.md). The one-click Claude Desktop extension (`.mcpb`) is planned for the next Beta. This version has a known issue: under Desktop's built-in Node it cannot start the helper process that drives Illustrator, so connect Claude Desktop through its configuration file.
 
 ### 2. Connect your AI app
 
 For Claude Code, run this in Terminal, then restart the app:
 
 ```bash
-claude mcp add illustrator-studio -- illustrator-studio-mcp
+claude mcp add --transport stdio illustrator-studio -- illustrator-studio-mcp
 ```
 
-Other AI apps use different settings. See [connection examples](docs/install.md#register-the-installed-command). A successful connection test is separate from completing production work through that app.
+To launch without a global install, use `npx -y illustrator-studio-mcp@beta`. Your AI app launches this command and connects over stdio. `@beta` follows future Beta updates; use `@0.1.0-beta.1` to pin this version.
+
+Other AI apps use different settings. See [connection examples](docs/install.en.md#register-the-installed-command). A successful connection test is separate from completing production work through that app.
 
 ### 3. Start without changing a document
 
@@ -85,7 +89,7 @@ Open a test document in stable Illustrator, bring it to the foreground, and unlo
 illustrator-studio-mcp doctor
 ```
 
-This does not edit the document. If macOS asks permission to control Illustrator, review and allow the request. Skipped or unknown checks do not establish a working connection; see [the diagnostic guide](docs/setup.md#doctor).
+This does not edit the document. If macOS asks permission to control Illustrator, review and allow the request. Skipped or unknown checks do not establish a working connection; see [the diagnostic guide (Japanese)](docs/setup.md#doctor).
 
 In your AI app's conversation, enter this. You do not need to write code or know tool names:
 
@@ -106,13 +110,13 @@ Show me what you would change and where. Do not change or save anything yet.
 If its formatting is unsupported, tell me why.
 ```
 
-Check the target and proposed text before asking the AI to apply it. See [Usage and examples](#verification-and-limitations) for more requests.
+Check the target and proposed text before asking the AI to apply it. See the [tool catalog](docs/tools.en.md) for other tasks and tool identifiers.
 
 ## Verification and limitations
 
 Recent live checks used macOS 27.0 and stable Illustrator 30.8.1, foreground and unlocked. RGB and CMYK test documents each completed 103 consecutive changes and 108 total changes including recovery checks. There are 45 major execution records, supplemented by new measurements for operations whose code subsequently changed.
 
-These are bounded tests through a dedicated connection program. They do not establish arbitrary artwork support, every AI app, or long-running production use. Do not extend the results to Beta, background operation, or a locked screen.
+These are bounded tests through a dedicated connection program. They do not establish arbitrary artwork support, every AI app, or long-running production use. Do not extend the results to Illustrator Beta, background operation, or a locked screen.
 
 | Limitation | Current state |
 | --- | --- |
@@ -123,15 +127,15 @@ These are bounded tests through a dedicated connection program. They do not esta
 | Character-style restoration | An incorrect restoration result was corrected. Forcing a failure through the actual tool and completing live rollback remains unverified |
 | Unsupported work | Path text, paragraph-style mutation, ungrouping, missing-link repair, and outlining in the original document, among other limits |
 
-If a response stops, do not bypass it by sending the edit as a new request or deleting execution records. See [detailed verification and known limits](#verification-and-limitations).
+If a response stops, do not bypass it by sending the edit as a new request or deleting execution records. See [client verification](docs/compatibility.en.md) and [recovery steps (Japanese)](docs/runbook.md).
 
 ## Documentation
 
-See [Install](docs/install.md) and [connection and recovery settings](docs/setup.md). See the contact below; receipt and handling remain unverified. Do not post vulnerabilities or private materials in ordinary Issues.
+See [Install](docs/install.en.md), [connection settings (Japanese)](docs/setup.md), and [recovery steps (Japanese)](docs/runbook.md). See the contact below. Do not post vulnerabilities or private materials in ordinary Issues.
 
 ## License
 
-[Business Source License 1.1](LICENSE). The Additional Use Grant permits ordinary internal business use and design services where clients receive creative outputs. Providing a Competitive Offering to third parties is restricted. This is not an OSI-approved open source license. Read the [license summary](#verification-and-limitations) and the full LICENSE.
+[Business Source License 1.1](LICENSE). The Additional Use Grant permits ordinary internal business use and design services where clients receive creative outputs. Providing a Competitive Offering to third parties is restricted. This is not an OSI-approved open source license. Read the full [LICENSE](LICENSE) for its terms.
 
 <details>
 <summary>Connection reference: tool identifiers (not needed for everyday requests)</summary>
@@ -142,8 +146,8 @@ See [Install](docs/install.md) and [connection and recovery settings](docs/setup
 
 ## Contact
 
-The approved maintainer identity is **mhimt**, with contact [sporks-framer9t@icloud.com](mailto:sporks-framer9t@icloud.com). Receipt and handling have not yet been tested. Keep vulnerabilities and private materials out of ordinary Issues; send only a redacted initial summary by email.
+The approved maintainer identity is **mhimt**, with contact [sporks-framer9t@icloud.com](mailto:sporks-framer9t@icloud.com). Receipt of a test email has been confirmed. Handling procedures remain unverified, with no guaranteed response time. Keep vulnerabilities and private materials out of ordinary Issues; use [private vulnerability reporting](https://github.com/mhimt-lab/illustrator-studio-mcp/security/advisories/new), or send a redacted initial summary by email.
 
 ## Clients and transports
 
-The first Beta is published only after this exact package was installed and checked in Claude Code and Claude Desktop, from installation through save, reopen, and read-back. In Codex CLI, connection, approval, discovery, reads, save, and a backup of the unchanged document were checked; edits (plan and apply) and later steps are not verified. During that check the model guessed argument names and the server's input validation refused the call. Other apps (such as ChatGPT Work) are experimental. [Client-specific and transport evidence](docs/compatibility.md) are tracked separately. Configuration examples do not establish support.
+The first Beta is published only after this exact package was installed and checked in Claude Code and Claude Desktop, from installation through save, reopen, and read-back. In Codex CLI, connection, approval, discovery, reads, save, and a backup of the unchanged document were checked; edits (plan and apply) and later steps are not verified. ChatGPT Work remains experimental and under additional verification. A user manually completed a Local save/reopen check after an input refusal and a user-directed correction; it is separate from the required initial Beta client checks. Cloud remains unverified. [Client-specific and transport evidence](docs/compatibility.en.md) are tracked separately. Configuration examples do not establish support.

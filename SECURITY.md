@@ -1,6 +1,6 @@
 # Security
 
-脆弱性・認証情報・顧客情報を通常のIssueやPRへ投稿しないでください。管理者 **mhimt** の非公開連絡先は [sporks-framer9t@icloud.com](mailto:sporks-framer9t@icloud.com) です。最初は機密情報を除いた概要だけを送ってください。受信・対応手順の検証は未完で、応答時間の保証はありません。
+脆弱性・認証情報・顧客情報を通常のIssueやPRへ投稿しないでください。管理者 **mhimt** の非公開連絡先は [sporks-framer9t@icloud.com](mailto:sporks-framer9t@icloud.com) です。最初は機密情報を除いた概要だけを送ってください。テストメールの受信は確認済みです。対応手順の検証は未完で、応答時間の保証はありません。[GitHubの非公開報告](https://github.com/mhimt-lab/illustrator-studio-mcp/security/advisories/new)も有効です。
 
 対象はPublic Beta 0.1.0-beta.1です。Stable版や保守期間の保証はありません。版・checksum・OS・Illustrator・AIアプリの版と、合成データでの再現方法を記載してください。
 
