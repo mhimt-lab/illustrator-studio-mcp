@@ -6,9 +6,9 @@ Fewer repetitive edits. More time to refine your design.
 
 Replace a headline. Swap a photo. Line up a set of shapes. Ask AI to handle everyday Illustrator tasks in the language you already use to describe your work. You set the creative direction and share the hands-on work with AI.
 
-For setup, see the [README Quick Start](../README.en.md#quick-start).
+For setup, see the [README section “AI apps and how to start”](../README.en.md#ai-apps-and-how-to-start).
 
-> **Public Beta 0.1.0-beta.4.** A trial release. Try it on a copy of your artwork. Keep Illustrator in the foreground with the screen unlocked. For what is covered, see [Beta scope](../README.en.md#beta-scope).
+> **Public Beta 0.1.0-beta.4.** A trial release. Try it on a copy of your artwork. Keep Illustrator in the foreground with the screen unlocked. For what is covered, see [Beta scope](compatibility.en.md#beta-scope).
 
 ## Try it without changing your artwork
 
@@ -68,6 +68,31 @@ I want a circle and a star as decorative elements in the open document. Confirm 
 ```
 
 *These are example requests. The AI inspects the artwork and checks whether its text, shapes, and images are supported before proceeding. Unsupported targets are rejected before writing.*
+
+## Everything you can ask for
+
+| A request from your workflow | Supported work and conditions |
+| --- | --- |
+| “Replace this headline.” | Replace supported single-line point text directly on a layer, preserving the supported formatting |
+| “Space these shapes evenly.” | Align, distribute, and reorder supported paths |
+| “Move this group of text and photos together.” | Check and translate supported text, paths, and linked images inside a group. Group scaling and rotation are excluded |
+| “Swap this photo for the latest version.” | Relink an image with identical pixel dimensions, checking position, size, and stacking order |
+| “Check the fonts and anything that needs attention before print.” | Read fonts, image links, resolution, and other supported properties, reporting incomplete checks too |
+
+Supported functions by type of work:
+
+| Work | Summary of functions |
+| --- | --- |
+| Inspect | Read documents, layers, selections, text, images, and colors |
+| Refine text | Create point and area text; targeted replacement, fonts, formatting, text orientation, and columns |
+| Create and arrange | Create shapes and curves; edit paths; move, align, duplicate, and group; conditional clipping masks, compound paths, and Pathfinder (in CMYK documents, compound-path creation is unsupported and stacking-order changes support bring-to-front only) |
+| Work with color | Path fill and stroke; RGB/CMYK process swatches; spot colors and gradients in RGB documents; color search and replacement planning |
+| Work with images | Place and relink linked images; embedding (JPEG/PNG in RGB documents only); downsampling on a working copy |
+| Documents and layers | Edit layers; create, open, close, and save documents; continuous editing of saved files (experimental) |
+| Batch work | Batch replacement, multiple edits in one request, and planning and running saved recipes |
+| Check and recover | Print preflight, structure diffs, previews, comparison of existing PNGs, verified backups, outlined export to new AI/PDF files, and reconciliation after unknown outcomes |
+
+Conditions differ by operation: see [Verification and limitations](compatibility.en.md#verification-and-limitations) and the [tool catalog](tools.en.md). The number of available functions does not mean every input or environment has been verified. For example requests, see [Requests to copy and try](#requests-to-copy-and-try).
 
 ## Get more from your setup
 

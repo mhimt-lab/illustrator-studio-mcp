@@ -6,6 +6,18 @@ Illustrator Studio MCP checks the change, not just the command. Planning the edi
 
 > **Public Beta 0.1.0-beta.4.** A trial release. Try it on a copy of your artwork. Illustrator must be in the foreground with the screen unlocked. In the background or with the screen locked, operations are refused or fail with an unclear reason.
 
+## Five steps that check each change
+
+1. **Plan** — Identify the document, objects, and proposed edits.
+2. **Check immediately before writing** — Confirm that the target still matches the plan.
+3. **Apply** — Perform the approved change and retain an execution record to prevent duplicate application.
+4. **Verify** — Read text, positions, colors, and other relevant values back from Illustrator and compare them with the plan.
+5. **Reconcile or recover when needed** — Follow the operation's state-checking or restoration procedure. Stop when the outcome is unknown; do not guess that recovery succeeded.
+
+Editing operations separate planning from applying. Opening, saving, and backing up a document use different call patterns. Review what your AI app proposes to execute before proceeding.
+
+**“Verified” means the values checked by that operation matched the plan.** It does not guarantee complete document restoration, every appearance effect, visual quality, or print readiness. Inspect the result in Illustrator. See the [recovery steps](runbook.en.md) if an operation stops.
+
 ## What to know before editing
 
 - Review the target and plan before asking for an edit. The server checks them again immediately before writing.

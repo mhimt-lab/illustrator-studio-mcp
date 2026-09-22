@@ -2,127 +2,83 @@
 
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg) ![Node.js >=20](https://img.shields.io/badge/node-%3E%3D20-339933.svg) ![MCP: 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-blue.svg) ![Status: beta](https://img.shields.io/badge/status-beta-orange.svg) [![npm beta version](https://img.shields.io/npm/v/illustrator-studio-mcp/beta)](https://www.npmjs.com/package/illustrator-studio-mcp)
 
-**Public Beta — 0.1.0-beta.4.** A trial release, not production-ready. Try it on a copy of your artwork.
-
-> **Requirement: keep Illustrator in the foreground with the screen unlocked.** Continuous editing of saved files (edit sessions), export, and many other operations are verified only in this state. In the background or with the screen locked, operations are refused or fail with an unclear reason.
-
-
 [日本語](README.md) | **English**
 
-**Plan, apply, and check Illustrator work with an AI assistant.**
+**Ask an AI assistant to do your Illustrator work, in plain words.**
 
-Ask a compatible AI app such as Claude Code to replace a headline, align shapes, or swap a photo. MCP is the connection between that app and Illustrator.
+For example:
 
-The tool identifies what will change, checks the target again immediately before writing, and reads the result back from Illustrator. If a response is lost and the outcome is unclear, it stops further edits.
+- “Change the selected headline to ‘Weekend Special’. Keep its size and color.”
+- “Space these three shapes evenly in a row.”
+- “Swap this photo for the latest version. Keep its position and size.”
 
-**Public Beta 0.1.0-beta.4. Mac only.** Distributed through the [npm `beta` tag](https://www.npmjs.com/package/illustrator-studio-mcp) and a [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.4).
+Before changing anything, it shows what will change and where. Afterwards, it reads the result back from Illustrator to check it. This is a Public Beta (0.1.0-beta.4).
 
-[84 MCP tools](docs/tools.en.md) · [Verified per operation on Illustrator 30.8.x](docs/compatibility.en.md)
+[84 functions](docs/tools.en.md) · [Checked operation by operation on Illustrator 2026 (30.8)](docs/compatibility.en.md) · Works with Claude Desktop, ChatGPT, Claude Code, and Codex CLI
 
-[What you can do](#what-you-can-do) · [Beta scope](#beta-scope) · [Try it](#quick-start) · [How changes are checked](#how-changes-are-checked) · [Verification and limitations](#verification-and-limitations)
+## AI apps and how to start
 
-<picture>
-  <source media="(max-width: 600px)" srcset="docs/images/readme-workflow-en-mobile.svg">
-  <img src="docs/images/readme-workflow-en.svg" alt="Workflow: describe the change, review the plan, then apply it and read the result back from Illustrator. An illustration, not an application screenshot.">
-</picture>
+### Claude Desktop (easiest, no Node.js needed)
 
-## What you can do
+1. [Download illustrator-studio-mcp-0.1.0-beta.4.mcpb](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.4/illustrator-studio-mcp-0.1.0-beta.4.mcpb), double-click it, then click Install.
+2. Check that the extension is enabled, then start using it in a new chat.
 
-| A request from your workflow | Supported work and conditions |
-| --- | --- |
-| “Replace this headline.” | Replace supported single-line point text directly on a layer, preserving the supported formatting |
-| “Space these shapes evenly.” | Align, distribute, and reorder supported paths |
-| “Move this group of text and photos together.” | Check and translate supported text, paths, and linked images inside a group. Group scaling and rotation are excluded |
-| “Swap this photo for the latest version.” | Relink an image with identical pixel dimensions, checking position, size, and stacking order |
-| “Check the fonts and anything that needs attention before print.” | Read fonts, image links, resolution, and other supported properties, reporting incomplete checks too |
+To check the downloaded file, compare it with `SHA256SUMS` on the [GitHub release page](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.4) (steps in [Install](docs/install.en.md#desktop-extension-mcpb-main-method)).
 
-Supported functions by type of work:
+### ChatGPT
 
-| Work | Summary of functions |
-| --- | --- |
-| Inspect | Read documents, layers, selections, text, images, and colors |
-| Refine text | Create point and area text; targeted replacement, fonts, formatting, text orientation, and columns |
-| Create and arrange | Create shapes and curves; edit paths; move, align, duplicate, and group; conditional clipping masks, compound paths, and Pathfinder (in CMYK documents, compound-path creation is unsupported and stacking-order changes support bring-to-front only) |
-| Work with color | Path fill and stroke; RGB/CMYK process swatches; spot colors and gradients in RGB documents; color search and replacement planning |
-| Work with images | Place and relink linked images; embedding (JPEG/PNG in RGB documents only); downsampling on a working copy |
-| Documents and layers | Edit layers; create, open, close, and save documents; continuous editing of saved files (experimental) |
-| Batch work | Batch replacement, multiple edits in one request, and planning and running saved recipes |
-| Check and recover | Print preflight, structure diffs, previews, comparison of existing PNGs, verified backups, outlined export to new AI/PDF files, and reconciliation after unknown outcomes |
+You need: Node.js 20 or newer (install it with the installer from the [official website](https://nodejs.org/))
 
-Conditions differ by operation: see [Verification and limitations](#verification-and-limitations) and the [tool catalog](docs/tools.en.md). The number of available functions does not mean every input or environment has been verified. For example requests, see [Usage and examples](docs/usage.en.md).
+1. In the ChatGPT sidebar, open Plugins, then choose Add (top right) → Add a marketplace.
+2. Enter `mhimt-lab/illustrator-studio-mcp` as the Source and `v0.1.0-beta.4` as the Git ref, then click Add marketplace. The Git ref pins the version.
+3. On the same screen, search for "Illustrator" and click the "+" next to Illustrator Studio MCP. It is done when "plugin installed" appears.
+4. Choose Work at the top, check that the computer icon at the lower right of the message box is set to On your computer, then start using it in a new chat.
 
-## Beta scope
+To remove it, choose "…" → Uninstall on Illustrator Studio MCP under Plugins. Some ChatGPT models may fail without looking for the tools. If it does not work, try a more capable model. Running "In the cloud" is not supported.
 
-| Area | Details |
-| --- | --- |
-| In scope | Reading and inspection; non-destructive edits of supported shapes, text, and images (including CMYK documents); continuous editing of saved files (edit sessions, experimental); backup and overwrite save; outlined AI/PDF export; PNG/JPEG export of one artboard (RGB documents, scale 1 or 2, never overwriting an existing file); placing, relinking, embedding (JPEG/PNG in RGB documents only), and optimizing images; stdio transport (MCP 2026-07-28) |
-| Out of scope | SVG export, artboard removal and Web pixel profiles, paragraph styles, MCP Tasks, Windows, deleting several objects at once (one object per delete), missing-link repair, ungrouping |
-| Streamable HTTP | Covered by automated tests and client connection checks only. No Illustrator operation over HTTP has been recorded. Loopback (`127.0.0.1`) only; not for external exposure |
-| CMYK documents | Stacking-order changes support bring-to-front (`front`) only. Creating compound paths is not supported (refused) |
-| Known intermittent issue | Reading groups can intermittently lose the reference to an item. The operation then stops on the safe side (fails closed) instead of guessing. It is not hidden by retries, and restarting Illustrator is not guaranteed to fix it |
-| CI | The release candidate source passed the full test suite on macOS CI and locally. This describes the frozen distribution, separately from later CI results |
-
-## How changes are checked
-
-1. **Plan** — Identify the document, objects, and proposed edits.
-2. **Check immediately before writing** — Confirm that the target still matches the plan.
-3. **Apply** — Perform the approved change and retain an execution record to prevent duplicate application.
-4. **Verify** — Read text, positions, colors, and other relevant values back from Illustrator and compare them with the plan.
-5. **Reconcile or recover when needed** — Follow the operation's state-checking or restoration procedure. Stop when the outcome is unknown; do not guess that recovery succeeded.
-
-Editing operations separate planning from applying. Opening, saving, and backing up a document use different call patterns. Review what your AI app proposes to execute before proceeding.
-
-**“Verified” means the values checked by that operation matched the plan.** It does not guarantee complete document restoration, every appearance effect, visual quality, or print readiness. Inspect the result in Illustrator. See [Safety](docs/safety.en.md) for details, and the [recovery steps](docs/runbook.en.md) if an operation stops.
-
-## Quick Start
-
-### 1. Prepare your Mac
-
-You need a Mac, stable Adobe Illustrator, Node.js 20 or newer, and a compatible AI app that can launch local tools. Node.js runs this tool. The server needs no API key; your AI app's terms and fees are separate.
-
-In Terminal, run:
+If you are comfortable with Terminal, you can also add it with two Codex CLI commands (restart ChatGPT afterwards):
 
 ```bash
-npm install -g illustrator-studio-mcp@beta
-illustrator-studio-mcp --version
+codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.4
+codex plugin add illustrator-studio-mcp@illustrator-studio-mcp
 ```
 
-The second command should print `0.1.0-beta.4`. Always include `@beta`: a plain `npm install illustrator-studio-mcp` uses the `latest` tag, which may not be this version. You can also install from the distribution file (`.tgz`) attached to the GitHub prerelease. For updating and uninstalling, see [Install](docs/install.en.md). For Claude Desktop, you can open the Desktop extension (`.mcpb`) from the prerelease and install it; the npm install above is then not needed ([steps](docs/install.en.md#claude-desktop)).
+### Claude Code
 
-### 2. Connect your AI app
-
-For Claude Code, run this in Terminal, then restart the app:
+Requires Node.js 20 or newer. Run this in Terminal, then restart Claude Code:
 
 ```bash
-claude mcp add --transport stdio illustrator-studio -- illustrator-studio-mcp
+claude mcp add --transport stdio illustrator-studio -- npx -y illustrator-studio-mcp@beta
 ```
 
-To launch without a global install, use `npx -y illustrator-studio-mcp@beta`. Your AI app launches this command and connects over stdio. `@beta` follows future Beta updates; use `@0.1.0-beta.4` to pin this version.
+### Codex CLI
 
-Other AI apps (Claude Desktop, Codex CLI, ChatGPT Work Local) use different settings. See [connection examples](docs/install.en.md#register-the-installed-command). A successful connection test is separate from completing production work through that app.
-
-### 3. Start without changing a document
-
-Open a test document in stable Illustrator, bring it to the foreground, and unlock the screen. Check the required environment in Terminal:
+Requires Node.js 20 or newer. Run this in Terminal, then restart Codex CLI:
 
 ```bash
-illustrator-studio-mcp doctor
+codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@beta
 ```
 
-This does not edit the document. If macOS asks permission to control Illustrator, review and allow the request. Skipped or unknown checks do not establish a working connection; see [the diagnostic guide](docs/setup.en.md#doctor).
+For checking the download, updating, uninstalling, and other ways to register, see [Install](docs/install.en.md).
 
-In your AI app's conversation, enter this. You do not need to write code or know tool names:
+## Before you use it
+
+- **Mac only.** Use it with stable Adobe Illustrator (checked with Illustrator 2026, version 30.8).
+- **Keep Illustrator in the foreground and the screen unlocked.** In the background or with the screen locked, operations stop or fail with an unclear reason.
+- **Try it on a copy of your artwork first.** This is a trial release, not production-ready.
+
+## Your first requests
+
+Open a test document in Illustrator and start with a request that only looks. If macOS asks permission to control Illustrator, review and allow it.
 
 ```text
 Tell me which documents are open in Illustrator and which text or shapes are selected.
 Only look. Do not change, save, or export anything.
 ```
 
-Compare the answer with Illustrator. “No selection” is valid when nothing is selected.
+If the answer matches what you see in Illustrator, you are ready. “No selection” is correct when nothing is selected.
 
-### 4. Ask for a proposed edit
-
-Select one line of point text outside a group. Point text is created by clicking with the Type tool, rather than dragging a text box.
+Next, ask to see a proposed edit only. Select one line of text outside a group (text you created by clicking with the Type tool), then ask:
 
 ```text
 I'd like to change the selected headline to “Weekend Special”, keeping its size and color.
@@ -130,45 +86,25 @@ Show me what you would change and where. Do not change or save anything yet.
 If its formatting is unsupported, tell me why.
 ```
 
-Check the target and proposed text before asking the AI to apply it. See [Usage and examples](docs/usage.en.md) for requests that replace several text frames or photos, and the [tool catalog](docs/tools.en.md) for other tasks and tool identifiers.
+If the target and text are right, ask it to go ahead with that change. See [Usage and examples](docs/usage.en.md) for more requests.
 
-## Verification and limitations
+## How it keeps your work safe
 
-Recent live checks used macOS 27.0 and stable Illustrator 30.8.1, foreground and unlocked. RGB and CMYK test documents each completed 103 consecutive changes and 108 total changes including recovery checks. There are 45 major execution records, supplemented by new measurements for operations whose code subsequently changed.
+- Before changing anything, it shows the target and the proposed change. You check it before it is applied.
+- It checks the target again immediately before writing, and reads the result back from Illustrator afterwards. Check the final look and print readiness in Illustrator yourself.
+- If a response is lost and the outcome is unclear, it stops further edits instead of guessing.
 
-These are bounded tests through a dedicated connection program. They do not establish arbitrary artwork support, every AI app, or long-running production use. Do not extend the results to Illustrator Beta, background operation, or a locked screen.
+## More information
 
-| Limitation | Current state |
-| --- | --- |
-| Reading groups | Known intermittent issue: a group reference can become unreadable, and the operation then stops on the safe side (fails closed). The cause is unresolved; restarting Illustrator is not an established repair |
-| Long document identifiers | Long information identifying a document, including its path, can make a saved execution record unreadable. Replay and recovery are not guaranteed for arbitrary documents |
-| Continuous editing | With a verified backup and exclusive document use, 36 editing operations are supported. Delete, embed, vector import and artboard updates are excluded. The backup a session needs stops at 1,000 items (one 1,000-item live run took about 18.3 s), so that is the effective session ceiling. Performance, finished-record retention, and recovery usability remain unfinished |
-| Stroke after saving text | Newly created point text acquiring a stroke after save was corrected and rechecked in RGB/CMYK. Existing stroked text remains unsupported |
-| Character-style restoration | An incorrect restoration result was corrected. Forcing a failure through the actual tool and completing live rollback remains unverified |
-| Unsupported work | Path text, paragraph-style mutation, ungrouping, missing-link repair, and outlining in the original document, among other limits |
-
-If a response stops, do not bypass it by sending the edit as a new request or deleting execution records. See [client verification](docs/compatibility.en.md) and [recovery steps](docs/runbook.en.md).
-
-## Documentation
-
-| 文書 / Document | 日本語 | English |
-| --- | --- | --- |
-| 使い方・依頼例 / Usage | [日本語](docs/usage.md) | [English](docs/usage.en.md) |
-| 導入 / Installation | [日本語](docs/install.md) | [English](docs/install.en.md) |
-| 接続・診断 / Setup | [日本語](docs/setup.md) | [English](docs/setup.en.md) |
-| 安全の仕組み / Safety | [日本語](docs/safety.md) | [English](docs/safety.en.md) |
-| 復旧 / Recovery | [日本語](docs/runbook.md) | [English](docs/runbook.en.md) |
-| 互換性 / Compatibility | [日本語](docs/compatibility.md) | [English](docs/compatibility.en.md) |
-| ツール / Tools | [日本語](docs/tools.md) | [English](docs/tools.en.md) |
-| 変更履歴 / Changelog | [日本語](CHANGELOG.md) | [English](CHANGELOG.en.md) |
-| リリースノート / Release notes | [日本語](RELEASE_NOTES.md) | [English](RELEASE_NOTES.en.md) |
-| セキュリティ / Security | [日本語](SECURITY.ja.md) | [English](SECURITY.md) |
-| サポート / Support | [日本語](SUPPORT.ja.md) | [English](SUPPORT.md) |
-| 行動規範 / Conduct | [日本語](CODE_OF_CONDUCT.ja.md) | [English](CODE_OF_CONDUCT.md) |
-| 貢献 / Contributing | [日本語](CONTRIBUTING.md) | [English](CONTRIBUTING.en.md) |
-| ライセンス / License | [日本語](LICENSE.ja.md) | [English](LICENSE.en.md) |
-
-See [Install](docs/install.en.md), [connection settings](docs/setup.en.md), and [recovery steps](docs/runbook.en.md). See the contact below. Do not post vulnerabilities or private materials in ordinary Issues.
+- [Usage and examples](docs/usage.en.md) — everything you can ask for, and requests to copy
+- [Install](docs/install.en.md) — setup for each AI app, updating and uninstalling
+- [Compatibility and verification](docs/compatibility.en.md) — Beta scope, per-app verification, known limitations
+- [Safety](docs/safety.en.md) — how each change is checked, saving over and backups
+- [Recovery](docs/runbook.en.md) — when a response stops or the outcome is unclear
+- [Tool catalog](docs/tools.en.md) — the functions your AI app uses
+- [Changelog](CHANGELOG.en.md) and [release notes](RELEASE_NOTES.en.md) — changes in each version
+- [Support](SUPPORT.md) and [Security](SECURITY.md) — reporting bugs and vulnerabilities
+- [日本語のREADME](README.md) — Japanese version
 
 ## License
 
@@ -185,10 +121,4 @@ Illustrator Studio MCP is an independent project, not an Adobe product. It is no
 
 ## Contact
 
-The approved maintainer identity is **mhimt**, with contact [sporks-framer9t@icloud.com](mailto:sporks-framer9t@icloud.com). Receipt of a test email has been confirmed. Handling procedures remain unverified, with no guaranteed response time. Keep vulnerabilities and private materials out of ordinary Issues; use [private vulnerability reporting](https://github.com/mhimt-lab/illustrator-studio-mcp/security/advisories/new), or send a redacted initial summary by email.
-
-## Clients and transports
-
-beta.4 is published only after this exact package was installed and checked in Claude Code, Claude Desktop (both the `.mcpb` Desktop extension and the configuration file), Codex CLI, and ChatGPT Work Local, from installation through rectangle plan, apply, verification, save, reopen, and read-back. In Codex CLI and ChatGPT Work Local, the client used the `next_call` returned by the plan and reached the applied edit without extra instructions. ChatGPT Work Cloud is not supported. [Client-specific and transport evidence](docs/compatibility.en.md) is recorded separately. Configuration examples alone do not make a client Supported. These checks cover bounded documents and operations; they do not guarantee arbitrary artwork or every failure path.
-
-`illustrator_update_artboard` is experimental: existing-board rename, inactive integer-point rect updates, active switching and adding a named board. Save after adding (an active switch needs no save). This server has no way to remove an added board. The live product-path check passed for rename, move and resize with their inverses, adding, and an active switch and its inverse.
+The approved maintainer identity is **mhimt**, with contact [sporks-framer9t@icloud.com](mailto:sporks-framer9t@icloud.com). There is no guaranteed response time. Keep vulnerabilities and private materials out of ordinary Issues; use [private vulnerability reporting](https://github.com/mhimt-lab/illustrator-studio-mcp/security/advisories/new), or send a redacted initial summary by email.
