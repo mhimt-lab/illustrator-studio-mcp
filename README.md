@@ -174,6 +174,8 @@ Illustratorで開いている書類と、いま選択している文字や図形
 
 [Business Source License 1.1](LICENSE)です。通常の社内業務や、クライアントにデザイン成果物を納める制作利用はAdditional Use Grantで許可されています。第三者へ競合する製品・サービスとして提供する場合は制限があります。OSI準拠のオープンソースライセンスではありません。利用条件は[LICENSE本文](LICENSE)を確認してください。
 
+Illustrator Studio MCPは独立したプロジェクトで、Adobeの公式製品ではありません。Adobeによる提携・承認・後援はありません。Adobe、IllustratorはAdobeの米国およびその他の国における商標または登録商標です。
+
 <details>
 <summary>接続・開発担当者向け：機能の識別名（普段の依頼では入力不要）</summary>
 

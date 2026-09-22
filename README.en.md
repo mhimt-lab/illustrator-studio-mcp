@@ -174,6 +174,8 @@ See [Install](docs/install.en.md), [connection settings](docs/setup.en.md), and 
 
 [Business Source License 1.1](LICENSE). The Additional Use Grant permits ordinary internal business use and design services where clients receive creative outputs. Providing a Competitive Offering to third parties is restricted. This is not an OSI-approved open source license. Read the full [LICENSE](LICENSE) for its terms.
 
+Illustrator Studio MCP is an independent project, not an Adobe product. It is not affiliated with, endorsed by, or sponsored by Adobe. Adobe and Illustrator are either registered trademarks or trademarks of Adobe in the United States and/or other countries.
+
 <details>
 <summary>Connection reference: tool identifiers (not needed for everyday requests)</summary>
 
