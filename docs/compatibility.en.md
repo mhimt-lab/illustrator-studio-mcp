@@ -2,11 +2,11 @@
 
 [日本語](compatibility.md) | **English**
 
-**Public Beta 0.1.0-beta.2.** Keep stable Illustrator in the foreground and the screen unlocked. Transport checks and end-to-end artwork checks through an AI app are separate evidence.
+**Public Beta 0.1.0-beta.3.** Keep stable Illustrator in the foreground and the screen unlocked. Transport checks and end-to-end artwork checks through an AI app are separate evidence.
 
 ## AI clients
 
-| Client | Connection | Checks on this exact distribution (beta.2) | Status |
+| Client | Connection | Checks on this exact distribution (beta.3) | Status |
 | --- | --- | --- | --- |
 | Claude Code 2.1.278 | stdio | Install, registration, discovery, doctor, reads, backup, rectangle plan/apply/verification, save, reopen, independent read-back | Beta client |
 | Claude Desktop 2.2553.1 | Desktop extension (`.mcpb`, built-in Node.js) | Install, saving the settings with their defaults, discovery, reads, backup, rectangle plan/apply/verification, save, reopen, read-back. Desktop cannot run doctor itself | Beta client (main install method) |
@@ -15,7 +15,7 @@
 | ChatGPT Work Local | Local stdio (registered with the one-line `codex mcp add`) | Registration, discovery, reads, backup, rectangle plan/apply/verification, save, reopen, read-back. The client used the plan's `next_call` and reached the applied edit without extra instructions. Setup steps are in the [install guide](install.en.md#chatgpt-work-local) | Beta client |
 | ChatGPT Work Cloud | Remote MCP | Not run | Not supported (this MCP drives a local Illustrator) |
 
-Configuration alone, transport discovery, or success in another app does not establish support. For beta.2, each client above completed the bounded rectangle workflow on a test document with the same package that is published. This does not cover every editing operation or every failure path, and does not guarantee arbitrary artwork support.
+Configuration alone, transport discovery, or success in another app does not establish support. For beta.3, each client above completed the bounded rectangle workflow on a test document with the same package that is published. This does not cover every editing operation or every failure path, and does not guarantee arbitrary artwork support.
 
 ## Per-operation live verification
 

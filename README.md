@@ -2,7 +2,7 @@
 
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg) ![Node.js >=20](https://img.shields.io/badge/node-%3E%3D20-339933.svg) ![MCP: 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-blue.svg) ![Status: beta](https://img.shields.io/badge/status-beta-orange.svg) [![npm beta version](https://img.shields.io/npm/v/illustrator-studio-mcp/beta)](https://www.npmjs.com/package/illustrator-studio-mcp)
 
-**Public Beta — 0.1.0-beta.2。** 試用版です。本番運用向けの完成版ではありません。制作ファイルのコピーで試してください。
+**Public Beta — 0.1.0-beta.3。** 試用版です。本番運用向けの完成版ではありません。制作ファイルのコピーで試してください。
 
 > **前提: Illustratorを前面に表示し、画面ロックを解除した状態で使ってください。** 保存済みファイルの連続編集（edit session）や書き出しなど多くの操作は、この状態でだけ動作を確認しています。背面で動かしたり画面をロックしたりすると、操作が拒否されるか、理由の分かりにくい失敗になります。
 
@@ -15,7 +15,7 @@
 
 特徴は、変更する場所と内容を先に示し、書き込む直前にも対象を確かめ、実行後にIllustratorから結果を読み直すこと。応答が途切れて結果が分からなくなった場合は、次の編集を止めます。
 
-**Public Beta 0.1.0-beta.2。Mac専用です。** 配布は[npmのbetaタグ](https://www.npmjs.com/package/illustrator-studio-mcp)と[GitHubのprerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.2)です。
+**Public Beta 0.1.0-beta.3。Mac専用です。** 配布は[npmのbetaタグ](https://www.npmjs.com/package/illustrator-studio-mcp)と[GitHubのprerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.3)です。
 
 [82のMCPツール](docs/tools.md) · [Illustrator 30.8.xで操作別に実機確認](docs/compatibility.md)
 
@@ -87,7 +87,7 @@ npm install -g illustrator-studio-mcp@beta
 illustrator-studio-mcp --version
 ```
 
-`0.1.0-beta.2`と表示されれば、インストールした版を確認できています。必ず `@beta` を付けてください（タグなしの `npm install illustrator-studio-mcp` は `latest` を使うため、この版になるとは限りません）。GitHubのprereleaseにある配布用ファイル（`.tgz`）からも導入できます。更新・削除は[導入ガイド](docs/install.md)にまとめています。Claude Desktopは、prereleaseのDesktop拡張（`.mcpb`）を開いてインストールできます。この場合、上のnpmのインストールは不要です（[手順](docs/install.md#claude-desktop)）。
+`0.1.0-beta.3`と表示されれば、インストールした版を確認できています。必ず `@beta` を付けてください（タグなしの `npm install illustrator-studio-mcp` は `latest` を使うため、この版になるとは限りません）。GitHubのprereleaseにある配布用ファイル（`.tgz`）からも導入できます。更新・削除は[導入ガイド](docs/install.md)にまとめています。Claude Desktopは、prereleaseのDesktop拡張（`.mcpb`）を開いてインストールできます。この場合、上のnpmのインストールは不要です（[手順](docs/install.md#claude-desktop)）。
 
 ### 2. AIアプリにつなぐ
 
@@ -97,7 +97,7 @@ Claude Codeでは、ターミナルで次を実行してからAIアプリを起�
 claude mcp add --transport stdio illustrator-studio -- illustrator-studio-mcp
 ```
 
-グローバルインストールなしで起動する場合は `npx -y illustrator-studio-mcp@beta` を使えます。AIアプリがこのコマンドを起動し、stdioで接続します。`@beta` は将来のBeta更新に追随するため、版を固定する場合は `@0.1.0-beta.2` と指定してください。
+グローバルインストールなしで起動する場合は `npx -y illustrator-studio-mcp@beta` を使えます。AIアプリがこのコマンドを起動し、stdioで接続します。`@beta` は将来のBeta更新に追随するため、版を固定する場合は `@0.1.0-beta.3` と指定してください。
 
 ほかのAIアプリ（Claude Desktop、Codex CLI、ChatGPT Work Local）では設定方法が異なります。[接続設定の例](docs/install.md#register-the-installed-command)を参照してください。アプリとの接続確認と、実際の制作作業が最後まで動くことの確認は別です。
 
@@ -187,4 +187,4 @@ Illustratorで開いている書類と、いま選択している文字や図形
 
 ## AIアプリと接続方式
 
-beta.2は、この配布物そのものを使い、Claude Code、Claude Desktop（Desktop拡張 `.mcpb` と設定ファイル方式の両方）、Codex CLI、ChatGPT Work Localで、導入から長方形の計画・適用・結果の検証・保存・再読込・結果の読み直しまでを確認したうえで公開しています。Codex CLIとChatGPT Work Localでも、計画の結果にある `next_call` を使って、追加の指示なしに変更の適用まで進むことを確認しました。ChatGPT Work Cloudには対応していません。[アプリ別と接続方式別の確認状況](docs/compatibility.md)を分けて記録しています。設定例だけではSupportedにしません。確認は限定した書類・操作での記録で、任意の制作物や全失敗経路での動作を保証するものではありません。
+beta.3は、この配布物そのものを使い、Claude Code、Claude Desktop（Desktop拡張 `.mcpb` と設定ファイル方式の両方）、Codex CLI、ChatGPT Work Localで、導入から長方形の計画・適用・結果の検証・保存・再読込・結果の読み直しまでを確認したうえで公開しています。Codex CLIとChatGPT Work Localでも、計画の結果にある `next_call` を使って、追加の指示なしに変更の適用まで進むことを確認しました。ChatGPT Work Cloudには対応していません。[アプリ別と接続方式別の確認状況](docs/compatibility.md)を分けて記録しています。設定例だけではSupportedにしません。確認は限定した書類・操作での記録で、任意の制作物や全失敗経路での動作を保証するものではありません。

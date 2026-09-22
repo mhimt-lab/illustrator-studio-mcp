@@ -4,11 +4,13 @@
 
 Dates use JST (Asia/Tokyo).
 
-## [0.1.0-beta.2] - 2026-09-22
+## [0.1.0-beta.3] - 2026-09-22
 
 [日本語](https://github.com/mhimt-lab/illustrator-studio-mcp/blob/main/CHANGELOG.md) | **English**
 
 An update from 0.1.0-beta.1. It starts distributing the Claude Desktop extension (`.mcpb`) and helps AI apps build the arguments of editing tools correctly. It is not a production-ready release.
+
+0.1.0-beta.2 was tagged on GitHub (`v0.1.0-beta.2`) but not published to npm or as a GitHub prerelease: the Desktop extension (`.mcpb`) could not be rebuilt with the same bytes, because the times stored in its zip depended on the build machine's time zone. 0.1.0-beta.3 has the same contents as 0.1.0-beta.2 (the `.mcpb` is now built with the same bytes in any time zone).
 
 **Requirement:** Keep Illustrator in the foreground and the screen unlocked. Many operations are refused in the background or with the screen locked.
 
@@ -40,6 +42,10 @@ An update from 0.1.0-beta.1. It starts distributing the Claude Desktop extension
 - Always include `@beta` with npm. An install without a tag uses `latest`, which may not be this version
 
 Read [installation](docs/install.en.md), [compatibility](docs/compatibility.en.md), [recovery](docs/runbook.en.md), and the [LICENSE](LICENSE).
+
+## [0.1.0-beta.2] - 2026-09-22
+
+Not published (tag only). Same contents as 0.1.0-beta.3; see the 0.1.0-beta.3 entry above.
 
 ## [0.1.0-beta.1] - 2026-09-22
 

@@ -3,19 +3,28 @@
 //   node scripts/build-mcpb.mjs --tarball <path/to/name-version.tgz> --out-dir <dir>
 // The bundle is the tarball's package/ directory (dist, package.json, LICENSE, README, shrinkwrap)
 // plus its production dependencies installed with `npm ci --omit=dev --ignore-scripts` from the
-// shipped npm-shrinkwrap.json, plus manifest.json filled from package.json. Every entry gets a
-// fixed mtime and the zip lists entries in sorted order, so the same tarball yields the same bytes.
+// shipped npm-shrinkwrap.json, plus manifest.json filled from package.json.
+// The archive is written by writeReproducibleZip() below, not by an external `zip`, so its bytes depend
+// only on the file names and contents: entries in UTF-8 byte order, one fixed DOS timestamp computed
+// from UTC (no time zone), mode 0644 on every file, no directory entries, no extra fields (so no
+// uid/gid, extended timestamps or macOS extended attributes), and a fixed deflate level. The same
+// tarball therefore yields the same .mcpb on the reviewer's Mac and on the publishing runner.
 // It writes <name>-<version>.mcpb into --out-dir and prints its SHA-256; it never publishes.
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFile, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { deflateRawSync } from 'node:zlib';
 
 const execFileAsync = promisify(execFile);
-const FIXED_MTIME = new Date('2026-01-01T00:00:00Z');
+// Deliberately a constant, not SOURCE_DATE_EPOCH or the build time: any input that can differ between the
+// reviewer's build and the runner's rebuild would change the digest the release gate binds.
+export const ZIP_ENTRY_TIME = { year: 2026, month: 1, day: 1, hour: 0, minute: 0, second: 0 };
+const ZIP_FILE_MODE = 0o100644;
+const DEFLATE_LEVEL = 9;
 const TEMPLATE = join(dirname(fileURLToPath(import.meta.url)), '..', 'mcpb', 'manifest.json');
 
 function emit(event, fields = {}) {
@@ -49,14 +58,76 @@ async function listFiles(root, prefix = '') {
   return out;
 }
 
-async function touchTree(root) {
-  for (const path of await listFiles(root)) await utimes(join(root, path), FIXED_MTIME, FIXED_MTIME);
-  const dirs = new Set();
-  for (const path of await listFiles(root)) {
-    let dir = dirname(path);
-    while (dir !== '.' && !dirs.has(dir)) { dirs.add(dir); dir = dirname(dir); }
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (const byte of bytes) c = CRC_TABLE[(c ^ byte) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+const dosTime = ({ hour, minute, second }) => (hour << 11) | (minute << 5) | (second >> 1);
+const dosDate = ({ year, month, day }) => ((year - 1980) << 9) | (month << 5) | day;
+const compareUtf8 = (a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+
+/** Writes a deterministic ZIP (see the header comment). `files` are paths relative to `root`. */
+export async function writeReproducibleZip(root, files, outputPath) {
+  const names = [...files].sort(compareUtf8);
+  if (names.length > 0xffff) throw new Error('Too many entries for a ZIP without ZIP64.');
+  const time = dosTime(ZIP_ENTRY_TIME);
+  const date = dosDate(ZIP_ENTRY_TIME);
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const name of names) {
+    const nameBytes = Buffer.from(name, 'utf8');
+    const data = await readFile(join(root, name));
+    const deflated = deflateRawSync(data, { level: DEFLATE_LEVEL });
+    const stored = deflated.length >= data.length;
+    const body = stored ? data : deflated;
+    const crc = crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4); // version needed
+    local.writeUInt16LE(0x0800, 6); // UTF-8 names
+    local.writeUInt16LE(stored ? 0 : 8, 8);
+    local.writeUInt16LE(time, 10);
+    local.writeUInt16LE(date, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(body.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    local.writeUInt16LE(0, 28); // no extra field
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE((3 << 8) | 20, 4); // made by Unix, spec 2.0
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(stored ? 0 : 8, 10);
+    central.writeUInt16LE(time, 12);
+    central.writeUInt16LE(date, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(body.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    // extra, comment, disk, internal attributes stay 0
+    central.writeUInt32LE((ZIP_FILE_MODE << 16) >>> 0, 38);
+    central.writeUInt32LE(offset, 42);
+    locals.push(local, nameBytes, body);
+    centrals.push(central, nameBytes);
+    offset += local.length + nameBytes.length + body.length;
+    if (offset > 0xffffffff) throw new Error('Archive exceeds 4 GiB; ZIP64 is not supported.');
   }
-  for (const dir of [...dirs].sort().reverse()) await utimes(join(root, dir), FIXED_MTIME, FIXED_MTIME);
+  const directory = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(names.length, 8);
+  end.writeUInt16LE(names.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  await writeFile(outputPath, Buffer.concat([...locals, directory, end]));
 }
 
 export async function buildMcpb({ tarball, outDir, manifestTemplate = TEMPLATE }) {
@@ -73,16 +144,12 @@ export async function buildMcpb({ tarball, outDir, manifestTemplate = TEMPLATE }
     const template = JSON.parse(await readFile(manifestTemplate, 'utf8'));
     const manifest = { ...template, name: pkg.name, version: pkg.version, description: pkg.description, license: pkg.license };
     await writeFile(join(bundle, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-    await touchTree(bundle);
     const files = await listFiles(bundle);
     const outputName = `${pkg.name}-${pkg.version}.mcpb`;
     const outputPath = join(outDir, outputName);
     await rm(outputPath, { force: true });
-    await execFileAsync('mkdir', ['-p', outDir]);
-    await new Promise((resolvePromise, reject) => {
-      const child = execFile('zip', ['-X', '-D', '-q', '-@', outputPath], { cwd: bundle }, (error) => (error ? reject(error) : resolvePromise()));
-      child.stdin.end(`${files.join('\n')}\n`);
-    });
+    await mkdir(outDir, { recursive: true });
+    await writeReproducibleZip(bundle, files, outputPath);
     const sha256 = createHash('sha256').update(await readFile(outputPath)).digest('hex');
     return { file: outputName, path: outputPath, sha256, entries: files.length, version: pkg.version };
   } finally {

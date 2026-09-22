@@ -2,7 +2,7 @@
 
 **日本語** | [English](install.en.md)
 
-**Public Beta 0.1.0-beta.2。** Mac、通常版Illustrator、Node.js 20以上が必要です。Illustratorを前面に表示し、画面ロックを解除して使います。[アプリ別の確認範囲](compatibility.md)を確認してください。
+**Public Beta 0.1.0-beta.3。** Mac、通常版Illustrator、Node.js 20以上が必要です。Illustratorを前面に表示し、画面ロックを解除して使います。[アプリ別の確認範囲](compatibility.md)を確認してください。
 
 ## npmから入れる
 
@@ -12,7 +12,7 @@ illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
 
-版の表示は `0.1.0-beta.2` です。Stable版ではありません。手順では必ず `@beta` を付けてください。タグなしの `npm install illustrator-studio-mcp` は `latest` を使うため、この版になるとは限りません。版を固定したい場合は `@0.1.0-beta.2` に置き換えてください。
+版の表示は `0.1.0-beta.3` です。Stable版ではありません。手順では必ず `@beta` を付けてください。タグなしの `npm install illustrator-studio-mcp` は `latest` を使うため、この版になるとは限りません。版を固定したい場合は `@0.1.0-beta.3` に置き換えてください。
 
 グローバルインストールなしで起動するには、次を使います。
 
@@ -24,11 +24,11 @@ npx -y illustrator-studio-mcp@beta
 
 ## 配布用ファイルから入れる
 
-[GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.2)からtgzと `SHA256SUMS` を同じフォルダへ取得し、そのフォルダで実行します。`SHA256SUMS` にはDesktop拡張（`.mcpb`）の行もあるため、取得していないファイルは `--ignore-missing` で飛ばします。
+[GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.3)からtgzと `SHA256SUMS` を同じフォルダへ取得し、そのフォルダで実行します。`SHA256SUMS` にはDesktop拡張（`.mcpb`）の行もあるため、取得していないファイルは `--ignore-missing` で飛ばします。
 
 ```bash
 shasum -a 256 -c SHA256SUMS --ignore-missing
-npm install -g ./illustrator-studio-mcp-0.1.0-beta.2.tgz
+npm install -g ./illustrator-studio-mcp-0.1.0-beta.3.tgz
 illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
@@ -61,8 +61,8 @@ claude mcp add --transport stdio illustrator-studio -- npx -y illustrator-studio
 
 Desktop拡張は、Claude Desktopに内蔵されたNode.jsで動きます。npmでのインストールも設定ファイルの編集も不要です。
 
-1. [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.2)から `illustrator-studio-mcp-0.1.0-beta.2.mcpb` と `SHA256SUMS` を同じフォルダへ取得し、そのフォルダで `shasum -a 256 -c SHA256SUMS --ignore-missing` を実行します。hash不一致なら導入せず停止してください。
-2. `.mcpb` ファイルをダブルクリックしてClaude Desktopで開きます。インストール画面で提供元 **mhimt**、版 **0.1.0-beta.2**、ライセンス **BUSL-1.1** を確認して「インストール」を押します。この拡張には署名がありません。
+1. [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.3)から `illustrator-studio-mcp-0.1.0-beta.3.mcpb` と `SHA256SUMS` を同じフォルダへ取得し、そのフォルダで `shasum -a 256 -c SHA256SUMS --ignore-missing` を実行します。hash不一致なら導入せず停止してください。
+2. `.mcpb` ファイルをダブルクリックしてClaude Desktopで開きます。インストール画面で提供元 **mhimt**、版 **0.1.0-beta.3**、ライセンス **BUSL-1.1** を確認して「インストール」を押します。この拡張には署名がありません。
 3. 設定の「Illustrator application」は、通常版なら既定値 `id:com.adobe.illustrator` のまま保存します（Illustrator Beta版は `id:com.adobe.illustratorBeta`）。
 4. 拡張が有効になっていることを確かめ、新しいチャットで読み取りだけを依頼します（[書類を変えずに試す](#書類を変えずに試す)）。
 
@@ -120,7 +120,7 @@ ILLUSTRATOR_APPLICATION = "id:com.adobe.illustrator"
 
 `npx` が見つからない場合は `command -v npx` で確認した絶対パスを設定し、Node.jsも起動環境から見えることを確認します。Codexを再起動し `/mcp` で確認します。
 
-変更系のツールは、`apply: false` の計画の結果に `next_call` が付きます。Codexはその引数（`command_id` を含む）をそのまま使って適用できます。変更を承認する前に、計画の内容を確かめてください。beta.2では、Codex CLIが追加の指示なしに長方形の計画・適用・保存・再読込まで進むことを確認しています（[確認状況](compatibility.md)）。
+変更系のツールは、`apply: false` の計画の結果に `next_call` が付きます。Codexはその引数（`command_id` を含む）をそのまま使って適用できます。変更を承認する前に、計画の内容を確かめてください。beta.3では、Codex CLIが追加の指示なしに長方形の計画・適用・保存・再読込まで進むことを確認しています（[確認状況](compatibility.md)）。
 
 ### ChatGPT Work Local
 
@@ -162,7 +162,7 @@ npm root -g
 - 計画の結果に `next_call` があれば、その引数（`command_id` を含む）をそのまま適用に使うと迷いません。同じ適用を再試行するときだけ同じ値を使います。
 - 実行記録の置き場所（`ILLUSTRATOR_STUDIO_MCP_STATE_DIR`）は通常は設定不要です（既定は `~/Library/Application Support/illustrator-studio-mcp`）。自分で作ったディレクトリを指定する場合は、権限を `0700` にしてください（`chmod 700 <ディレクトリ>`）。所有者が自分でない、または権限が広いディレクトリは、サーバーが使う時点で拒否されます。
 
-確認状況: beta.2の配布物そのものを、上と同じ `codex mcp add … -- npx -y …` の1行（公開前のため、パッケージ指定だけ配布用ファイルのパスに置き換え）で登録し、新しい Work locally のチャットから、長方形の計画・適用・結果の読み直し・保存・再読込までを確認しています。詳しくは[対応環境と検証範囲](compatibility.md)を参照してください。
+確認状況: beta.3の配布物そのものを、上と同じ `codex mcp add … -- npx -y …` の1行（公開前のため、パッケージ指定だけ配布用ファイルのパスに置き換え）で登録し、新しい Work locally のチャットから、長方形の計画・適用・結果の読み直し・保存・再読込までを確認しています。詳しくは[対応環境と検証範囲](compatibility.md)を参照してください。
 
 ## 書類を変えずに試す
 

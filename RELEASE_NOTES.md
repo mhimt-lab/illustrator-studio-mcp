@@ -1,10 +1,12 @@
-# Public Beta 0.1.0-beta.2
+# Public Beta 0.1.0-beta.3
 
 **日本語** | [English](RELEASE_NOTES.en.md)
 
 公開日: 2026-09-22 JST（Asia/Tokyo）。
 
 0.1.0-beta.1からの更新です。Claude Desktop拡張（`.mcpb`）の配布を始め、AIアプリが変更系ツールの引数を迷わず組み立てられるようにしました。本番運用向けの完成版ではありません。
+
+0.1.0-beta.2は、GitHubのtag（`v0.1.0-beta.2`）までは作成しましたが、Desktop拡張（`.mcpb`）を同じbytesで作り直せない問題（zipに記録される時刻が実行環境のタイムゾーンで変わる）が見つかったため、npmとGitHubのprereleaseでは公開していません。0.1.0-beta.3の内容は0.1.0-beta.2と同じです（`.mcpb` はタイムゾーンによらず同じbytesになる作り方に変更しました）。
 
 **前提:** Illustratorを前面に表示し、画面ロックを解除した状態で使います。背面や画面ロック中は、多くの操作が拒否されます。
 

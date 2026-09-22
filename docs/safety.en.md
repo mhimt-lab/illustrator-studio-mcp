@@ -4,7 +4,7 @@
 
 Illustrator Studio MCP checks the change, not just the command. Planning the edit and verifying its actual result are one flow.
 
-> **Public Beta 0.1.0-beta.2.** A trial release. Try it on a copy of your artwork. Illustrator must be in the foreground with the screen unlocked. In the background or with the screen locked, operations are refused or fail with an unclear reason.
+> **Public Beta 0.1.0-beta.3.** A trial release. Try it on a copy of your artwork. Illustrator must be in the foreground with the screen unlocked. In the background or with the screen locked, operations are refused or fail with an unclear reason.
 
 ## What to know before editing
 

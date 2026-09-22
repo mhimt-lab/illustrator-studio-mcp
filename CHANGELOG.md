@@ -4,11 +4,13 @@
 
 日付は JST（Asia/Tokyo）です。
 
-## [0.1.0-beta.2] - 2026-09-22
+## [0.1.0-beta.3] - 2026-09-22
 
 **日本語** | [English](https://github.com/mhimt-lab/illustrator-studio-mcp/blob/main/CHANGELOG.en.md)
 
 0.1.0-beta.1からの更新です。Claude Desktop拡張（`.mcpb`）の配布を始め、AIアプリが変更系ツールの引数を迷わず組み立てられるようにしました。本番運用向けの完成版ではありません。
+
+0.1.0-beta.2は、GitHubのtag（`v0.1.0-beta.2`）までは作成しましたが、Desktop拡張（`.mcpb`）を同じbytesで作り直せない問題（zipに記録される時刻が実行環境のタイムゾーンで変わる）が見つかったため、npmとGitHubのprereleaseでは公開していません。0.1.0-beta.3の内容は0.1.0-beta.2と同じです（`.mcpb` はタイムゾーンによらず同じbytesになる作り方に変更しました）。
 
 **前提:** Illustratorを前面に表示し、画面ロックを解除した状態で使います。背面や画面ロック中は、多くの操作が拒否されます。
 
@@ -40,6 +42,10 @@
 - npmでは必ず `@beta` を付けてください。タグなしのインストールは `latest` を使い、この版になるとは限りません
 
 [導入](docs/install.md)・[互換性](docs/compatibility.md)・[復旧](docs/runbook.md)・[LICENSE](LICENSE)を確認してください。
+
+## [0.1.0-beta.2] - 2026-09-22
+
+未公開です（tagのみ）。内容は0.1.0-beta.3と同じです。上の0.1.0-beta.3の説明を参照してください。
 
 ## [0.1.0-beta.1] - 2026-09-22
 

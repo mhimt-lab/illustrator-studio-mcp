@@ -1,10 +1,12 @@
-# Public Beta 0.1.0-beta.2
+# Public Beta 0.1.0-beta.3
 
 [日本語](RELEASE_NOTES.md) | **English**
 
 Published: 2026-09-22 JST (Asia/Tokyo).
 
 An update from 0.1.0-beta.1. It starts distributing the Claude Desktop extension (`.mcpb`) and helps AI apps build the arguments of editing tools correctly. It is not a production-ready release.
+
+0.1.0-beta.2 was tagged on GitHub (`v0.1.0-beta.2`) but not published to npm or as a GitHub prerelease: the Desktop extension (`.mcpb`) could not be rebuilt with the same bytes, because the times stored in its zip depended on the build machine's time zone. 0.1.0-beta.3 has the same contents as 0.1.0-beta.2 (the `.mcpb` is now built with the same bytes in any time zone).
 
 **Requirement:** Keep Illustrator in the foreground and the screen unlocked. Many operations are refused in the background or with the screen locked.
 

@@ -2,7 +2,7 @@
 
 **日本語** | [English](tools.en.md)
 
-Public Beta 0.1.0-beta.2のinstalled packageで機能取得を確認した82件の全ツール名です。利用可能な機能の一覧であり、全入力の実機確認を意味しません。引数はAIアプリが取得する入力仕様を確認し、名前を推測しないでください。[確認範囲](compatibility.md)、[導入](install.md)、[復旧](runbook.md)も参照してください。
+Public Beta 0.1.0-beta.3のinstalled packageで機能取得を確認した82件の全ツール名です。利用可能な機能の一覧であり、全入力の実機確認を意味しません。引数はAIアプリが取得する入力仕様を確認し、名前を推測しないでください。[確認範囲](compatibility.md)、[導入](install.md)、[復旧](runbook.md)も参照してください。
 
 通常版Illustratorを前面に表示し、画面ロックを解除して使います。sessionは39種類中36種類の変更操作に対応し、削除・画像埋め込み・ベクター取り込みは対象外です。backupとsessionの実質上限は1,000 items（600 itemsの実測からの外挿）です。PNG/JPEG/SVG書き出し、アートボード操作、段落スタイル、グループ解除、リンク切れ修復、Windowsは対象外です。プレビュー取得は汎用の書き出し機能ではありません。1件の削除にも明示的なbackup・確認契約が必要です。
 
