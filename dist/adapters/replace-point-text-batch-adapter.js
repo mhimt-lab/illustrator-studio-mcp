@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from '../command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
@@ -79,7 +79,7 @@ export const replacePointTextBatchPublicInputSchema = z.discriminatedUnion('appl
         targets: z.array(publicApplyTargetSchema).min(BATCH_MIN_TARGETS).max(BATCH_MAX_TARGETS)
             .superRefine((targets, context) => refineTargets(targets, (target) => target.target_uuid, context)),
         apply: z.literal(true),
-        command_id: canonicalCommandIdSchema,
+        command_id: applyCommandIdSchema,
     }),
 ]);
 const inputSchema = z.strictObject({
@@ -91,7 +91,7 @@ const inputSchema = z.strictObject({
         confirmed_after: replacePointTextBatchSnapshotSchema.optional(),
     })).min(BATCH_MIN_TARGETS).max(BATCH_MAX_TARGETS),
     apply: z.boolean().default(false),
-    command_id: canonicalCommandIdSchema.optional(),
+    command_id: applyCommandIdSchema.optional(),
 });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(replacePointTextBatchPublicInputSchema, { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });

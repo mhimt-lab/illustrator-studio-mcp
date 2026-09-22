@@ -37,15 +37,26 @@ export async function snapshotManifest(root, prefix = '') {
   }
   return files;
 }
+// The Claude Desktop extension is part of the reviewed Beta artifact: release-manifest.json names it,
+// SHA256SUMS lists it, and the gate binds its digest next to the npm tarball.
+export async function mcpbDigest(artifactDir, manifest) {
+  const expectedName = manifest.tarball.replace(/\.tgz$/, '.mcpb');
+  if (manifest.mcpb?.file !== expectedName || !/^[a-f0-9]{64}$/.test(manifest.mcpb?.sha256 ?? '')) throw new Error('Artifact has no reviewed .mcpb entry.');
+  const digest = sha256(await readFile(join(artifactDir, expectedName)));
+  if (digest !== manifest.mcpb.sha256) throw new Error('.mcpb checksum mismatch.');
+  const sums = (await readFile(join(artifactDir, 'SHA256SUMS'), 'utf8')).split('\n').filter(Boolean);
+  if (!sums.includes(`${digest}  ${expectedName}`)) throw new Error('SHA256SUMS does not list the reviewed .mcpb.');
+  return digest;
+}
 export async function snapshotDigest(root) { return sha256(JSON.stringify(await snapshotManifest(root))); }
 
 export function validateGateManifest(gate, expected) {
   const errors = [];
-  const allowed = ['schema', 'decision', 'reviewer', 'version', 'candidateSha256', 'packageSha256', 'distTag', 'prerelease', 'checks'];
+  const allowed = ['schema', 'decision', 'reviewer', 'version', 'candidateSha256', 'packageSha256', 'mcpbSha256', 'distTag', 'prerelease', 'checks'];
   if (!gate || Object.keys(gate).some(key => !allowed.includes(key))) errors.push('unexpected gate fields');
   if (Object.keys(gate?.checks ?? {}).some(key => !REQUIRED_BETA_CHECKS.includes(key))) errors.push('unexpected checks');
   if (gate?.schema !== 1 || gate?.decision !== 'ready' || gate?.reviewer !== PUBLIC_NAME) errors.push('review decision');
-  for (const key of ['version', 'candidateSha256', 'packageSha256']) {
+  for (const key of ['version', 'candidateSha256', 'packageSha256', 'mcpbSha256']) {
     if (typeof expected[key] !== 'string' || gate?.[key] !== expected[key]) errors.push(key);
   }
   for (const key of REQUIRED_BETA_CHECKS) {

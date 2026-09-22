@@ -1,0 +1,38 @@
+{
+  "manifest_version": "0.3",
+  "name": "illustrator-studio-mcp",
+  "version": "0.0.0",
+  "description": "Safety-first MCP server for Adobe Illustrator",
+  "author": {
+    "name": "mhimt"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/dist/index.js"
+      ],
+      "env": {
+        "ILLUSTRATOR_APPLICATION": "${user_config.illustrator_application}"
+      }
+    }
+  },
+  "user_config": {
+    "illustrator_application": {
+      "type": "string",
+      "title": "Illustrator application",
+      "description": "The Illustrator install to target, as a display name or \"id:<bundle identifier>\". Use \"id:com.adobe.illustratorBeta\" for Illustrator Beta.",
+      "default": "id:com.adobe.illustrator"
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin"
+    ],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  }
+}

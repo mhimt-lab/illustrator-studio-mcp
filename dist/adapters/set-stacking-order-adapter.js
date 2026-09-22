@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from '../command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
@@ -76,11 +76,11 @@ const commonPublic = { expected_document_key: documentKeySchema, target_uuids: t
 export const setStackingOrderPublicInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonPublic, apply: z.literal(false).default(false) }),
     z.strictObject({ ...commonPublic, expected_targets_before: z.array(stackingTargetSnapshotSchema).min(STACKING_MIN_TARGETS).max(STACKING_MAX_TARGETS),
-        expected_parent_order: orderSchema, apply: z.literal(true), command_id: canonicalCommandIdSchema }),
+        expected_parent_order: orderSchema, apply: z.literal(true), command_id: applyCommandIdSchema }),
 ]);
 const inputSchema = z.strictObject({ ...commonPublic,
     expected_targets_before: z.array(stackingTargetSnapshotSchema).min(STACKING_MIN_TARGETS).max(STACKING_MAX_TARGETS).optional(),
-    expected_parent_order: orderSchema.optional(), apply: z.boolean().default(false), command_id: canonicalCommandIdSchema.optional() });
+    expected_parent_order: orderSchema.optional(), apply: z.boolean().default(false), command_id: applyCommandIdSchema.optional() });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(setStackingOrderPublicInputSchema, { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
 function normalizePublicInput(input) {

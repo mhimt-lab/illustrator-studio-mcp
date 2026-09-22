@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from '../command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
@@ -89,14 +89,14 @@ export const importVectorArtworkPublicInputSchema = z.discriminatedUnion('apply'
         ...commonPublic,
         expected_layer_item_uuids: layerItemUuidsSchema.describe('plan.layer.itemUuids from the plan call, unchanged.'),
         apply: z.literal(true),
-        command_id: canonicalCommandIdSchema,
+        command_id: applyCommandIdSchema,
     }),
 ]);
 const inputSchema = z.strictObject({
     ...commonPublic,
     expected_layer_item_uuids: layerItemUuidsSchema.optional(),
     apply: z.boolean().default(false),
-    command_id: canonicalCommandIdSchema.optional(),
+    command_id: applyCommandIdSchema.optional(),
 });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(importVectorArtworkPublicInputSchema, { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });

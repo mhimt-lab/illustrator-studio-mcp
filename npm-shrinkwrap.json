@@ -1,12 +1,12 @@
 {
   "name": "illustrator-studio-mcp",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.2",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "illustrator-studio-mcp",
-      "version": "0.1.0-beta.1",
+      "version": "0.1.0-beta.2",
       "license": "BUSL-1.1",
       "dependencies": {
         "@modelcontextprotocol/server": "2.0.0",

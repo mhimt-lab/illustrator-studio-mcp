@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from '../command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
@@ -154,7 +154,7 @@ export const setPathAppearancePublicInputSchema = z.discriminatedUnion('apply', 
         expected_before: pathAppearanceStateSchema,
         confirmed_after: pathAppearanceStateSchema,
         apply: z.literal(true),
-        command_id: canonicalCommandIdSchema,
+        command_id: applyCommandIdSchema,
     }),
 ]);
 const setPathAppearanceInputSchema = z.strictObject({
@@ -162,7 +162,7 @@ const setPathAppearanceInputSchema = z.strictObject({
     expected_before: pathAppearanceStateSchema.optional(),
     confirmed_after: pathAppearanceStateSchema.optional(),
     apply: z.boolean().default(false),
-    command_id: canonicalCommandIdSchema.optional(),
+    command_id: applyCommandIdSchema.optional(),
 });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(setPathAppearancePublicInputSchema, { io: 'input' });
 setPathAppearanceInputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });

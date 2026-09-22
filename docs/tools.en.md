@@ -2,7 +2,7 @@
 
 [日本語](tools.md) | **English**
 
-This is the complete tool-name catalog for Public Beta 0.1.0-beta.1: 82 tools discovered from the installed package. It lists availability, not live verification of every input. Ask your AI app for the current input schema; do not guess argument names. See [verified scope](compatibility.en.md), [installation](install.en.md), and [recovery](runbook.en.md).
+This is the complete tool-name catalog for Public Beta 0.1.0-beta.2: 82 tools discovered from the installed package. It lists availability, not live verification of every input. Ask your AI app for the current input schema; do not guess argument names. See [verified scope](compatibility.en.md), [installation](install.en.md), and [recovery](runbook.en.md).
 
 Keep stable Illustrator in the foreground and the screen unlocked. Sessions cover 36 of 39 editing operations; delete, embed, and vector import are excluded. Backup and the effective session ceiling are 1,000 items, extrapolated from a 600-item run. PNG/JPEG/SVG export, artboards, paragraph styles, ungrouping, missing-link repair, and Windows remain outside Beta scope. A preview capture is not a general export tool. Deleting one object requires its explicit backup and confirmation contract.
 
@@ -90,3 +90,31 @@ Keep stable Illustrator in the foreground and the screen unlocked. Sessions cove
 | 80 | `illustrator_set_text_style` |
 | 81 | `illustrator_transform_object` |
 | 82 | `illustrator_update_character_style` |
+
+## Plan, then apply (`next_call` and `command_id`)
+
+Every change is two calls: `apply: false` returns a plan, and `apply: true` with a `command_id` carries it out. For creation tools and tools whose apply echoes the plan's `before` / `after`, a plan without blockers also returns `next_call`: the tool name and the exact apply arguments, including a fresh `command_id` candidate. Send those arguments unchanged. Other tools state the echoed plan values in their input schema.
+
+`command_id` is a lowercase UUID v4 (`xxxxxxxx-xxxx-4xxx-[89ab]xxx-xxxxxxxxxxxx`), for example `next_call.arguments.command_id` or `uuidgen | tr A-Z a-z`. Resend the same value only to retry the same apply, including after a timeout and `illustrator_reconcile`; that returns the recorded result instead of applying twice. After planning again, use the new plan's candidate. A plan's candidate is not recorded by the server, and an apply from an older plan is still refused when the document no longer matches that plan's `before`.
+
+An argument error names each missing required argument and suggests the right name for an unknown one (for example `document_key` → `expected_document_key`).
+
+## Result field notes
+
+| Field | Tools | Meaning |
+| --- | --- | --- |
+| `keyShort` | every tool that returns a document context | First 16 hex characters of SHA-256 over `key`; accepted as `expected_document_key`. |
+| `mutationProfile` | every tool that returns a document context | `saved_file`: verified file revision; `unsaved_document`: no backing file exists; `edit_session_file`: file of an open edit session; `null`: blocked. |
+| `bundleId` | application information | Configured bundle identifier the bridge addresses; `null` when `ILLUSTRATOR_APPLICATION` is a LaunchServices name. |
+| `version` | application information | `app.version` reported by the Illustrator instance that executed this read. |
+| `templateState` | `illustrator_list_layers` | Template state is unavailable from the Illustrator Layer scripting API; create tools assume `non_template`. |
+| `editable` | `illustrator_list_layers` | True when the layer and every ancestor are visible and unlocked (structural conditions only). |
+| `editabilityBlockedReasons` | `illustrator_list_layers` | Structural blockers in production order: `layer_hidden`, `ancestor_hidden`, `layer_locked`, `ancestor_locked`. Empty when editable. |
+| `document` | `illustrator_save_document_as` | The document reopened from `output_path`: a new Document object with a new key; page-item UUIDs are not preserved across the reopen. For `output_exists`: the document is still open and points at the retained staged file. |
+| `previousFilePreserved` | `illustrator_save_document_as` | `true` when the file the document pointed at before is byte-identical; `null` for a document that had no file. |
+| `path` | document lifecycle tools | File the host may have written or re-pointed to. |
+| `files` | document lifecycle tools | Save-as only: the staged file (retained) and the published output, when they exist. |
+| `editSession` | `illustrator_save_document` | Present when the file belonged to an open edit session; the full scan matched its head right before save. |
+| `editSession.state` | `illustrator_save_document` | `closed` once the saved file ends the session; `open` only if closing it failed (the next change then suspends it on the new file revision). |
+| `document` | `illustrator_open_document` | For `already_open`: the document that already uses the path. |
+| `filePreserved` | `illustrator_close_document` | `true` when the closed document's file is byte-identical to before; `null` when it had no file. |

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { supportedPathCmykPaintSchema } from './supported-path-item-host-script.js';
-import { canonicalCommandIdSchema } from '../command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
@@ -144,7 +144,7 @@ export const duplicateObjectPublicInputSchema = z.discriminatedUnion('apply', [
         expected_before: duplicateObjectSnapshotSchema,
         expected_parent_order: parentOrderSchema,
         apply: z.literal(true),
-        command_id: canonicalCommandIdSchema,
+        command_id: applyCommandIdSchema,
     }),
 ]);
 const duplicateObjectInputSchema = z.strictObject({
@@ -152,7 +152,7 @@ const duplicateObjectInputSchema = z.strictObject({
     expected_before: duplicateObjectSnapshotSchema.optional(),
     expected_parent_order: parentOrderSchema.optional(),
     apply: z.boolean().default(false),
-    command_id: canonicalCommandIdSchema.optional(),
+    command_id: applyCommandIdSchema.optional(),
 });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(duplicateObjectPublicInputSchema, { io: 'input' });
 duplicateObjectInputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });

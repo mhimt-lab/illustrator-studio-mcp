@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from '../../command-id.js';
+import { applyCommandIdSchema } from '../../command-id.js';
 import { layerPathSchema } from '../../mutation-result-schema-core.js';
 import { rectangleResponseSchema } from './result-schema.js';
 const confirmationSchema = z.strictObject({
@@ -17,9 +17,9 @@ const common = {
 };
 export const createRectanglePublicInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...common, apply: z.literal(false).default(false) }),
-    z.strictObject({ ...common, apply: z.literal(true), command_id: canonicalCommandIdSchema }),
+    z.strictObject({ ...common, apply: z.literal(true), command_id: applyCommandIdSchema }),
 ]);
-export const createRectangleInputSchema = z.strictObject({ ...common, apply: z.boolean().default(false), command_id: canonicalCommandIdSchema.optional() });
+export const createRectangleInputSchema = z.strictObject({ ...common, apply: z.boolean().default(false), command_id: applyCommandIdSchema.optional() });
 const { $schema: _dialect, ...published } = z.toJSONSchema(createRectanglePublicInputSchema, { io: 'input' });
 createRectangleInputSchema._zod.toJSONSchema = () => ({ type: 'object', ...published });
 export function normalizeCreateRectanglePublicInput(input) {

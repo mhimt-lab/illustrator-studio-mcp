@@ -6,6 +6,9 @@ import { CommandLockedError, FileCommandStore, MUTATION_DURABLE_STATE_VERSION, a
 import { IndeterminateExecutionError, CommandQuarantinedError, CommandReleasedUnverifiedError, ProvenPreApplyFailureError, } from './domain.js';
 import { buildJsxCommand } from './jsx-runtime.js';
 import { validateMutationResultArtifact, } from './mutation-result-validator.js';
+export function launchControllerKind(versions = process.versions) {
+    return typeof versions.electron === 'string' ? 'sh' : 'node';
+}
 export function macSessionLockState(ioregOutput) {
     const observations = [...ioregOutput.matchAll(/(?:CGSSessionScreenIsLocked|IOConsoleLocked)"\s*=\s*(Yes|No)\b/g)].map((match) => match[1]);
     if (observations.includes('Yes'))
@@ -67,6 +70,14 @@ process.on("message", function (message) {
 });
 send({ type: "ready", nonce: nonce });
 `;
+export const OSASCRIPT_SH_LAUNCHER_SOURCE = [
+    'umask 077',
+    '[ "$#" -eq 2 ] && [ -n "$1" ] && [ -n "$2" ] || exit 64',
+    'printf \'ready %s\\n\' "$1"',
+    'IFS= read -r go || exit 0',
+    '[ "$go" = "go $1" ] || exit 64',
+    'exec osascript "$2" </dev/null >/dev/null',
+].join('\n');
 class OsascriptProcessExitError extends Error {
     exitCode;
     signal;
@@ -78,6 +89,15 @@ class OsascriptProcessExitError extends Error {
         this.killed = killed;
         this.name = 'OsascriptProcessExitError';
     }
+}
+function throwOnLauncherExit(outcome, child, stderr) {
+    if (outcome.error)
+        throw outcome.error;
+    if (outcome.signal !== null || child.killed) {
+        throw new OsascriptProcessExitError(stderr.trim() || `osascript controller terminated with status ${String(outcome.code)}, signal ${outcome.signal ?? 'none'}, killed ${String(child.killed)}.`, outcome.code, outcome.signal, child.killed);
+    }
+    if (outcome.code !== 0)
+        throw new Error(stderr.trim() || `osascript exited with status ${String(outcome.code)}.`);
 }
 const defaultIllustratorApplicationProbes = {
     running: () => detectRunningIllustratorBundles(defaultCommandRunner),
@@ -101,6 +121,8 @@ export class OsascriptBridge {
     applicationProbes;
     target;
     queueWaitLimitMs;
+    launchController;
+    shProcessRunner;
     queueTail = Promise.resolve();
     terminalObserver = null;
     constructor(application = resolveIllustratorApplication({ env: process.env.ILLUSTRATOR_APPLICATION }).application, store = new FileCommandStore(), processRunner = (command, args, options) => spawn(command, args, options), registry = store.getAdapterRegistry(), hostApplicationAvailabilityProbe = defaultHostApplicationAvailabilityProbe, applicationProbes = defaultIllustratorApplicationProbes, options = {}) {
@@ -110,6 +132,8 @@ export class OsascriptBridge {
         this.hostApplicationAvailabilityProbe = hostApplicationAvailabilityProbe;
         this.applicationProbes = applicationProbes;
         this.queueWaitLimitMs = options.queueWaitLimitMs ?? DEFAULT_CALL_QUEUE_WAIT_LIMIT_MS;
+        this.launchController = options.launchController ?? launchControllerKind();
+        this.shProcessRunner = options.shProcessRunner ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
         if (!this.registry.isSealed() || this.store.getAdapterRegistry() !== this.registry) {
             throw new Error('Bridge and command store must share the exact sealed mutation adapter registry.');
         }
@@ -918,6 +942,12 @@ export class OsascriptBridge {
         return `${foregroundGuard}tell ${applicationReference}\n${activation}  do javascript of file "${escapedPath}"\nend tell\n`;
     }
     async runAppleScript(files, timeoutMs, onExecutionPrepared) {
+        if (this.launchController === 'sh')
+            await this.runShLauncher(files, timeoutMs, onExecutionPrepared);
+        else
+            await this.runNodeLauncher(files, timeoutMs, onExecutionPrepared);
+    }
+    async runNodeLauncher(files, timeoutMs, onExecutionPrepared) {
         const nonce = randomUUID();
         const child = this.processRunner(process.execPath, [
             '-e',
@@ -979,14 +1009,90 @@ export class OsascriptBridge {
             if (!sent) {
                 throw new IndeterminateExecutionError(`Launch controller could not acknowledge the go boundary (${files.commandId}).`, files.commandId);
             }
-            const outcome = await Promise.race([exit, timeout]);
-            if (outcome.error)
-                throw outcome.error;
-            if (outcome.signal !== null || child.killed) {
-                throw new OsascriptProcessExitError(stderr.trim() || `osascript controller terminated with status ${String(outcome.code)}, signal ${outcome.signal ?? 'none'}, killed ${String(child.killed)}.`, outcome.code, outcome.signal, child.killed);
+            throwOnLauncherExit(await Promise.race([exit, timeout]), child, stderr);
+        }
+        finally {
+            if (timer !== undefined)
+                clearTimeout(timer);
+        }
+    }
+    async runShLauncher(files, timeoutMs, onExecutionPrepared) {
+        const nonce = randomUUID();
+        const child = this.shProcessRunner('/bin/sh', [
+            '-c',
+            OSASCRIPT_SH_LAUNCHER_SOURCE,
+            'sh',
+            nonce,
+            files.runnerPath,
+        ], { stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+        const exit = new Promise((resolve) => {
+            child.once('error', (error) => { resolve({ code: null, signal: null, error }); });
+            child.once('exit', (code, signal) => { resolve({ code, signal }); });
+        });
+        const { stdin, stdout } = child;
+        if (child.pid === undefined || stdin === null || stdout === null) {
+            throw new Error('Could not start the osascript launch controller.');
+        }
+        let stdinError = null;
+        stdin.on('error', (error) => { stdinError = error; });
+        let stderr = '';
+        child.stderr?.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+        const readyLine = `ready ${nonce}\n`;
+        const ready = new Promise((resolve, reject) => {
+            let received = '';
+            const onData = (chunk) => {
+                received += chunk.toString('utf8');
+                if (received === readyLine) {
+                    stdout.off('data', onData);
+                    resolve();
+                }
+                else if (!readyLine.startsWith(received)) {
+                    stdout.off('data', onData);
+                    stdin.end();
+                    reject(new Error('Launch controller sent an unexpected readiness line.'));
+                }
+            };
+            stdout.on('data', onData);
+            void exit.then((outcome) => {
+                stdout.off('data', onData);
+                reject(outcome.error ?? new Error('Launch controller exited before readiness.'));
+            });
+        });
+        try {
+            const execution = await this.store.writeExecution(files, { pid: child.pid, processGroupId: child.pid, nonce });
+            onExecutionPrepared(execution);
+        }
+        catch (error) {
+            void ready.catch(() => undefined);
+            stdin.end();
+            const stopped = await Promise.race([
+                exit.then(() => true),
+                new Promise((resolve) => { setTimeout(() => { resolve(false); }, 1_000); }),
+            ]);
+            if (!stopped) {
+                child.kill('SIGTERM');
+                await exit;
             }
-            if (outcome.code !== 0)
-                throw new Error(stderr.trim() || `osascript exited with status ${String(outcome.code)}.`);
+            throw error;
+        }
+        let timer;
+        const timeout = new Promise((_resolve, reject) => {
+            timer = setTimeout(() => {
+                const timeoutError = new Error(`osascript exceeded ${timeoutMs} ms.`);
+                timeoutError.code = 'ETIMEDOUT';
+                reject(timeoutError);
+            }, timeoutMs);
+        });
+        try {
+            await Promise.race([ready, timeout]);
+            const written = await new Promise((resolve) => {
+                stdin.write(`go ${nonce}\n`, (error) => { resolve(error === null || error === undefined); });
+            });
+            stdin.end();
+            if (!written || stdinError !== null) {
+                throw new IndeterminateExecutionError(`Launch controller could not acknowledge the go boundary (${files.commandId}).`, files.commandId);
+            }
+            throwOnLauncherExit(await Promise.race([exit, timeout]), child, stderr);
         }
         finally {
             if (timer !== undefined)

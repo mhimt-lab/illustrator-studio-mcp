@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from '../command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { DeleteBackupError, deleteBackupFactsSchema, verifyDeleteBackup } from '../delete-shared.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
@@ -144,12 +144,12 @@ export const embedImagePublicInputSchema = z.discriminatedUnion('apply', [
         expected_before: embedImageBeforeSchema.describe('plan.before, echoed.'),
         confirmed_after: embedImageAfterSchema.describe('plan.after, echoed (uuid null).'),
         apply: z.literal(true),
-        command_id: canonicalCommandIdSchema,
+        command_id: applyCommandIdSchema,
     }),
 ]);
 const inputSchema = z.strictObject({
     ...commonPublic, expected_before: embedImageBeforeSchema.optional(), confirmed_after: embedImageAfterSchema.optional(),
-    apply: z.boolean().default(false), command_id: canonicalCommandIdSchema.optional(),
+    apply: z.boolean().default(false), command_id: applyCommandIdSchema.optional(),
 });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(embedImagePublicInputSchema, { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });

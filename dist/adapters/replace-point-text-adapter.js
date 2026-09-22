@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from '../command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
@@ -47,7 +47,7 @@ export const replacePointTextPublicInputSchema = z.discriminatedUnion('apply', [
         expected_before: replacePointTextSnapshotSchema,
         confirmed_after: replacePointTextSnapshotSchema,
         apply: z.literal(true),
-        command_id: canonicalCommandIdSchema,
+        command_id: applyCommandIdSchema,
     }),
 ]);
 const inputSchema = z.strictObject({
@@ -55,7 +55,7 @@ const inputSchema = z.strictObject({
     expected_before: replacePointTextSnapshotSchema.optional(),
     confirmed_after: replacePointTextSnapshotSchema.optional(),
     apply: z.boolean().default(false),
-    command_id: canonicalCommandIdSchema.optional(),
+    command_id: applyCommandIdSchema.optional(),
 });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(replacePointTextPublicInputSchema, { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });

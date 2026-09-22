@@ -29,6 +29,7 @@ import { structureDiffIdSchema, structureDiffPageSchema, structureSnapshotIdSche
 import { STRUCTURE_DIFF_DEFAULT_TOLERANCE_PT, STRUCTURE_DIFF_MAX_TOLERANCE_PT, STRUCTURE_SNAPSHOT_LIMITS, } from './structure-diff.js';
 import { comparePngImages, visualDiffResultSchema } from './visual-diff.js';
 import { PREVIEW_MAX_SIDE_PT, previewBoundsSchema, previewResultSchema } from './document-preview.js';
+import { NEXT_CALL_PLAN_ECHOES, buildNextCall, formatToolArgumentError, nextCallSchema, toolArgumentIssueMessage } from './tool-arguments.js';
 export { imagePreflightItemSchema, imagePreflightPageSchema } from './image-preflight-schema.js';
 export { printPreflightFindingSchema, printPreflightResultSchema } from './print-preflight-schema.js';
 export { structureDiffPageSchema, structureSnapshotSummarySchema } from './structure-diff-schema.js';
@@ -929,7 +930,7 @@ export const commandStatusSchema = z.union([
     }),
 ]);
 export const SERVER_INSTRUCTIONS = [
-    'Mutations are two-step: call the tool with apply:false to get a plan, then repeat with apply:true, a new command_id, and the before/after values the plan returned.',
+    'Mutations are two-step: call the tool with apply:false to get a plan, then apply with the plan\'s next_call arguments when present (otherwise apply:true, the before/after values the plan returned, and a new lowercase UUID v4 command_id); resend the same command_id only to retry that same apply.',
     'Bind every mutation to the full document key from illustrator_get_context or illustrator_list_documents, and read it again after any save, since keys change.',
     'Call tools one at a time: Illustrator handles a single command at once, so parallel calls are refused.',
     'A timeout or indeterminate result blocks later mutations; resolve it with illustrator_reconcile (or the matching reconcile tool) before continuing.',
@@ -1367,9 +1368,25 @@ export function createServer(operations, mutationAdapters = operations.getMutati
             title: adapter.tool.title,
             description: adapter.tool.description,
             inputSchema: adapter.tool.inputSchema,
-            outputSchema: z.object({ result: adapter.tool.outputSchema }),
+            outputSchema: z.object({
+                result: adapter.tool.outputSchema,
+                ...(NEXT_CALL_PLAN_ECHOES[adapter.tool.name] === undefined ? {} : { next_call: nextCallSchema.optional() }),
+            }),
             annotations: adapter.tool.annotations,
-        }, async (params) => text(await operations.executeAdapter(adapter.operation, adapter.tool.normalizePublicInput(params))));
+        }, async (params) => {
+            const checked = await adapter.tool.publicInputSchema.safeParseAsync(params, { error: toolArgumentIssueMessage });
+            if (!checked.success)
+                throw new Error(formatToolArgumentError(adapter.tool.name, checked.error.issues));
+            const response = await operations.executeAdapter(adapter.operation, adapter.tool.normalizePublicInput(params));
+            const nextCall = buildNextCall(adapter.tool, params, response);
+            if (nextCall === undefined)
+                return text(response);
+            const result = text(response);
+            return {
+                content: [...result.content, { type: 'text', text: JSON.stringify({ next_call: nextCall }, null, 2) }],
+                structuredContent: { ...result.structuredContent, next_call: nextCall },
+            };
+        });
     }
     server.registerTool(m6P0RecipeToolContract.name, {
         title: m6P0RecipeToolContract.title,

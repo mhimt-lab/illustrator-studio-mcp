@@ -2,19 +2,20 @@
 
 [日本語](compatibility.md) | **English**
 
-**Public Beta 0.1.0-beta.1.** Keep stable Illustrator in the foreground and the screen unlocked. Transport checks and end-to-end artwork checks through an AI app are separate evidence.
+**Public Beta 0.1.0-beta.2.** Keep stable Illustrator in the foreground and the screen unlocked. Transport checks and end-to-end artwork checks through an AI app are separate evidence.
 
 ## AI clients
 
-| Client | Connection | Checks on this exact distribution | Status |
+| Client | Connection | Checks on this exact distribution (beta.2) | Status |
 | --- | --- | --- | --- |
 | Claude Code 2.1.278 | stdio | Install, registration, discovery, doctor, reads, backup, rectangle plan/apply/verification, save, reopen, independent read-back | Beta client |
-| Claude Desktop 2.2553.1 | stdio, configuration file | Registration, discovery, reads, backup, rectangle plan/apply/verification, save, reopen, read-back. Desktop-issued doctor and new failure-path checks were not performed | Beta client; no `.mcpb` in beta.1. Desktop's built-in Node cannot launch the Illustrator helper; the extension is planned for the next Beta |
-| Codex CLI 0.155.1 | stdio | Connection, approval, discovery, reads, initial save, and verified backup. The final seven calls completed without refusal. Editing plan/apply and subsequent save/reopen, and client-issued doctor, remain unverified | Partial; further Beta verification |
-| ChatGPT Work Local | Local stdio | User-operated backup, rectangle apply/read-back, save and reopen, after correcting state-directory permissions and an invalid command_id following explicit user instruction | Experimental; additional verification, separate from the required Beta client evidence |
-| ChatGPT Work Cloud | Remote MCP | Not run | Verification deferred until after Beta |
+| Claude Desktop 2.2553.1 | Desktop extension (`.mcpb`, built-in Node.js) | Install, saving the settings with their defaults, discovery, reads, backup, rectangle plan/apply/verification, save, reopen, read-back. Desktop cannot run doctor itself | Beta client (main install method) |
+| Claude Desktop 2.2553.1 | stdio, configuration file | Registration, discovery, reads, backup, rectangle plan/apply/verification, save, reopen, read-back | Beta client (alternative install method) |
+| Codex CLI 0.155.1 | stdio | Connection, approval, discovery, reads, backup, rectangle plan/apply/verification, save, reopen, read-back. The client used the plan's `next_call` and reached the applied edit without extra instructions | Beta client |
+| ChatGPT Work Local | Local stdio (registered with the one-line `codex mcp add`) | Registration, discovery, reads, backup, rectangle plan/apply/verification, save, reopen, read-back. The client used the plan's `next_call` and reached the applied edit without extra instructions. Setup steps are in the [install guide](install.en.md#chatgpt-work-local) | Beta client |
+| ChatGPT Work Cloud | Remote MCP | Not run | Not supported (this MCP drives a local Illustrator) |
 
-Configuration alone, transport discovery, or success in another app does not establish support. Claude Code and Desktop completed the bounded rectangle workflow, not every editing operation or every failure path. Doctor was also checked independently on the installed package. These checks do not guarantee arbitrary artwork support.
+Configuration alone, transport discovery, or success in another app does not establish support. For beta.2, each client above completed the bounded rectangle workflow on a test document with the same package that is published. This does not cover every editing operation or every failure path, and does not guarantee arbitrary artwork support.
 
 ## Per-operation live verification
 

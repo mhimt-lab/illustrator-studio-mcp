@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from './command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from './command-id.js';
 import { canonicalSha256 } from './mutation-canonical.js';
 import { MUTATE_BATCH_ADAPTER_IDENTITY, MUTATE_BATCH_OPERATION, mutateBatchResponseSchema, mutateBatchToolContract, } from './adapters/mutate-batch-adapter.js';
 import { bindRecipeInputs, buildRecipeBatchPlanRequest, recipeDefinitionSchema, recipeIdSchema, recipeInputValuesSchema, recipeVersionSchema, validateRecipeBindsStructurally, RECIPE_MAX_STEPS, RECIPE_MIN_STEPS, } from './recipe-schema.js';
@@ -129,7 +129,7 @@ export const runRecipeInputSchema = z.strictObject({
     expected_document_key: documentKeySchema,
     inputs: recipeInputValuesSchema.default({}),
     approved_plan: approvedPlanSchema,
-    command_id: canonicalCommandIdSchema,
+    command_id: applyCommandIdSchema,
     apply: z.literal(true),
 });
 export class RecipeApprovalMismatchError extends Error {

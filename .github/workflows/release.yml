@@ -22,6 +22,8 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Rebuild the exact reviewed tarball outside the snapshot
         run: node scripts/release-artifact.mjs --skip-build --expect-tag "$GITHUB_REF_NAME" --out-dir "$RUNNER_TEMP/beta-artifact"
+      - name: Rebuild the reviewed Claude Desktop extension from that tarball
+        run: node scripts/build-mcpb.mjs --tarball "$RUNNER_TEMP"/beta-artifact/*.tgz --out-dir "$RUNNER_TEMP/beta-artifact" --record
       - name: Verify previously reviewed manifest and artifact
         run: node scripts/verify-beta-publication.mjs "$RUNNER_TEMP/beta-artifact" "$GITHUB_REF_NAME"
       - run: node scripts/release-verify.mjs --release-dir "$RUNNER_TEMP/beta-artifact" --handshake require
@@ -42,4 +44,4 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" --verify-tag --prerelease --latest=false \
             --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/beta-artifact/RELEASE_NOTES.md" \
-            "$RUNNER_TEMP"/beta-artifact/*.tgz "$RUNNER_TEMP/beta-artifact/SHA256SUMS"
+            "$RUNNER_TEMP"/beta-artifact/*.tgz "$RUNNER_TEMP"/beta-artifact/*.mcpb "$RUNNER_TEMP/beta-artifact/SHA256SUMS"

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from '../command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
@@ -104,7 +104,7 @@ export const alignObjectsPublicInputSchema = z.discriminatedUnion('apply', [
         .superRefine((value, context) => refineTargets(value.targets.map((t) => ({ targetUuid: t.target_uuid })), normalizeLayout(value.layout), context)),
     z.strictObject({ expected_document_key: documentKeySchema, layout: publicLayoutSchema,
         targets: z.array(publicApplyTargetSchema).min(ALIGN_MIN_TARGETS).max(ALIGN_MAX_TARGETS), apply: z.literal(true),
-        command_id: canonicalCommandIdSchema })
+        command_id: applyCommandIdSchema })
         .superRefine((value, context) => refineTargets(value.targets.map((t) => ({ targetUuid: t.target_uuid })), normalizeLayout(value.layout), context)),
 ]);
 const inputSchema = z.strictObject({
@@ -114,7 +114,7 @@ const inputSchema = z.strictObject({
     targets: z.array(z.strictObject({ target_uuid: uuidSchema, expected_before: transformObjectSnapshotSchema.optional(),
         confirmed_after: transformObjectSnapshotSchema.optional() })).min(ALIGN_MIN_TARGETS).max(ALIGN_MAX_TARGETS),
     apply: z.boolean().default(false),
-    command_id: canonicalCommandIdSchema.optional(),
+    command_id: applyCommandIdSchema.optional(),
 });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(alignObjectsPublicInputSchema, { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });

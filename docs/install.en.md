@@ -2,7 +2,7 @@
 
 [日本語](install.md) | **English**
 
-**Public Beta 0.1.0-beta.1.** Requires macOS, stable Illustrator, and Node.js 20+. Keep Illustrator in the foreground and the screen unlocked. Check [client-specific verification](compatibility.en.md).
+**Public Beta 0.1.0-beta.2.** Requires macOS, stable Illustrator, and Node.js 20+. Keep Illustrator in the foreground and the screen unlocked. Check [client-specific verification](compatibility.en.md).
 
 ## Install from npm
 
@@ -12,7 +12,7 @@ illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
 
-The version should be `0.1.0-beta.1`. On this initial publication, both npm `beta` and `latest` point to this Beta; it is not Stable. These instructions explicitly use `@beta`. Use `@0.1.0-beta.1` instead to pin the version.
+The version should be `0.1.0-beta.2`. It is not Stable. Always include `@beta`: a plain `npm install illustrator-studio-mcp` uses the `latest` tag, which may not be this version. Use `@0.1.0-beta.2` instead to pin the version.
 
 To launch without a global install:
 
@@ -24,11 +24,11 @@ This starts a stdio server waiting for an AI app, not an interactive terminal UI
 
 ## Install the release file
 
-Download the tgz and `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.1) into the same directory, then run there:
+Download the tgz and `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.2) into the same directory, then run there. `SHA256SUMS` also lists the Desktop extension (`.mcpb`); `--ignore-missing` skips files you did not download.
 
 ```bash
-shasum -a 256 -c SHA256SUMS
-npm install -g ./illustrator-studio-mcp-0.1.0-beta.1.tgz
+shasum -a 256 -c SHA256SUMS --ignore-missing
+npm install -g ./illustrator-studio-mcp-0.1.0-beta.2.tgz
 illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
@@ -57,9 +57,20 @@ Restart and check `/mcp`.
 
 ### Claude Desktop
 
-**No `.mcpb` extension is distributed in beta.1.** Desktop's built-in Node cannot launch the Illustrator helper, so use the configuration file with regular Node.js. The extension is planned for the next Beta.
+#### Desktop extension (`.mcpb`, main method)
 
-After installing globally, find your real paths:
+The Desktop extension runs on the Node.js built into Claude Desktop. It needs neither the npm install nor configuration file edits.
+
+1. Download `illustrator-studio-mcp-0.1.0-beta.2.mcpb` and `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.2) into the same directory and run `shasum -a 256 -c SHA256SUMS --ignore-missing` there. If the hash does not match, stop and do not install.
+2. Double-click the `.mcpb` file to open it in Claude Desktop. In the install dialog, confirm the author **mhimt**, version **0.1.0-beta.2**, and license **BUSL-1.1**, then choose Install. The extension is not signed.
+3. For stable Illustrator, keep the default "Illustrator application" setting `id:com.adobe.illustrator` and save (use `id:com.adobe.illustratorBeta` for Illustrator Beta).
+4. Confirm the extension is enabled, then start a new chat with a read-only request ([Start with a read](#start-with-a-read)).
+
+Uninstall it from Claude Desktop's Settings → Extensions. If you also register the server through the configuration file, the same tools appear twice; use one or the other.
+
+#### Configuration file (alternative)
+
+To run on regular Node.js, or to use the version installed with npm, you can register the server in the configuration file instead. After installing globally, find your real paths:
 
 ```bash
 command -v node
@@ -107,7 +118,51 @@ args = ["-y", "illustrator-studio-mcp@beta"]
 ILLUSTRATOR_APPLICATION = "id:com.adobe.illustrator"
 ```
 
-If `npx` is not found, use its absolute path from `command -v npx` and ensure Node.js is visible to the launch environment. Restart Codex and check `/mcp`. beta.1's Codex live verification stops at backup; editing plan/apply and later steps remain unverified. These examples do not expand that scope.
+If `npx` is not found, use its absolute path from `command -v npx` and ensure Node.js is visible to the launch environment. Restart Codex and check `/mcp`.
+
+For editing tools, the `apply: false` plan returns a `next_call`. Codex can apply by sending those arguments (including `command_id`) unchanged. Review the plan before approving a change. On beta.2, Codex CLI completed rectangle plan, apply, save, and reopen without extra instructions ([verification status](compatibility.en.md)).
+
+### ChatGPT Work Local
+
+Use this MCP as a local stdio server from **Work locally** in the ChatGPT desktop app. ChatGPT Work Cloud (Work running in the cloud) is not supported.
+
+The ChatGPT desktop app and Codex CLI share the same MCP configuration ([official documentation](https://learn.chatgpt.com/docs/extend/mcp)). If you have Codex CLI, one command in Terminal registers the server. If you already registered it under "Codex CLI" above, the same server appears in ChatGPT.
+
+```bash
+codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@beta
+```
+
+- If a server with the same name exists, choose a different name so the existing entry is not overwritten.
+- When `codex mcp add` rewrites the configuration file, it may drop settings that only restate a default (for example `enabled = true`). The meaning is unchanged. To be safe, copy `~/.codex/config.toml` first.
+- Without `ILLUSTRATOR_APPLICATION`, the server drives the standard Illustrator release (`id:com.adobe.illustrator`).
+
+After registering, open Settings → Plugins → **MCP** in the ChatGPT desktop app, confirm the server is listed, and turn its switch off and on again. In a new Work locally chat, start with a read:
+
+> Run illustrator_list_documents once and tell me which documents are open. Do not create, edit, or save anything.
+
+#### Without Codex CLI (register in the app)
+
+Install the package globally first, then check the actual paths in Terminal:
+
+```bash
+command -v node
+npm root -g
+```
+
+1. In the ChatGPT desktop app, open **Work locally**, then Settings → Plugins → **MCP** → Add → **STDIO**.
+2. Enter the following. If a server with the same name exists, inspect it instead of overwriting it.
+   - Command: the absolute path of node from `command -v node`
+   - Arguments: the output of `npm root -g` followed by `/illustrator-studio-mcp/dist/index.js`, as an absolute path (without a global install, use the absolute path from `command -v npx` as the command and `-y` and `illustrator-studio-mcp@beta` as the arguments)
+   - Environment variable: `ILLUSTRATOR_APPLICATION` = `id:com.adobe.illustrator`
+3. After saving, turn the server's switch off and on again to reconnect.
+
+Notes:
+
+- Keep tool-call approval (the permission mode) at a setting that lets you review changes. For editing tools, check the `apply: false` plan before approving the apply.
+- If the plan result has `next_call`, use its arguments (including `command_id`) for the apply as is. Reuse the same value only to retry the same apply.
+- The state directory (`ILLUSTRATOR_STUDIO_MCP_STATE_DIR`) normally needs no setting (default: `~/Library/Application Support/illustrator-studio-mcp`). If you point it at a directory you created, set its permissions to `0700` (`chmod 700 <directory>`); a directory you do not own or with wider permissions is refused when the server uses it.
+
+Verification status: the beta.2 package itself, registered with the same one-line `codex mcp add … -- npx -y …` command (before publication, with the package argument replaced by the path of the distribution file), completed rectangle plan, apply, read-back, save, and reopen from a new Work locally chat. See [compatibility and verification scope](compatibility.en.md).
 
 ## Start with a read
 
@@ -121,8 +176,8 @@ Compare the response with Illustrator. No document and no selection are differen
 
 Update with `npm install -g illustrator-studio-mcp@beta` or a newer tgz, then restart the AI app. Check the version and [changelog](../CHANGELOG.en.md). To uninstall, run `npm uninstall -g illustrator-studio-mcp`, then remove that server entry from the app. Preserve unresolved execution records.
 
-Documentation on GitHub main can be corrected after publication. This documentation change does not replace npm's already published 0.1.0-beta.1 README or tarball. Use the [public README](../README.en.md) for current guidance.
+Documentation on GitHub main can be corrected after publication. Later documentation changes do not replace the README or tarball of any version already published on npm. Use the [public README](../README.en.md) for current guidance.
 
 Configuration references: [Claude Code](https://code.claude.com/docs/en/mcp), [Claude Desktop local MCP](https://modelcontextprotocol.io/docs/develop/connect-local-servers), [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp), [npm exec / npx](https://docs.npmjs.com/cli/v11/commands/npm-exec/). Configuration syntax is separate from live verification.
 
-The CHANGELOG inside the already published npm 0.1.0-beta.1 tgz cannot be replaced. Its original date remains unchanged; the corrected publication date on GitHub is 2026-09-22 JST (Asia/Tokyo).
+The CHANGELOG inside the already published npm 0.1.0-beta.1 tgz cannot be replaced. Its original date remains unchanged; the publication date is 2026-09-22 JST (Asia/Tokyo).

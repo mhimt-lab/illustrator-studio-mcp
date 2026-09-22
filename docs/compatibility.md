@@ -1,20 +1,21 @@
 # Client compatibility / AIアプリ別の確認状況
 
-**Public Beta 0.1.0-beta.1。** 接続方式の検査と、AIアプリからIllustratorで制作を完遂した証拠は別です。Illustratorを前面に表示し、画面ロックを解除した状態が前提です。
+**Public Beta 0.1.0-beta.2。** 接続方式の検査と、AIアプリからIllustratorで制作を完遂した証拠は別です。Illustratorを前面に表示し、画面ロックを解除した状態が前提です。
 
 **日本語** | [English](compatibility.en.md)
 
 ## AIアプリ別
 
-| Client | 接続方式 | 初回Betaでの確認（この配布物そのもの） | 扱い |
+| Client | 接続方式 | beta.2での確認（この配布物そのもの） | 扱い |
 | --- | --- | --- | --- |
-| Claude Code 2.1.278 | stdio | 導入・登録・機能取得・診断・読み取り・計画・直前確認・適用・結果検証・保存・再読込・結果の読み直し | Beta対象 |
-| Claude Desktop 2.2553.1 | stdio（設定ファイル方式） | 登録・機能取得・読み取り・backup・長方形の計画/適用/結果検証・保存・再読込・読み直し。Desktop自身からのdoctorと新たな失敗経路は未確認 | Beta対象。`.mcpb`拡張は次のベータで提供予定（Desktop内蔵のNodeでは補助プロセスを起動できない既知の問題） |
-| Codex CLI 0.155.1 | stdio | 接続・承認経路・機能取得・読み取り・保存・変更前の書類のバックアップまで。変更系（計画・適用）以降は未確認。最終の7呼出しは拒否なしで完了。クライアント自身からのdoctorは未確認 | Partial・Beta期間中に追加検証 |
-| ChatGPT Work Local | ローカルstdio | ユーザー手動でbackup・長方形の適用/読み直し・保存/再読込まで確認。ただしstate root権限の修正と、不正なcommand_idの拒否後のユーザー指示による修正を含む | Experimental・追加検証中。必須clientの承認証拠とは別 |
-| ChatGPT Work Cloud | remote MCP経路 | 未実施 | ベータ後に追加検証 |
+| Claude Code 2.1.278 | stdio | 導入・登録・機能取得・診断・読み取り・backup・長方形の計画/適用/結果検証・保存・再読込・結果の読み直し | Beta対象 |
+| Claude Desktop 2.2553.1 | Desktop拡張（`.mcpb`、内蔵Node.js） | インストール・既定値のままの設定保存・機能取得・読み取り・backup・長方形の計画/適用/結果検証・保存・再読込・読み直し。Desktop自身からのdoctorは実行できません | Beta対象（主な導入方法） |
+| Claude Desktop 2.2553.1 | stdio（設定ファイル方式） | 登録・機能取得・読み取り・backup・長方形の計画/適用/結果検証・保存・再読込・読み直し | Beta対象（代替の導入方法） |
+| Codex CLI 0.155.1 | stdio | 接続・承認・機能取得・読み取り・backup・長方形の計画/適用/結果検証・保存・再読込・読み直し。計画の `next_call` を使い、追加の指示なしに適用まで進むことを確認 | Beta対象 |
+| ChatGPT Work Local | ローカルstdio（`codex mcp add` の1行で登録） | 登録・機能取得・読み取り・backup・長方形の計画/適用/結果検証・保存・再読込・読み直し。計画の `next_call` を使い、追加の指示なしに適用まで進むことを確認。導入手順は[導入ガイド](install.md#chatgpt-work-local) | Beta対象 |
+| ChatGPT Work Cloud | remote MCP経路 | 未実施 | 未対応（このMCPはローカルのIllustratorを操作するため） |
 
-設定できること、接続できること、別のアプリで動いたことだけではTested / Supportedにしません。初回Betaは、Claude CodeとClaude Desktopで、公開するものと同じ配布物を使い、導入・登録・機能取得・読み取り・長方形の計画・適用・結果検証・保存・再読込・結果の読み直しを確認してから公開しています。診断は独立したinstalled packageとClaude Codeで確認しました。各クライアントの全失敗経路が検証済みという意味ではありません。確認は限定した書類・操作での記録で、任意の制作物での動作を保証するものではありません。
+設定できること、接続できること、別のアプリで動いたことだけではTested / Supportedにしません。beta.2は、上の各アプリで、公開するものと同じ配布物を使い、確認用の書類で長方形の計画・適用・結果検証・保存・再読込・結果の読み直しを確認してから公開しています。各クライアントの全失敗経路や、すべての変更操作が検証済みという意味ではありません。確認は限定した書類・操作での記録で、任意の制作物での動作を保証するものではありません。
 
 ## 操作別の実機確認
 

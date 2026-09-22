@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { assertBetaMetadata, snapshotDigest, sha256, validateGateManifest } from './beta-release-policy.mjs';
+import { assertBetaMetadata, mcpbDigest, snapshotDigest, sha256, validateGateManifest } from './beta-release-policy.mjs';
 const root = process.cwd();
 const [artifact, tag] = process.argv.slice(2);
 if (!artifact || !tag) throw new Error('Artifact directory and immutable Beta tag are required.');
@@ -12,5 +12,5 @@ if (manifest.version !== pkg.version || manifest.tarball !== `${pkg.name}-${pkg.
 if (manifest.releaseNotesSource !== 'released') throw new Error('Finalize the dated public CHANGELOG before release approval.');
 const digest = sha256(await readFile(join(artifact, manifest.tarball)));
 if (digest !== manifest.sha256) throw new Error('Artifact checksum mismatch.');
-validateGateManifest(JSON.parse(await readFile('BETA-RELEASE-GATE.json', 'utf8')), { version: pkg.version, candidateSha256: await snapshotDigest(root), packageSha256: digest });
-console.log('Public manifest matches this snapshot and tarball. Private evidence verification is performed before transfer; authorization relies on the protected publication environment.');
+validateGateManifest(JSON.parse(await readFile('BETA-RELEASE-GATE.json', 'utf8')), { version: pkg.version, candidateSha256: await snapshotDigest(root), packageSha256: digest, mcpbSha256: await mcpbDigest(artifact, manifest) });
+console.log('Public manifest matches this snapshot, tarball and .mcpb. Private evidence verification is performed before transfer; authorization relies on the protected publication environment.');

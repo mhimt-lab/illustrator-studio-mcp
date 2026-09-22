@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from '../command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
@@ -33,9 +33,9 @@ const internalInputSchema = z.discriminatedUnion('apply', [
 const commonPublic = { expected_document_key: layerDocumentKeySchema, name: layerNameSchema, parent_layer_path: layerPathSchema.optional(), position: positionSchema.default(0) };
 export const createLayerPublicInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonPublic, apply: z.literal(false).default(false) }),
-    z.strictObject({ ...commonPublic, expected_container_before: containerTargetSchema, expected_sibling_order: siblingOrderSchema, apply: z.literal(true), command_id: canonicalCommandIdSchema }),
+    z.strictObject({ ...commonPublic, expected_container_before: containerTargetSchema, expected_sibling_order: siblingOrderSchema, apply: z.literal(true), command_id: applyCommandIdSchema }),
 ]);
-const inputSchema = z.strictObject({ ...commonPublic, expected_container_before: containerTargetSchema.optional(), expected_sibling_order: siblingOrderSchema.optional(), apply: z.boolean().default(false), command_id: canonicalCommandIdSchema.optional() });
+const inputSchema = z.strictObject({ ...commonPublic, expected_container_before: containerTargetSchema.optional(), expected_sibling_order: siblingOrderSchema.optional(), apply: z.boolean().default(false), command_id: applyCommandIdSchema.optional() });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(createLayerPublicInputSchema, { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
 function normalizePublicInput(input) {

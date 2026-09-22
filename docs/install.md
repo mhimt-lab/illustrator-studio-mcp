@@ -2,7 +2,7 @@
 
 **日本語** | [English](install.en.md)
 
-**Public Beta 0.1.0-beta.1。** Mac、通常版Illustrator、Node.js 20以上が必要です。Illustratorを前面に表示し、画面ロックを解除して使います。[アプリ別の確認範囲](compatibility.md)を確認してください。
+**Public Beta 0.1.0-beta.2。** Mac、通常版Illustrator、Node.js 20以上が必要です。Illustratorを前面に表示し、画面ロックを解除して使います。[アプリ別の確認範囲](compatibility.md)を確認してください。
 
 ## npmから入れる
 
@@ -12,7 +12,7 @@ illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
 
-版の表示は `0.1.0-beta.1` です。初回公開ではnpmの `beta` と `latest` がともにこのBeta版を指しています。Stable版ではありません。手順では明示的に `@beta` を使い、版を固定したい場合は `@0.1.0-beta.1` に置き換えてください。
+版の表示は `0.1.0-beta.2` です。Stable版ではありません。手順では必ず `@beta` を付けてください。タグなしの `npm install illustrator-studio-mcp` は `latest` を使うため、この版になるとは限りません。版を固定したい場合は `@0.1.0-beta.2` に置き換えてください。
 
 グローバルインストールなしで起動するには、次を使います。
 
@@ -24,11 +24,11 @@ npx -y illustrator-studio-mcp@beta
 
 ## 配布用ファイルから入れる
 
-[GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.1)からtgzと `SHA256SUMS` を同じフォルダへ取得し、そのフォルダで実行します。
+[GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.2)からtgzと `SHA256SUMS` を同じフォルダへ取得し、そのフォルダで実行します。`SHA256SUMS` にはDesktop拡張（`.mcpb`）の行もあるため、取得していないファイルは `--ignore-missing` で飛ばします。
 
 ```bash
-shasum -a 256 -c SHA256SUMS
-npm install -g ./illustrator-studio-mcp-0.1.0-beta.1.tgz
+shasum -a 256 -c SHA256SUMS --ignore-missing
+npm install -g ./illustrator-studio-mcp-0.1.0-beta.2.tgz
 illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
@@ -57,9 +57,20 @@ claude mcp add --transport stdio illustrator-studio -- npx -y illustrator-studio
 
 ### Claude Desktop
 
-**beta.1では `.mcpb` を配布していません。** Desktop内蔵NodeではIllustrator用の補助プロセスを起動できないため、通常のNode.jsを使う設定ファイル方式で接続します。`.mcpb` は次のベータで提供予定です。
+#### Desktop拡張（`.mcpb`、主な手順）
 
-まずnpmのグローバルインストールを済ませ、ターミナルで実際のパスを確認します。
+Desktop拡張は、Claude Desktopに内蔵されたNode.jsで動きます。npmでのインストールも設定ファイルの編集も不要です。
+
+1. [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.2)から `illustrator-studio-mcp-0.1.0-beta.2.mcpb` と `SHA256SUMS` を同じフォルダへ取得し、そのフォルダで `shasum -a 256 -c SHA256SUMS --ignore-missing` を実行します。hash不一致なら導入せず停止してください。
+2. `.mcpb` ファイルをダブルクリックしてClaude Desktopで開きます。インストール画面で提供元 **mhimt**、版 **0.1.0-beta.2**、ライセンス **BUSL-1.1** を確認して「インストール」を押します。この拡張には署名がありません。
+3. 設定の「Illustrator application」は、通常版なら既定値 `id:com.adobe.illustrator` のまま保存します（Illustrator Beta版は `id:com.adobe.illustratorBeta`）。
+4. 拡張が有効になっていることを確かめ、新しいチャットで読み取りだけを依頼します（[書類を変えずに試す](#書類を変えずに試す)）。
+
+削除は、Claude Desktopの設定 → 拡張機能から行います。同じサーバーを設定ファイル方式でも登録すると、同じツールが2つ表示されます。どちらか一方にしてください。
+
+#### 設定ファイル方式（代替）
+
+通常のNode.jsで動かしたい場合や、npmで入れた版を使いたい場合は、設定ファイルに書く方法も使えます。まずnpmのグローバルインストールを済ませ、ターミナルで実際のパスを確認します。
 
 ```bash
 command -v node
@@ -107,7 +118,51 @@ args = ["-y", "illustrator-studio-mcp@beta"]
 ILLUSTRATOR_APPLICATION = "id:com.adobe.illustrator"
 ```
 
-`npx` が見つからない場合は `command -v npx` で確認した絶対パスを設定し、Node.jsも起動環境から見えることを確認します。Codexを再起動し `/mcp` で確認します。beta.1のCodex実機検証はbackupまでで、変更系の計画・適用以降は未確認です。設定例はその制限を変更しません。
+`npx` が見つからない場合は `command -v npx` で確認した絶対パスを設定し、Node.jsも起動環境から見えることを確認します。Codexを再起動し `/mcp` で確認します。
+
+変更系のツールは、`apply: false` の計画の結果に `next_call` が付きます。Codexはその引数（`command_id` を含む）をそのまま使って適用できます。変更を承認する前に、計画の内容を確かめてください。beta.2では、Codex CLIが追加の指示なしに長方形の計画・適用・保存・再読込まで進むことを確認しています（[確認状況](compatibility.md)）。
+
+### ChatGPT Work Local
+
+ChatGPTデスクトップアプリの **Work locally** から、このMCPをローカルのstdioサーバーとして使えます。ChatGPT Work Cloud（クラウド側で動くWork）には対応していません。
+
+ChatGPTデスクトップとCodex CLIは同じMCP設定を共有します（[公式の説明](https://learn.chatgpt.com/docs/extend/mcp)）。Codex CLIがあれば、ターミナルで次の1行を実行するだけで登録できます。上の「Codex CLI」で登録済みなら、同じサーバーがChatGPTにも表示されます。
+
+```bash
+codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@beta
+```
+
+- 既に同じ名前のサーバーがある場合は、別の名前にしてください（既存の設定を上書きしないため）。
+- `codex mcp add` は設定ファイルを書き直すときに、既定値と同じ値の明示（例: `enabled = true`）を省くことがあります。意味は変わりません。気になる場合は実行前に `~/.codex/config.toml` のコピーを取ってください。
+- 操作するIllustratorは、`ILLUSTRATOR_APPLICATION` を設定しなければ通常版（`id:com.adobe.illustrator`）です。
+
+登録後、ChatGPTデスクトップの設定 → プラグイン → **MCP** でサーバーが表示されていることを確認し、そのスイッチを一度オフにしてからオンに戻します。新しい Work locally のチャットで、まず読み取りだけを依頼します。
+
+> illustrator_list_documents を1回だけ実行して、開いている書類を教えて。作成・編集・保存はしないで。
+
+#### Codex CLIがない場合（画面から登録）
+
+まずnpmのグローバルインストールを済ませ、ターミナルで実際のパスを確認します。
+
+```bash
+command -v node
+npm root -g
+```
+
+1. ChatGPTデスクトップで **Work locally** を開き、設定 → プラグイン → **MCP** → 追加 → **STDIO** を選びます。
+2. 次のように入力します。既存の同名サーバーがあれば上書きせず、内容を確認してください。
+   - 起動コマンド: `command -v node` で表示された node の絶対パス
+   - 引数: `npm root -g` の出力に `/illustrator-studio-mcp/dist/index.js` を付けた絶対パス（グローバルインストールせずに使う場合は、コマンドに `command -v npx` の絶対パス、引数に `-y` と `illustrator-studio-mcp@beta`）
+   - 環境変数: `ILLUSTRATOR_APPLICATION` = `id:com.adobe.illustrator`
+3. 保存した後、そのサーバーのスイッチを一度オフにしてからオンに戻し、接続し直します。
+
+使うときの注意:
+
+- ツール呼び出しの承認（許可モード）は、変更を確認できる設定のままにしてください。変更系のツールは、先に `apply: false` の計画を確かめてから適用を承認します。
+- 計画の結果に `next_call` があれば、その引数（`command_id` を含む）をそのまま適用に使うと迷いません。同じ適用を再試行するときだけ同じ値を使います。
+- 実行記録の置き場所（`ILLUSTRATOR_STUDIO_MCP_STATE_DIR`）は通常は設定不要です（既定は `~/Library/Application Support/illustrator-studio-mcp`）。自分で作ったディレクトリを指定する場合は、権限を `0700` にしてください（`chmod 700 <ディレクトリ>`）。所有者が自分でない、または権限が広いディレクトリは、サーバーが使う時点で拒否されます。
+
+確認状況: beta.2の配布物そのものを、上と同じ `codex mcp add … -- npx -y …` の1行（公開前のため、パッケージ指定だけ配布用ファイルのパスに置き換え）で登録し、新しい Work locally のチャットから、長方形の計画・適用・結果の読み直し・保存・再読込までを確認しています。詳しくは[対応環境と検証範囲](compatibility.md)を参照してください。
 
 ## 書類を変えずに試す
 
@@ -121,8 +176,8 @@ ILLUSTRATOR_APPLICATION = "id:com.adobe.illustrator"
 
 更新は `npm install -g illustrator-studio-mcp@beta` または新しいtgzで行い、AIアプリを再起動します。[変更履歴](../CHANGELOG.md)と版を確認してください。削除は `npm uninstall -g illustrator-studio-mcp` の後にAIアプリのserver設定を外します。未解決の実行記録は削除しません。
 
-GitHubのmain上の案内は公開後にも訂正されます。npmに公開済みの0.1.0-beta.1のREADMEとtgzは、この文書修正では変わりません。最新の案内は[公開README](../README.md)を参照してください。
+GitHubのmain上の案内は公開後にも訂正されることがあります。npmに公開済みの各版のREADMEとtgzは、後からの文書修正では変わりません。最新の案内は[公開README](../README.md)を参照してください。
 
 設定形式の出典: [Claude Code](https://code.claude.com/docs/en/mcp)、[Claude DesktopのローカルMCP](https://modelcontextprotocol.io/docs/develop/connect-local-servers)、[Codex MCP](https://learn.chatgpt.com/docs/extend/mcp)、[npm exec / npx](https://docs.npmjs.com/cli/v11/commands/npm-exec/)。接続例の仕様と実機確認範囲は別です。
 
-公開済みnpm 0.1.0-beta.1のtgz内のCHANGELOGは差し替えできません。収録済みの日付はそのままで、GitHub上の公開日は2026-09-22 JST（Asia/Tokyo）に訂正しています。
+公開済みnpm 0.1.0-beta.1のtgz内のCHANGELOGは差し替えできません。収録済みの日付はそのままで、公開日は2026-09-22 JST（Asia/Tokyo）です。

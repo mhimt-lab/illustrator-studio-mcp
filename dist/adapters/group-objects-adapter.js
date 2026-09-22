@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from '../command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
@@ -87,7 +87,7 @@ export const groupObjectsPublicInputSchema = z.discriminatedUnion('apply', [
         expected_targets_before: targetSnapshotsSchema,
         expected_parent_order: parentOrderSchema,
         apply: z.literal(true),
-        command_id: canonicalCommandIdSchema,
+        command_id: applyCommandIdSchema,
     }),
 ]);
 const groupObjectsInputSchema = z.strictObject({
@@ -95,7 +95,7 @@ const groupObjectsInputSchema = z.strictObject({
     expected_targets_before: targetSnapshotsSchema.optional(),
     expected_parent_order: parentOrderSchema.optional(),
     apply: z.boolean().default(false),
-    command_id: canonicalCommandIdSchema.optional(),
+    command_id: applyCommandIdSchema.optional(),
 });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(groupObjectsPublicInputSchema, { io: 'input' });
 groupObjectsInputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });

@@ -2,7 +2,7 @@
 
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg) ![Node.js >=20](https://img.shields.io/badge/node-%3E%3D20-339933.svg) ![MCP: 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-blue.svg) ![Status: beta](https://img.shields.io/badge/status-beta-orange.svg) [![npm beta version](https://img.shields.io/npm/v/illustrator-studio-mcp/beta)](https://www.npmjs.com/package/illustrator-studio-mcp)
 
-**Public Beta — 0.1.0-beta.1.** A trial release, not production-ready. Try it on a copy of your artwork.
+**Public Beta — 0.1.0-beta.2.** A trial release, not production-ready. Try it on a copy of your artwork.
 
 > **Requirement: keep Illustrator in the foreground with the screen unlocked.** Continuous editing of saved files (edit sessions), export, and many other operations are verified only in this state. In the background or with the screen locked, operations are refused or fail with an unclear reason.
 
@@ -15,7 +15,7 @@ Ask a compatible AI app such as Claude Code to replace a headline, align shapes,
 
 The tool identifies what will change, checks the target again immediately before writing, and reads the result back from Illustrator. If a response is lost and the outcome is unclear, it stops further edits.
 
-**Public Beta 0.1.0-beta.1. Mac only.** Distributed through the [npm `beta` tag](https://www.npmjs.com/package/illustrator-studio-mcp) and a [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.1).
+**Public Beta 0.1.0-beta.2. Mac only.** Distributed through the [npm `beta` tag](https://www.npmjs.com/package/illustrator-studio-mcp) and a [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.2).
 
 [82 MCP tools](docs/tools.en.md) · [Verified per operation on Illustrator 30.8.x](docs/compatibility.en.md)
 
@@ -56,11 +56,11 @@ Conditions differ by operation: see [Verification and limitations](#verification
 | Area | Details |
 | --- | --- |
 | In scope | Reading and inspection; non-destructive edits of supported shapes, text, and images (including CMYK documents); continuous editing of saved files (edit sessions, experimental); backup and overwrite save; outlined AI/PDF export; placing, relinking, embedding (JPEG/PNG in RGB documents only), and optimizing images; stdio transport (MCP 2026-07-28) |
-| Out of scope | The Claude Desktop extension (`.mcpb`, planned for the next Beta), PNG/JPEG/SVG export, artboard operations, paragraph styles, MCP Tasks, Windows, deleting several objects at once (one object per delete), missing-link repair, ungrouping |
+| Out of scope | PNG/JPEG/SVG export, artboard operations, paragraph styles, MCP Tasks, Windows, deleting several objects at once (one object per delete), missing-link repair, ungrouping |
 | Streamable HTTP | Covered by automated tests and client connection checks only. No Illustrator operation over HTTP has been recorded. Loopback (`127.0.0.1`) only; not for external exposure |
 | CMYK documents | Stacking-order changes support bring-to-front (`front`) only. Creating compound paths is not supported (refused) |
 | Known intermittent issue | Reading groups can intermittently lose the reference to an item. The operation then stops on the safe side (fails closed) instead of guessing. It is not hidden by retries, and restarting Illustrator is not guaranteed to fix it |
-| CI | Automated tests on GitHub Actions have not passed for this release (the full suite was run locally). This describes the frozen distribution, separately from later CI results |
+| CI | The release candidate source passed the full test suite on macOS CI and locally. This describes the frozen distribution, separately from later CI results |
 
 ## How changes are checked
 
@@ -87,7 +87,7 @@ npm install -g illustrator-studio-mcp@beta
 illustrator-studio-mcp --version
 ```
 
-The second command should print `0.1.0-beta.1`. You can also install from the distribution file (`.tgz`) attached to the GitHub prerelease. For updating and uninstalling, see [Install](docs/install.en.md). The one-click Claude Desktop extension (`.mcpb`) is planned for the next Beta. This version has a known issue: under Desktop's built-in Node it cannot start the helper process that drives Illustrator, so connect Claude Desktop through its configuration file.
+The second command should print `0.1.0-beta.2`. Always include `@beta`: a plain `npm install illustrator-studio-mcp` uses the `latest` tag, which may not be this version. You can also install from the distribution file (`.tgz`) attached to the GitHub prerelease. For updating and uninstalling, see [Install](docs/install.en.md). For Claude Desktop, you can open the Desktop extension (`.mcpb`) from the prerelease and install it; the npm install above is then not needed ([steps](docs/install.en.md#claude-desktop)).
 
 ### 2. Connect your AI app
 
@@ -97,9 +97,9 @@ For Claude Code, run this in Terminal, then restart the app:
 claude mcp add --transport stdio illustrator-studio -- illustrator-studio-mcp
 ```
 
-To launch without a global install, use `npx -y illustrator-studio-mcp@beta`. Your AI app launches this command and connects over stdio. `@beta` follows future Beta updates; use `@0.1.0-beta.1` to pin this version.
+To launch without a global install, use `npx -y illustrator-studio-mcp@beta`. Your AI app launches this command and connects over stdio. `@beta` follows future Beta updates; use `@0.1.0-beta.2` to pin this version.
 
-Other AI apps use different settings. See [connection examples](docs/install.en.md#register-the-installed-command). A successful connection test is separate from completing production work through that app.
+Other AI apps (Claude Desktop, Codex CLI, ChatGPT Work Local) use different settings. See [connection examples](docs/install.en.md#register-the-installed-command). A successful connection test is separate from completing production work through that app.
 
 ### 3. Start without changing a document
 
@@ -187,4 +187,4 @@ The approved maintainer identity is **mhimt**, with contact [sporks-framer9t@icl
 
 ## Clients and transports
 
-The first Beta is published only after this exact package was installed and checked in Claude Code and Claude Desktop, from installation through save, reopen, and read-back. In Codex CLI, connection, approval, discovery, reads, save, and a backup of the unchanged document were checked; edits (plan and apply) and later steps are not verified. ChatGPT Work remains experimental and under additional verification. A user manually completed a Local save/reopen check after an input refusal and a user-directed correction; it is separate from the required initial Beta client checks. Cloud remains unverified. [Client-specific and transport evidence](docs/compatibility.en.md) are tracked separately. Configuration examples do not establish support.
+beta.2 is published only after this exact package was installed and checked in Claude Code, Claude Desktop (both the `.mcpb` Desktop extension and the configuration file), Codex CLI, and ChatGPT Work Local, from installation through rectangle plan, apply, verification, save, reopen, and read-back. In Codex CLI and ChatGPT Work Local, the client used the `next_call` returned by the plan and reached the applied edit without extra instructions. ChatGPT Work Cloud is not supported. [Client-specific and transport evidence](docs/compatibility.en.md) is recorded separately. Configuration examples alone do not make a client Supported. These checks cover bounded documents and operations; they do not guarantee arbitrary artwork or every failure path.

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from '../command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
@@ -168,7 +168,7 @@ export const mutateBatchPublicInputSchema = z.discriminatedUnion('apply', [
         steps: z.array(publicApplyStepSchema).min(MIXED_BATCH_MIN_STEPS).max(MIXED_BATCH_MAX_STEPS)
             .superRefine((steps, context) => refineSteps(steps.map(normalizeStep), context)),
         apply: z.literal(true),
-        command_id: canonicalCommandIdSchema,
+        command_id: applyCommandIdSchema,
     }),
 ]);
 const inputSchema = z.strictObject({
@@ -188,7 +188,7 @@ const inputSchema = z.strictObject({
         confirmed_after: z.union([pointTextSnapshotSchema, pointTextRangeSnapshotSchema, transformObjectSnapshotSchema, pathAppearanceStateSchema]).optional(),
     })).min(MIXED_BATCH_MIN_STEPS).max(MIXED_BATCH_MAX_STEPS),
     apply: z.boolean().default(false),
-    command_id: canonicalCommandIdSchema.optional(),
+    command_id: applyCommandIdSchema.optional(),
 });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(mutateBatchPublicInputSchema, { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });

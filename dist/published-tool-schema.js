@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { toolArgumentIssueMessage } from './tool-arguments.js';
 const SCHEMA_KEYWORDS = new Set(['items', 'additionalItems', 'additionalProperties', 'not', 'if', 'then', 'else', 'contains', 'propertyNames']);
 const SCHEMA_ARRAY_KEYWORDS = new Set(['anyOf', 'oneOf', 'allOf', 'prefixItems', 'items']);
 const SCHEMA_MAP_KEYWORDS = new Set(['properties', 'patternProperties', 'definitions', '$defs', 'dependencies', 'dependentSchemas']);
@@ -229,6 +230,11 @@ export function truncateJsonSchema(schema, maxDepth) {
     };
     return visit(schema, 0, new Set(), maxDepth).schema;
 }
+export function withoutDescriptions(schema) {
+    delete schema.description;
+    forEachSchemaChild(schema, (child) => { withoutDescriptions(child); });
+    return schema;
+}
 function hasPublishedDepthMarker(schema) {
     return JSON.stringify(schema).includes(`"${PUBLISHED_DEPTH_KEY}"`);
 }
@@ -238,7 +244,7 @@ export function publishToolDefinition(tool) {
         inputSchema = truncateJsonSchema(inputSchema, Number.POSITIVE_INFINITY);
     const published = { ...tool, inputSchema: deduplicateJsonSchema(inputSchema) };
     if (tool.outputSchema !== undefined) {
-        published.outputSchema = deduplicateJsonSchema(tool.outputSchema);
+        published.outputSchema = withoutDescriptions(deduplicateJsonSchema(tool.outputSchema));
     }
     return published;
 }
@@ -266,7 +272,10 @@ export function installPublishedToolList(server, cacheKey) {
     });
 }
 const sharedToolSchemas = new WeakMap();
-function withMemoizedJsonSchema(schema) {
+function isZodSchema(schema) {
+    return schema instanceof z.ZodType;
+}
+function withMemoizedJsonSchema(schema, validateWithHints = false) {
     if (schema === undefined)
         return undefined;
     const standard = typeof schema === 'object' && schema !== null && '~standard' in schema
@@ -289,7 +298,12 @@ function withMemoizedJsonSchema(schema) {
         '~standard': {
             version: original.version,
             vendor: original.vendor,
-            validate: (value) => original.validate(value),
+            validate: isZodSchema(standard) && validateWithHints
+                ? async (value) => {
+                    const parsed = await standard.safeParseAsync(value, { error: toolArgumentIssueMessage });
+                    return parsed.success ? { value: parsed.data } : { issues: parsed.error.issues };
+                }
+                : (value) => original.validate(value),
             jsonSchema: { input: memoized('input'), output: memoized('output') },
         },
     };
@@ -305,7 +319,7 @@ export function installSharedToolSchemas(server, cacheKey) {
     server.registerTool = ((name, config, callback) => {
         let entry = schemas.get(name);
         if (entry === undefined) {
-            entry = { inputSchema: withMemoizedJsonSchema(config.inputSchema), outputSchema: withMemoizedJsonSchema(config.outputSchema) };
+            entry = { inputSchema: withMemoizedJsonSchema(config.inputSchema, true), outputSchema: withMemoizedJsonSchema(config.outputSchema) };
             schemas.set(name, entry);
         }
         return register(name, { ...config, inputSchema: entry.inputSchema, outputSchema: entry.outputSchema }, callback);

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { cmykResourceColorSchema } from './request.js';
-import { canonicalCommandIdSchema } from '../../command-id.js';
+import { applyCommandIdSchema } from '../../command-id.js';
 import { swatchResourceResponseSchema } from './result-schema.js';
 const channelSchema = z.number().int().min(0).max(255);
 const publicRgbSchema = z.strictObject({
@@ -24,12 +24,12 @@ const common = {
 };
 export const createSwatchResourcePublicInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...common, apply: z.literal(false).default(false) }),
-    z.strictObject({ ...common, apply: z.literal(true), command_id: canonicalCommandIdSchema }),
+    z.strictObject({ ...common, apply: z.literal(true), command_id: applyCommandIdSchema }),
 ]);
 export const createSwatchResourceInputSchema = z.strictObject({
     ...common,
     apply: z.boolean().default(false),
-    command_id: canonicalCommandIdSchema.optional(),
+    command_id: applyCommandIdSchema.optional(),
 });
 const { $schema: _dialect, ...published } = z.toJSONSchema(createSwatchResourcePublicInputSchema, { io: 'input' });
 createSwatchResourceInputSchema._zod.toJSONSchema = () => ({ type: 'object', ...published });

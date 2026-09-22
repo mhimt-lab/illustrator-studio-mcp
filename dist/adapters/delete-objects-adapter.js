@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { canonicalCommandIdSchema } from '../command-id.js';
+import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { DELETE_TARGET_LIST_MAX, DELETE_TARGET_LOOKUP_SCRIPT, DeleteBackupError, deleteBackupFactsSchema, verifyDeleteBackup, } from '../delete-shared.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
@@ -122,7 +122,7 @@ export const deleteObjectsPublicInputSchema = z.discriminatedUnion('apply', [
         confirm_target_set_hash: sha256Schema.describe('plan.targetSetHash, echoed.'),
         confirm_removed_count: z.number().int().positive().max(DELETE_MAX_REMOVED_ITEMS).describe('plan.removedCount (targets plus descendants), echoed.'),
         apply: z.literal(true),
-        command_id: canonicalCommandIdSchema,
+        command_id: applyCommandIdSchema,
     }),
 ]);
 const inputSchema = z.strictObject({
@@ -130,7 +130,7 @@ const inputSchema = z.strictObject({
     confirm_target_set_hash: sha256Schema.optional(),
     confirm_removed_count: z.number().int().positive().max(DELETE_MAX_REMOVED_ITEMS).optional(),
     apply: z.boolean().default(false),
-    command_id: canonicalCommandIdSchema.optional(),
+    command_id: applyCommandIdSchema.optional(),
 });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(deleteObjectsPublicInputSchema, { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
