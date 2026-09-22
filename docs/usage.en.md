@@ -8,7 +8,7 @@ Replace a headline. Swap a photo. Line up a set of shapes. Ask AI to handle ever
 
 For setup, see the [README Quick Start](../README.en.md#quick-start).
 
-> **Public Beta 0.1.0-beta.3.** A trial release. Try it on a copy of your artwork. Keep Illustrator in the foreground with the screen unlocked. For what is covered, see [Beta scope](../README.en.md#beta-scope).
+> **Public Beta 0.1.0-beta.4.** A trial release. Try it on a copy of your artwork. Keep Illustrator in the foreground with the screen unlocked. For what is covered, see [Beta scope](../README.en.md#beta-scope).
 
 ## Try it without changing your artwork
 

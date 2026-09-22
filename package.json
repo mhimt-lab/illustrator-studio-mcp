@@ -1,6 +1,6 @@
 {
   "name": "illustrator-studio-mcp",
-  "version": "0.1.0-beta.3",
+  "version": "0.1.0-beta.4",
   "type": "module",
   "description": "Safety-first MCP server for Adobe Illustrator",
   "keywords": [],
@@ -58,6 +58,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
+    "jpeg-js": "0.4.4",
     "pngjs": "7.0.0",
     "zod": "4.4.3"
   }

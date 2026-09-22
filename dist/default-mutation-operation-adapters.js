@@ -1,3 +1,4 @@
+import { createUpdateArtboardAdapter } from './adapters/update-artboard-adapter.js';
 import { MutationOperationAdapterRegistry } from './mutation-operation-adapter.js';
 import { createRectangleAdapter } from './adapters/create-rectangle-adapter.js';
 import { createSetPathAppearanceAdapter } from './adapters/set-path-appearance-adapter.js';
@@ -40,6 +41,7 @@ import { createDeleteObjectsAdapter } from './adapters/delete-objects-adapter.js
 import { createImportVectorArtworkAdapter } from './adapters/import-vector-artwork-adapter.js';
 export function createCanonicalMutationOperationRegistry() {
     return new MutationOperationAdapterRegistry()
+        .register(createUpdateArtboardAdapter())
         .register(createRectangleAdapter())
         .register(createSwatchResourceAdapter())
         .register(createSetPathAppearanceAdapter())

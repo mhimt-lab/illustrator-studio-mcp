@@ -8,22 +8,25 @@ import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canon
 import { normalizePointTextPublicFillColor, POINT_TEXT_JUSTIFICATIONS, POINT_TEXT_MAX_LAYER_DEPTH_LIMIT, POINT_TEXT_PROFILE_NAME, POINT_TEXT_SNAPSHOT_SCRIPT, pointTextFillColorRequestSchema, pointTextFillColorSchema, pointTextPublicFillColorSchema, pointTextSingleLineSchema, pointTextSnapshotSchema, } from './point-text-host-script.js';
 import { CREATE_POINT_TEXT_MAX_DIRECT_ITEMS, CREATE_POINT_TEXT_MODULE_SCRIPT, CREATE_POINT_TEXT_OPERATION, } from './create-point-text-adapter.js';
 import { CREATE_RECTANGLE_MODULE_SCRIPT } from './create-rectangle/jsx.js';
+import { CREATION_APPEARANCE_MODULE_SCRIPT, creationAppearanceMatches, creationAppearanceSchema, creationAppearanceStateSchema, } from './create-appearance.js';
+import { CREATE_SHAPE_MODULE_SCRIPT, CREATE_SHAPE_OPERATION, createShapeShapeSchema, geometrySchema as shapeGeometrySchema, deriveShapeGeometry, geometryWithinTolerance, normalizePublicShape, publicShapeSchema, } from './create-shape-adapter.js';
 import { RECTANGLE_BOUNDS_PRECISION_DIGITS } from './create-rectangle/domain.js';
 export const CREATE_BATCH_OPERATION = 'create_batch';
 export const CREATE_BATCH_VALIDATOR = { kind: CREATE_BATCH_OPERATION, version: 1 };
 export const CREATE_BATCH_MIN_STEPS = 2;
-export const CREATE_BATCH_MAX_STEPS = 8;
+export const CREATE_BATCH_MAX_STEPS = 16;
 export const CREATE_BATCH_MAX_TEXT_CODE_UNITS = 4_000;
+export const CREATE_BATCH_MAX_SHAPE_ANCHORS = 256;
 export const CREATE_BATCH_MAX_LAYER_ITEMS = CREATE_POINT_TEXT_MAX_DIRECT_ITEMS;
 export const CREATE_RECTANGLE_OPERATION = 'create_rectangle';
-const CANONICAL_VERSION = 1;
-const RESULT_SCHEMA_VERSION = 1;
+const CANONICAL_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 2;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 2;
 const ERROR_MAPPING_VERSION = 1;
 const uuidSchema = z.string().min(1).max(255);
 const documentKeySchema = z.string().min(1).max(16_384);
-const CREATE_OPERATIONS = [CREATE_POINT_TEXT_OPERATION, CREATE_RECTANGLE_OPERATION];
+const CREATE_OPERATIONS = [CREATE_POINT_TEXT_OPERATION, CREATE_RECTANGLE_OPERATION, CREATE_SHAPE_OPERATION];
 export const CREATE_BATCH_BLOCKERS = [
     'document_mutation_not_allowed',
     'layer_hidden',
@@ -81,20 +84,35 @@ const internalStepSchema = z.discriminatedUnion('operation', [
         width: canonicalNumberSchema.pipe(z.number().positive()),
         height: canonicalNumberSchema.pipe(z.number().positive()),
         name: rectangleNameSchema.optional(),
+        appearance: creationAppearanceSchema.optional(),
+    }),
+    z.strictObject({
+        ...stepCommon,
+        operation: z.literal(CREATE_SHAPE_OPERATION),
+        shape: createShapeShapeSchema,
+        name: rectangleNameSchema.optional(),
+        appearance: creationAppearanceSchema.optional(),
     }),
 ]);
 function refineSteps(steps, context) {
     let textUnits = 0;
+    let shapeAnchors = 0;
     const perLayer = new Map();
     for (const step of steps) {
         if (step.operation === CREATE_POINT_TEXT_OPERATION)
             textUnits += step.contents.length;
+        if (step.operation === CREATE_SHAPE_OPERATION)
+            shapeAnchors += deriveShapeGeometry([0, 0, 0, 0], step.shape).anchors.length;
         const key = step.expectedLayerPath.join('.');
         perLayer.set(key, (perLayer.get(key) ?? 0) + 1);
     }
     if (textUnits > CREATE_BATCH_MAX_TEXT_CODE_UNITS) {
         context.addIssue({ code: 'custom',
             message: `Create batch contents must total at most ${CREATE_BATCH_MAX_TEXT_CODE_UNITS} UTF-16 code units.` });
+    }
+    if (shapeAnchors > CREATE_BATCH_MAX_SHAPE_ANCHORS) {
+        context.addIssue({ code: 'custom',
+            message: `Create batch shapes must total at most ${CREATE_BATCH_MAX_SHAPE_ANCHORS} anchors (got ${shapeAnchors}); split the batch.` });
     }
     for (const count of perLayer.values()) {
         if (count > CREATE_BATCH_MAX_LAYER_ITEMS) {
@@ -133,6 +151,14 @@ const publicStepSchema = z.discriminatedUnion('operation', [
         width: z.number().finite().positive(),
         height: z.number().finite().positive(),
         name: rectangleNameSchema.optional(),
+        appearance: creationAppearanceSchema.optional(),
+    }),
+    z.strictObject({
+        ...publicStepCommon,
+        operation: z.literal(CREATE_SHAPE_OPERATION),
+        shape: publicShapeSchema,
+        name: rectangleNameSchema.optional(),
+        appearance: creationAppearanceSchema.optional(),
     }),
 ]);
 function normalizeStep(step) {
@@ -152,12 +178,23 @@ function normalizeStep(step) {
             },
         };
     }
+    if (step.operation === CREATE_SHAPE_OPERATION) {
+        return {
+            operation: step.operation,
+            expectedLayerPath: step.expected_layer_path,
+            artboardIndex: step.artboard_index,
+            shape: normalizePublicShape(step.shape),
+            ...(step.name === undefined ? {} : { name: step.name }),
+            ...(step.appearance === undefined ? {} : { appearance: step.appearance }),
+        };
+    }
     return {
         operation: step.operation,
         expectedLayerPath: step.expected_layer_path,
         artboardIndex: step.artboard_index,
         x: step.x, y: step.y, width: step.width, height: step.height,
         ...(step.name === undefined ? {} : { name: step.name }),
+        ...(step.appearance === undefined ? {} : { appearance: step.appearance }),
     };
 }
 export const createBatchPublicInputSchema = z.discriminatedUnion('apply', [
@@ -189,6 +226,8 @@ const inputSchema = z.strictObject({
         width: z.number().finite().positive().optional(),
         height: z.number().finite().positive().optional(),
         name: rectangleNameSchema.optional(),
+        shape: publicShapeSchema.optional(),
+        appearance: creationAppearanceSchema.optional(),
     })).min(CREATE_BATCH_MIN_STEPS).max(CREATE_BATCH_MAX_STEPS),
     apply: z.boolean().default(false),
     command_id: applyCommandIdSchema.optional(),
@@ -232,6 +271,18 @@ const planStepSchema = z.discriminatedUnion('operation', [
         targetBounds: boundsSchema,
         withinArtboard: z.boolean(),
         name: rectangleNameSchema.nullable(),
+        appearance: creationAppearanceSchema.optional(),
+    }),
+    z.strictObject({
+        operation: z.literal(CREATE_SHAPE_OPERATION),
+        layerIndex: z.number().int().nonnegative().max(CREATE_BATCH_MAX_STEPS - 1),
+        artboardIndex: z.number().int().nonnegative(),
+        artboardBounds: boundsSchema,
+        shape: createShapeShapeSchema,
+        geometry: shapeGeometrySchema,
+        withinArtboard: z.boolean(),
+        name: rectangleNameSchema.nullable(),
+        appearance: creationAppearanceSchema.optional(),
     }),
 ]);
 const planSchema = z.strictObject({
@@ -267,6 +318,10 @@ const planSchema = z.strictObject({
     if (textUnits > CREATE_BATCH_MAX_TEXT_CODE_UNITS) {
         context.addIssue({ code: 'custom', message: 'Create batch plan exceeds the measured text budget.' });
     }
+    const shapeAnchors = plan.steps.reduce((sum, step) => sum + (step.operation === CREATE_SHAPE_OPERATION ? step.geometry.anchors.length : 0), 0);
+    if (shapeAnchors > CREATE_BATCH_MAX_SHAPE_ANCHORS) {
+        context.addIssue({ code: 'custom', message: 'Create batch plan exceeds the shape anchor budget.' });
+    }
     if (plan.applyAllowed !== (plan.applyBlockedReasonCodes.length === 0)) {
         context.addIssue({ code: 'custom', message: 'Create batch applyAllowed must require no blockers.' });
     }
@@ -285,6 +340,16 @@ const createdStepSchema = z.discriminatedUnion('operation', [
         type: z.literal('PathItem'),
         name: z.string().max(255),
         bounds: boundsSchema,
+        appearance: creationAppearanceStateSchema.optional(),
+    }),
+    z.strictObject({
+        operation: z.literal(CREATE_SHAPE_OPERATION),
+        uuid: uuidSchema,
+        layerIndex: z.number().int().nonnegative().max(CREATE_BATCH_MAX_STEPS - 1),
+        type: z.literal('PathItem'),
+        name: z.string().max(255),
+        geometry: shapeGeometrySchema,
+        appearance: creationAppearanceStateSchema.optional(),
     }),
 ]);
 const failureSchema = z.strictObject({
@@ -463,6 +528,24 @@ export const createBatchResultSchema = z.union([
                     context.addIssue({ code: 'custom', message: 'A created rectangle must match its planned bounds and name.' });
                 }
             }
+            if (created.operation === CREATE_SHAPE_OPERATION && step?.operation === CREATE_SHAPE_OPERATION) {
+                if (!geometryWithinTolerance(created.geometry, step.geometry) || (step.name !== null && created.name !== step.name)) {
+                    context.addIssue({ code: 'custom', message: 'A created shape must match its planned geometry and name.' });
+                }
+            }
+            if ((created.operation === CREATE_RECTANGLE_OPERATION || created.operation === CREATE_SHAPE_OPERATION) &&
+                step !== undefined && step.operation === created.operation) {
+                const planned = step.appearance;
+                const actual = created.appearance;
+                if ((planned === undefined) !== (actual === undefined) ||
+                    (planned !== undefined && actual !== undefined && !creationAppearanceMatches(planned, actual))) {
+                    context.addIssue({ code: 'custom',
+                        message: 'A created path carries a read-back appearance exactly when its step requested one, and it must match.' });
+                }
+            }
+            if (step === undefined || step.operation !== created.operation) {
+                context.addIssue({ code: 'custom', message: 'Every created item must match its plan step operation.' });
+            }
         }
     }
     else if (result.transaction.state === 'verified') {
@@ -583,7 +666,9 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
 export const CREATE_BATCH_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
 ${POINT_TEXT_SNAPSHOT_SCRIPT}
 ${CREATE_POINT_TEXT_MODULE_SCRIPT}
+${CREATION_APPEARANCE_MODULE_SCRIPT}
 ${CREATE_RECTANGLE_MODULE_SCRIPT}
+${CREATE_SHAPE_MODULE_SCRIPT}
 var CREATE_BATCH_MIN_STEPS = ${CREATE_BATCH_MIN_STEPS};
 var CREATE_BATCH_MAX_STEPS = ${CREATE_BATCH_MAX_STEPS};
 var CREATE_BATCH_MAX_TEXT_CODE_UNITS = ${CREATE_BATCH_MAX_TEXT_CODE_UNITS};
@@ -612,6 +697,12 @@ var CREATE_BATCH_OPERATIONS = {
     layerOf: function (resolved) { return resolved.targetLayer; },
     plan: rectanglePlan,
     apply: rectangleApply
+  },
+  create_shape: {
+    resolve: function () { return shapeResolve(false); },
+    layerOf: function (resolved) { return resolved.layer; },
+    plan: shapePlan,
+    apply: shapeApply
   }
 };
 
@@ -625,6 +716,11 @@ function createBatchStepParams(batchParams, request, index) {
   } else if (request.operation === "create_rectangle") {
     step.x = request.x; step.y = request.y; step.width = request.width; step.height = request.height;
     if (request.name !== undefined) step.name = request.name;
+    if (request.appearance !== undefined) step.appearance = request.appearance;
+  } else if (request.operation === "create_shape") {
+    step.shape = request.shape;
+    if (request.name !== undefined) step.name = request.name;
+    if (request.appearance !== undefined) step.appearance = request.appearance;
   } else {
     throw mutationError("preflight_failed", "Step " + (index + 1) + ": unsupported operation " + String(request.operation) + ".");
   }
@@ -757,11 +853,20 @@ function createBatchPlan(preflight) {
       steps.push({ operation: "create_point_text", layerIndex: entry.layerIndex,
         artboardIndex: entry.plan.artboardIndex, anchor: entry.plan.anchor, contents: entry.plan.contents,
         requestedStyle: entry.plan.requestedStyle, profile: entry.plan.profile });
-    } else {
-      steps.push({ operation: "create_rectangle", layerIndex: entry.layerIndex,
+    } else if (entry.step.request.operation === "create_rectangle") {
+      var rectangleStep = { operation: "create_rectangle", layerIndex: entry.layerIndex,
         artboardIndex: entry.plan.artboardIndex, artboardBounds: entry.plan.artboardBounds,
         targetBounds: entry.plan.targetBounds, withinArtboard: entry.plan.withinArtboard,
-        name: entry.step.request.name === undefined ? null : entry.step.request.name });
+        name: entry.step.request.name === undefined ? null : entry.step.request.name };
+      if (entry.step.request.appearance !== undefined) rectangleStep.appearance = entry.step.request.appearance;
+      steps.push(rectangleStep);
+    } else {
+      var shapeStep = { operation: "create_shape", layerIndex: entry.layerIndex,
+        artboardIndex: entry.plan.artboardIndex, artboardBounds: entry.plan.artboardBounds,
+        shape: entry.plan.shape, geometry: entry.plan.geometry, withinArtboard: entry.plan.withinArtboard,
+        name: entry.step.request.name === undefined ? null : entry.step.request.name };
+      if (entry.step.request.appearance !== undefined) shapeStep.appearance = entry.step.request.appearance;
+      steps.push(shapeStep);
     }
   }
   return { operation: "create_batch", documentKey: preflight.context.key, layers: layers, steps: steps,
@@ -837,8 +942,30 @@ function createBatchVerifyPointText(entry, stepState) {
 
 function createBatchVerifyRectangle(entry, stepState) {
   var verified = rectangleVerify(entry.resolved, entry.plan, stepState);
-  return { operation: "create_rectangle", uuid: verified.uuid, layerIndex: entry.layerIndex,
+  var created = { operation: "create_rectangle", uuid: verified.uuid, layerIndex: entry.layerIndex,
     type: verified.type, name: verified.name, bounds: verified.bounds };
+  if (verified.appearance !== undefined) created.appearance = verified.appearance;
+  return created;
+}
+
+/**
+ * ExtendScript mis-associates nested conditional expressions (a ? b : c ? d : e evaluates as (a ? b : c) ? d : e,
+ * measured again in #306: a point-text step was verified as a rectangle), so the verifier is chosen with if/else.
+ */
+function createBatchVerifierFor(operation) {
+  if (operation === "create_point_text") return createBatchVerifyPointText;
+  if (operation === "create_rectangle") return createBatchVerifyRectangle;
+  if (operation === "create_shape") return createBatchVerifyShape;
+  throw mutationError("verify_mismatch", "Unsupported create batch operation " + String(operation) + ".");
+}
+
+/** The shape postcondition, minus the single-creation order rule the batch owns itself. */
+function createBatchVerifyShape(entry, stepState) {
+  var verified = shapeVerifyCreated(entry.resolved, entry.plan, stepState, null);
+  var created = { operation: "create_shape", uuid: verified.uuid, layerIndex: entry.layerIndex,
+    type: verified.type, name: verified.name, geometry: verified.geometry };
+  if (verified.appearance !== undefined) created.appearance = verified.appearance;
+  return created;
 }
 
 /**
@@ -855,9 +982,8 @@ function createBatchVerify(preflight, plan, state) {
     var entry = preflight.entries[index];
     var stepState = state.operationState.stepStates[index];
     try {
-      created.push(entry.step.request.operation === "create_point_text"
-        ? withCreateStepParams(entry.step, function () { return createBatchVerifyPointText(entry, stepState); })
-        : withCreateStepParams(entry.step, function () { return createBatchVerifyRectangle(entry, stepState); }));
+      var verifyStep = createBatchVerifierFor(entry.step.request.operation);
+      created.push(withCreateStepParams(entry.step, function () { return verifyStep(entry, stepState); }));
     } catch (verifyError) { throw createBatchStepError(entry.step, verifyError); }
   }
   var layerItemUuids = [];
@@ -1009,7 +1135,7 @@ function createBatchRemoveCreated(preflight, entry, stepState, createdUuid) {
     var referenceState;
     try { referenceState = mutationCreatedObjectReferenceState(createdObject, createdUuid); }
     catch (identityError) { return { status: "indeterminate", message: "object-identity lookup is indeterminate" }; }
-    if (referenceState === "invalid") return { status: "verified" };
+    if (referenceState === "invalid") return mutationCreatedObjectAbsence(preflight.document, createdUuid);
     return { status: "indeterminate", message: "the created native UUID is absent while its object reference is still live" };
   }
   if (target !== createdObject) return { status: "indeterminate", message: "the created native UUID resolves to another object" };
@@ -1029,7 +1155,7 @@ function createBatchRemoveCreated(preflight, entry, stepState, createdUuid) {
     var remainingState;
     try { remainingState = mutationCreatedObjectReferenceState(createdObject, createdUuid); }
     catch (remainingError) { return { status: "indeterminate", message: "post-remove identity lookup is indeterminate" }; }
-    if (remainingState === "invalid") return { status: "verified" };
+    if (remainingState === "invalid") return mutationCreatedObjectAbsence(preflight.document, createdUuid);
     return { status: "indeterminate", message: "the created native UUID is absent while its object reference is still live" };
   }
   return { status: "failed", message: removeThrew
@@ -1099,13 +1225,14 @@ export const createBatchToolContract = {
     name: 'illustrator_create_batch',
     title: 'Plan or Apply a Batch of Creations',
     description: `Plan or apply ${CREATE_BATCH_MIN_STEPS} to ${CREATE_BATCH_MAX_STEPS} ordered creations of point text `
-        + '(create_point_text) and rectangles (create_rectangle) on explicit layer paths in one document, as one command in '
+        + '(create_point_text), rectangles (create_rectangle) and shapes (create_shape) on explicit layer paths in one document, as one command in '
         + 'one host call, bound by explicit document key. Planning evaluates every step and writes nothing; any unsupported, '
         + 'stale or blocked step rejects the whole batch before a single write. Apply revalidates every step and every touched '
         + 'layer in the same host call, verifies each created item by native UUID, proves every touched layer is exactly its '
         + "baseline plus this batch's own items, and on any failure removes every item it created and proves each layer back "
         + `at its baseline. Several steps may target one layer. Point-text contents total at most ${CREATE_BATCH_MAX_TEXT_CODE_UNITS} `
-        + `UTF-16 code units and a touched layer holds at most ${CREATE_BATCH_MAX_LAYER_ITEMS} direct items after the batch. `
+        + `UTF-16 code units, shapes total at most ${CREATE_BATCH_MAX_SHAPE_ANCHORS} anchors, and a touched layer holds at most ${CREATE_BATCH_MAX_LAYER_ITEMS} direct items after the batch. `
+        + 'A rectangle or shape step may carry an initial appearance (opacity, fill, stroke), set and read back in the same call. '
         + 'The returned native UUIDs identify the items until the document is next saved; Illustrator renumbers UUIDs across '
         + 'that save.',
     inputSchema,

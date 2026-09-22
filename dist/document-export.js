@@ -6,7 +6,9 @@ import { z } from 'zod';
 import { documentContextSchema } from './mutation-result-schema-core.js';
 import { BackupCopyError, captureFileIdentity, fileIdentitySchema, hostDocumentIdentitySchema, sameFileIdentity, serializeFileIdentity, } from './document-backup.js';
 import { atomicCreatePrivateRecord, readSecurePrivateRecord, unlinkPrivateRecord } from './private-record.js';
+import { classifyExportEntry, ExportSessionFormatError, RASTER_EXPORT_RECORD_MAX_BYTES, RASTER_EXPORT_RECORD_SCHEMAS, RASTER_EXPORT_RECORD_SUFFIXES, RASTER_EXPORT_SESSION_MAX_BYTES, rasterExportSessionSchema, } from './raster-export-records.js';
 import { ensurePrivateDirectory, isMissingPath } from './private-state.js';
+import { temporaryTwinPattern } from './state-quarantine.js';
 export const EXPORT_REQUIRES_SAVED_FILE_MESSAGE = 'Export requires a saved, file-backed document with a verified file revision; unsaved documents have no file to export.';
 export const EXPORT_RECORD_VERSION = 1;
 export const EXPORT_RECORD_MAX_BYTES = 16_384;
@@ -592,6 +594,14 @@ export async function validateOutputPath(outputPath, format, sourceRealPath, sta
         throw invalid(`output_path must end with .${format} for format "${format}".`);
     if (basename(outputPath) === `.${format}`)
         throw invalid('output_path needs a file name before the extension.');
+    return await validateOutputLocation(outputPath, sourceRealPath, stateRoot);
+}
+export async function validateOutputLocation(outputPath, sourceRealPath, stateRoot) {
+    const invalid = (message) => new ExportPreconditionError('output_path_invalid', message);
+    if (!isAbsolute(outputPath))
+        throw invalid('output_path must be an absolute path.');
+    if (outputPath !== resolve(outputPath) || outputPath.endsWith('/'))
+        throw invalid('output_path must be a normalized file path.');
     let parent;
     try {
         parent = await realpath(dirname(outputPath));
@@ -883,6 +893,20 @@ export function serializeOutputIdentity(identity) {
     return serializeFileIdentity(identity);
 }
 export { captureFileIdentity as captureWorkCopyIdentity };
+export async function createOnceLinkAllowance(path) {
+    const metadata = await lstat(path, { bigint: true }).catch(() => null);
+    if (metadata === null || !metadata.isFile() || metadata.nlink !== 2n)
+        return 1;
+    const pattern = temporaryTwinPattern(basename(path));
+    for (const name of await readdir(dirname(path))) {
+        if (!pattern.test(name))
+            continue;
+        const twin = await lstat(join(dirname(path), name), { bigint: true }).catch(() => null);
+        if (twin !== null && twin.isFile() && twin.nlink === 2n && twin.ino === metadata.ino && twin.dev === metadata.dev)
+            return 2;
+    }
+    return 1;
+}
 export class DocumentExportStore {
     stateRoot;
     constructor(stateRoot) {
@@ -921,13 +945,20 @@ export class DocumentExportStore {
         await atomicCreatePrivateRecord(path, contents);
         return path;
     }
-    async readSession(exportId) {
+    async openRasterSession(session) {
+        const contents = `${JSON.stringify(rasterExportSessionSchema.parse(session), null, 2)}\n`;
+        if (Buffer.byteLength(contents) > RASTER_EXPORT_SESSION_MAX_BYTES)
+            throw new Error('The export session exceeds its size limit.');
+        const path = this.sessionPath(session.exportId);
+        await atomicCreatePrivateRecord(path, contents);
+        return path;
+    }
+    async readSessionEntry(exportId) {
         if (!/^[0-9a-f-]{36}$/.test(exportId))
             throw new Error('export_id must be a UUID.');
-        const path = this.sessionPath(exportId);
         let record;
         try {
-            record = await readSecurePrivateRecord(path, EXPORT_SESSION_MAX_BYTES);
+            record = await readSecurePrivateRecord(this.sessionPath(exportId), Math.max(EXPORT_SESSION_MAX_BYTES, RASTER_EXPORT_SESSION_MAX_BYTES));
         }
         catch (error) {
             if (isMissingPath(error))
@@ -937,8 +968,68 @@ export class DocumentExportStore {
         if (record.state === 'missing')
             return null;
         if (record.state === 'invalid')
-            throw new Error(`Export session ${exportId} is unsafe (${record.reason}); it stays unresolved.`);
-        return exportSessionSchema.parse(JSON.parse(record.text));
+            return { format: 'invalid', reason: 'unsafe_file' };
+        const entry = classifyExportEntry(record.text, { exportId, recordType: 'session' }, { v1: exportSessionSchema, v2: rasterExportSessionSchema });
+        if (entry.format === 'v1' && record.bytes.length > EXPORT_SESSION_MAX_BYTES)
+            return { format: 'invalid', reason: 'unsafe_file' };
+        return entry;
+    }
+    rasterRecordPath(exportId, recordType) {
+        if (!/^[0-9a-f-]{36}$/.test(exportId))
+            throw new Error('export_id must be a UUID.');
+        return join(this.recordDirectory, `${exportId}${RASTER_EXPORT_RECORD_SUFFIXES[recordType]}`);
+    }
+    async writeRasterRecord(recordType, record) {
+        const validated = RASTER_EXPORT_RECORD_SCHEMAS[recordType].parse(record);
+        if (validated.recordType !== recordType)
+            throw new Error('The record type does not match its file.');
+        const contents = `${JSON.stringify(validated, null, 2)}\n`;
+        if (Buffer.byteLength(contents) > RASTER_EXPORT_RECORD_MAX_BYTES)
+            throw new Error('The export record exceeds its size limit.');
+        const path = this.rasterRecordPath(validated.exportId, recordType);
+        await atomicCreatePrivateRecord(path, contents);
+        return { path, digest: createHash('sha256').update(contents).digest('hex') };
+    }
+    async readRasterRecord(exportId, recordType) {
+        const path = this.rasterRecordPath(exportId, recordType);
+        let record;
+        try {
+            record = await readSecurePrivateRecord(path, RASTER_EXPORT_RECORD_MAX_BYTES, { maxLinkCount: await createOnceLinkAllowance(path) });
+        }
+        catch (error) {
+            if (isMissingPath(error))
+                return { state: 'absent' };
+            throw error;
+        }
+        if (record.state === 'missing')
+            return { state: 'absent' };
+        if (record.state === 'invalid')
+            return { state: 'invalid', reason: 'unsafe_file' };
+        const v1 = recordType === 'session' ? exportSessionSchema : recordType === 'host_open' ? exportHostRecordSchema
+            : recordType === 'published' ? exportRecordSchema : null;
+        const v2 = RASTER_EXPORT_RECORD_SCHEMAS[recordType];
+        const entry = classifyExportEntry(record.text, { exportId, recordType }, { v1, v2 });
+        if (entry.format === 'invalid')
+            return { state: 'invalid', reason: entry.reason };
+        if (entry.format === 'v1')
+            return { state: 'v1' };
+        return { state: 'v2', record: entry.record, digest: createHash('sha256').update(record.bytes).digest('hex') };
+    }
+    async readRasterRecordSet(exportId) {
+        const types = Object.keys(RASTER_EXPORT_RECORD_SUFFIXES);
+        const reads = await Promise.all(types.map(async (type) => [type, await this.readRasterRecord(exportId, type)]));
+        return Object.fromEntries(reads);
+    }
+    async releaseRasterSession(exportId) {
+        await unlinkPrivateRecord(this.rasterRecordPath(exportId, 'session'));
+    }
+    async readSession(exportId) {
+        const entry = await this.readSessionEntry(exportId);
+        if (entry === null)
+            return null;
+        if (entry.format === 'v1')
+            return entry.record;
+        throw new ExportSessionFormatError(exportId, entry.format === 'v2' ? 'raster_vector_export_session' : entry.reason);
     }
     hostRecordPath(exportId) {
         return join(this.recordDirectory, `${exportId}.session-host.json`);

@@ -135,7 +135,8 @@ function mutationEditSessionVerified(definition, preflight, plan, state, value) 
     var uuids = mutationEditSessionUuids(definition, "after", preflight, plan, state, value);
     var rows = esTargetRows(MUTATION_EDIT_SESSION.doc, uuids);
     // A row read before the change is read again even when the adapter does not name it after (an ancestor the
-    // item left, a container whose children moved); one that no longer resolves was removed and only subtracts.
+    // item left, a container whose children moved); one that no longer resolves and is proved absent was removed
+    // and only subtracts.
     var declaredAfter = {};
     for (var afterIndex = 0; afterIndex < uuids.length; afterIndex++) declaredAfter[uuids[afterIndex]] = true;
     var carried = [];
@@ -143,6 +144,10 @@ function mutationEditSessionVerified(definition, preflight, plan, state, value) 
       if (!declaredAfter.hasOwnProperty(MUTATION_EDIT_SESSION_EVIDENCE.beforeUuids[beforeIndex])) carried.push(MUTATION_EDIT_SESSION_EVIDENCE.beforeUuids[beforeIndex]);
     }
     var carriedRows = esTargetRows(MUTATION_EDIT_SESSION.doc, carried);
+    // "No longer resolves" is removal only when absence is proved; otherwise the head must not advance.
+    if (carriedRows.missing.length > 0 && esAbsenceUnproved(MUTATION_EDIT_SESSION.doc, carriedRows.missing) !== null) {
+      throw new Error("Edit session could not prove that an unresolved item was removed.");
+    }
     for (var carriedIndex = 0; carriedIndex < carriedRows.rows.length; carriedIndex++) rows.rows.push(carriedRows.rows[carriedIndex]);
     MUTATION_EDIT_SESSION_EVIDENCE.afterRows = rows.rows;
     MUTATION_EDIT_SESSION_EVIDENCE.afterMissing = rows.missing;

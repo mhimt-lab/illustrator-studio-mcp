@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { open, realpath, rmdir, unlink } from 'node:fs/promises';
+import { lstat, open, realpath, rmdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CursorSigner } from './cursor.js';
 import { documentKeyMatches } from './document-key.js';
@@ -19,6 +19,7 @@ import { defaultStateRoot } from './command-store.js';
 import { BACKUP_CLOSE_RESTORE_TEST_SCRIPT, BACKUP_INVENTORY_SCRIPT, BACKUP_MAX_PAGE_ITEMS, BACKUP_OPEN_PRE_ATTEMPT_CODES, BACKUP_OPEN_RESTORE_TEST_SCRIPT, BACKUP_RECONCILE_CLOSE_SCRIPT, backupFileName, BackupCopyError, BackupPreconditionError, BackupRecordError, BackupSessionGoneError, BackupSessionUnresolvedError, compareRestoredStructure, copyErrorCreatedDestination, copyFileExclusive, deepDifferences, DocumentBackupStore, inspectSourceFile, newBackupId, removeRestoreTestFile, resolveBackupRoot, restoreTestFileName, sameFileIdentity, serializeFileIdentity, verifyTrackedFile, withBackupRootScope, BACKUP_REQUIRES_SAVED_FILE_MESSAGE, } from './document-backup.js';
 import { assertOutputAbsent, closeRefusalReason, createStagingDirectory, DocumentExportStore, EXPORT_CLOSE_REFUSED_CODE, EXPORT_CLOSE_WORK_COPY_SCRIPT, EXPORT_HOST_TIMEOUT_MS, EXPORT_INVENTORY_SCRIPT, EXPORT_OPEN_PRE_ATTEMPT_CODES, EXPORT_OPEN_WORK_COPY_SCRIPT, hostRecordIdentityOf, EXPORT_OUTLINE_SCRIPT, EXPORT_READ_SOURCE_SCRIPT, EXPORT_RECONCILE_CLOSE_SCRIPT, EXPORT_SAVE_FAILED_CODE, EXPORT_SAVE_OUTPUT_SCRIPT, EXPORT_SAVE_PRE_ATTEMPT_CODES, ExportPreconditionError, ExportSessionGoneError, ExportSessionUnresolvedError, newExportId, OutputPublishError, OutputVerificationError, parseExportHostError, publishOutput, scanPdfObjects, validateOutputPath, verifyOutputFile, verifyOutputUnchanged, withOutputParentScope, workCopyFileName, EXPORT_REQUIRES_SAVED_FILE_MESSAGE, } from './document-export.js';
 import { LeaseGuard, UnresolvedLeaseError } from './lease-guard.js';
+import { RasterExportOperation, RasterExportReconciler, rasterQuarantinePaths, } from './raster-export.js';
 import { EditSessionStore } from './edit-session.js';
 import { EditSessionCoordinator } from './edit-session-coordinator.js';
 import { EDIT_SESSION_FOREGROUND_HINT, EDIT_SESSION_OPEN_SCRIPT, editSessionRefusal, editSessionSnapshotSchema, listEditSessionsResult, summarizeEditSession, } from './edit-session-tools.js';
@@ -1980,6 +1981,13 @@ function structurePlanAdd(plan, collection, offset, transported, comparable, uui
   var current = plan.current;
   if (current === null || current.collection !== collection ||
       current.bytes + bytes > STRUCTURE_PAGE_LIMITS.budgetBytes) {
+    // Reject before retaining a record for a page outside the existing transport budget.
+    if (plan.pages.length >= STRUCTURE_PAGE_LIMITS.maxPages) {
+      throw new Error("MCP_ERROR:" + stringifyJson({
+        code: "STRUCTURE_PAGE_PLAN_TOO_LARGE", reason: "too_many_pages",
+        pages: plan.pages.length + 1, limit: STRUCTURE_PAGE_LIMITS.maxPages
+      }));
+    }
     current = { index: plan.pages.length, collection: collection, offset: offset, count: 0, bytes: 0,
       digestState: createSnapshotDigest() };
     plan.pages.push(current);
@@ -2012,13 +2020,14 @@ function structurePlanFinish(plan) {
  * record also agree on the partition and therefore on the roll-up. A partition that does disagree only makes
  * the caller pay for the tolerant comparison; it can never report agreement that is not there.
  */
-function structureDigestScan(doc, context) {
+function structureDigestScan(doc, context, verification) {
   var limits = structureLimits(doc);
   var artboards = structureArtboards(doc, limits.artboardCount);
   var indexByUuid = structureIndexByUuid(doc, limits.totalPageItems);
   var digest = createSnapshotDigest();
   var plan = createStructurePagePlan();
-  updateSnapshotDigest(digest, stringifyJson(artboards));
+  verification.artboards = stringifyJson(artboards);
+  updateSnapshotDigest(digest, verification.artboards);
   for (var artboardIndex = 0; artboardIndex < artboards.length; artboardIndex++) {
     var artboardSerialized = stringifyJson(artboards[artboardIndex]);
     structurePlanAdd(plan, "artboards", artboardIndex, artboardSerialized, artboardSerialized);
@@ -2027,8 +2036,10 @@ function structureDigestScan(doc, context) {
     var record = structureItemRecord(doc, itemIndex);
     var serialized = stringifyJson(record);
     updateSnapshotDigest(digest, serialized);
-    structurePlanAdd(plan, "pageItems", itemIndex, serialized,
-      stringifyJson(structureComparableRecord(record, indexByUuid)), record.uuid);
+    var comparableSerialized = stringifyJson(structureComparableRecord(record, indexByUuid));
+    structurePlanAdd(plan, "pageItems", itemIndex, serialized, comparableSerialized, record.uuid);
+    verification.transported.push(serialized);
+    verification.comparable.push(comparableSerialized);
   }
   updateSnapshotDigest(digest, String(limits.totalPageItems));
   var pages = structurePlanFinish(plan);
@@ -2052,6 +2063,27 @@ function structureDigestScan(doc, context) {
     },
     pages: pages
   };
+}
+
+/** Repeat the same observations, comparing exact SHA inputs without hashing them again. */
+function structureVerifyScan(doc, context, first, verification) {
+  var limits = structureLimits(doc);
+  if (limits.totalPageItems !== first.scan.totalPageItems || limits.artboardCount !== first.scan.artboardCount ||
+      context.colorSpace !== first.document.colorSpace || context.artboardCount !== first.document.artboardCount) {
+    throw new Error("MCP_ERROR:" + stringifyJson({ code: "STRUCTURE_SNAPSHOT_CHANGED" }));
+  }
+  var artboards = structureArtboards(doc, limits.artboardCount);
+  var indexByUuid = structureIndexByUuid(doc, limits.totalPageItems);
+  if (stringifyJson(artboards) !== verification.artboards) {
+    throw new Error("MCP_ERROR:" + stringifyJson({ code: "STRUCTURE_SNAPSHOT_CHANGED" }));
+  }
+  for (var itemIndex = 0; itemIndex < limits.totalPageItems; itemIndex++) {
+    var record = structureItemRecord(doc, itemIndex);
+    if (stringifyJson(record) !== verification.transported[itemIndex] ||
+        stringifyJson(structureComparableRecord(record, indexByUuid)) !== verification.comparable[itemIndex]) {
+      throw new Error("MCP_ERROR:" + stringifyJson({ code: "STRUCTURE_SNAPSHOT_CHANGED" }));
+    }
+  }
 }
 
 function structurePageScan(doc, context) {
@@ -2102,15 +2134,12 @@ if (params.mode === "page") {
   result = structurePageScan(structureDocument, structureInitialContext);
   result.document = requireDocumentForRead(params.expectedDocumentKey);
 } else {
-  var firstStructureScan = structureDigestScan(structureDocument, structureInitialContext);
+  // Call-local only: never return or reuse these strings across host calls.
+  var structureVerification = { artboards: "", transported: [], comparable: [] };
+  var firstStructureScan = structureDigestScan(structureDocument, structureInitialContext, structureVerification);
   var structureFinalContext = requireDocumentForRead(params.expectedDocumentKey);
-  var secondStructureScan = structureDigestScan(structureDocument, structureFinalContext);
-  if (firstStructureScan.scan.snapshotDigest !== secondStructureScan.scan.snapshotDigest ||
-      firstStructureScan.scan.comparableDigest !== secondStructureScan.scan.comparableDigest ||
-      firstStructureScan.scan.totalPageItems !== secondStructureScan.scan.totalPageItems ||
-      firstStructureScan.scan.artboardCount !== secondStructureScan.scan.artboardCount) {
-    throw new Error("MCP_ERROR:" + stringifyJson({ code: "STRUCTURE_SNAPSHOT_CHANGED" }));
-  }
+  structureVerifyScan(structureDocument, structureFinalContext, firstStructureScan, structureVerification);
+  structureVerification = null;
   firstStructureScan.document = structureFinalContext;
   result = firstStructureScan;
 }
@@ -2206,6 +2235,30 @@ export function parseMcpError(error) {
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
         return null;
     return parsed;
+}
+const PRE_APPLY_FALLBACK_AUDIT_MESSAGES = new Set(['Preflight failed.', 'Planning failed.']);
+function preApplyRefusalError(error, adapter) {
+    if (error.audit === null)
+        return error;
+    const detail = (error.hostMessage === null ? null : parseMcpError({ message: error.hostMessage })) ??
+        parseMcpError({ message: error.audit.message });
+    let reason = null;
+    if (detail?.code === 'DOCUMENT_MISMATCH') {
+        reason = new DocumentMismatchError(detail.expected ?? '', detail.actual ?? '').message;
+    }
+    else if (adapter !== null && typeof detail?.code === 'string') {
+        const mapped = adapter.mapExecutionError(error, detail);
+        if (mapped.message !== error.message)
+            reason = mapped.message;
+    }
+    if (reason === null && detail === null && !PRE_APPLY_FALLBACK_AUDIT_MESSAGES.has(error.audit.message)) {
+        reason = error.audit.message;
+    }
+    return new ProvenPreApplyFailureError(error.commandId, error.hostMessage, error.audit, {
+        phase: error.audit.phase,
+        reasonCode: typeof detail?.code === 'string' ? detail.code : `${error.audit.phase}_failed`,
+        reason,
+    });
 }
 export const LIST_LAYERS_SCRIPT = `
 var context = getDocumentContext();
@@ -4106,32 +4159,20 @@ export class IllustratorOperationsCore {
             }
             stage = 'read_restore_test';
             let restored = null;
+            let restoredRecords = null;
             let readFailure = null;
             try {
                 restored = await this.readStructureDigest(opened.restored.key, { maxPageItems: BACKUP_MAX_PAGE_ITEMS });
+                if (restored.scan.comparableDigest !== source.scan.comparableDigest ||
+                    restored.scan.totalPageItems !== source.scan.totalPageItems ||
+                    restored.scan.artboardCount !== source.scan.artboardCount) {
+                    restoredRecords = await this.readStructureSnapshotPaged(opened.restored.key, restored);
+                }
             }
             catch (error) {
                 if (error instanceof IndeterminateExecutionError)
                     return asIndeterminate(error);
                 readFailure = error instanceof Error ? error.message : String(error);
-            }
-            let deltas = [];
-            if (restored !== null) {
-                stage = 'compare_structure';
-                const restoredDigest = restored;
-                if (restoredDigest.scan.comparableDigest !== source.scan.comparableDigest ||
-                    restoredDigest.scan.totalPageItems !== source.scan.totalPageItems ||
-                    restoredDigest.scan.artboardCount !== source.scan.artboardCount) {
-                    try {
-                        deltas = compareRestoredStructure(await this.readStructureSnapshotPaged(admittedKey, source), await this.readStructureSnapshotPaged(opened.restored.key, restoredDigest));
-                    }
-                    catch (error) {
-                        if (error instanceof IndeterminateExecutionError)
-                            return asIndeterminate(error);
-                        restored = null;
-                        readFailure = error instanceof Error ? error.message : String(error);
-                    }
-                }
             }
             stage = 'close_restore_test';
             let closed;
@@ -4183,6 +4224,26 @@ export class IllustratorOperationsCore {
             if (readFailure !== null) {
                 stage = 'read_restore_test';
                 return failed('restore_test_read_failed', readFailure);
+            }
+            let deltas = [];
+            if (restoredRecords !== null) {
+                stage = 'compare_structure';
+                let sourceRecords;
+                try {
+                    sourceRecords = await this.readStructureSnapshotPaged(admittedKey, source);
+                }
+                catch (error) {
+                    if (error instanceof IndeterminateExecutionError)
+                        return asIndeterminate(error);
+                    if (error instanceof DocumentMismatchError) {
+                        return failed('source_changed', `The source is not the active document with its pre-backup key, so its records were not compared: ${error.message}`);
+                    }
+                    if (error instanceof StructureSnapshotChangedError) {
+                        return failed('source_changed', 'The source structure no longer matches the page plan read before the restore test.');
+                    }
+                    return failed('source_changed', `The source records could not be read for the comparison: ${error instanceof Error ? error.message : String(error)}`);
+                }
+                deltas = compareRestoredStructure(sourceRecords, restoredRecords);
             }
             if (deltas.length > 0) {
                 stage = 'compare_structure';
@@ -5516,6 +5577,15 @@ export class IllustratorOperationsCore {
         return inventory.documents.length === 0 ? 'release_refused' : 'work_copy_open';
     }
     async reconcileExport(input) {
+        if (await this.isRasterExport(input.exportId)) {
+            return await this.reconcileRasterExport({ exportId: input.exportId, action: input.action,
+                ...(input.confirmExportId === undefined ? {} : { confirmExportId: input.confirmExportId }) });
+        }
+        if (input.action !== 'inspect' && input.action !== 'close_work_copy') {
+            throw new Error(`action ${input.action} applies to illustrator_export sessions only; export ${input.exportId} is not one.`);
+        }
+        if (input.confirmExportId !== undefined)
+            throw new Error('confirm_export_id applies to illustrator_export sessions only.');
         const session = await this.exportStore.readSession(input.exportId);
         if (session === null)
             return { status: 'no_session', exportId: input.exportId };
@@ -5618,7 +5688,9 @@ export class IllustratorOperationsCore {
         };
     }
     async observeEditSessionHostProfile() {
-        const observation = await this.hostProfileProbe.observe();
+        const observation = this.hostProfileProbe.observeForEditSession
+            ? await this.hostProfileProbe.observeForEditSession()
+            : await this.hostProfileProbe.observe();
         return observation.profile === 'foreground' ? 'foreground_unlocked' : observation.profile;
     }
     reportingReadGate() {
@@ -5851,6 +5923,7 @@ export class IllustratorOperationsCore {
                 const refusal = editSessionRefusal(error.hostMessage);
                 if (refusal !== null)
                     throw refusal;
+                throw preApplyRefusalError(error, selectedAdapter);
             }
             const detail = parseMcpError(error);
             if (detail?.code === 'DOCUMENT_MISMATCH')
@@ -5888,5 +5961,27 @@ export class IllustratorOperationsCore {
     }
     reconcile(options) {
         return this.bridge.reconcile(options);
+    }
+    async rasterExport(input) {
+        return await new RasterExportOperation({
+            bridge: this.bridge,
+            exportStore: this.exportStore,
+            assertNoUnresolvedLease: async () => { await this.#leaseGuard.assertNoUnresolvedSession(); },
+            editSessionForPath: async (path) => await this.#editSessions.store.findActiveForPath(path),
+        }).run(input);
+    }
+    async isRasterExport(exportId) {
+        const entry = await this.exportStore.readSessionEntry(exportId);
+        if (entry?.format === 'v2')
+            return true;
+        if (entry?.format === 'v1')
+            return false;
+        const set = await this.exportStore.readRasterRecordSet(exportId);
+        if (Object.entries(set).some(([type, read]) => type !== 'session' && read.state === 'v2'))
+            return true;
+        return await lstat(rasterQuarantinePaths(this.exportStore.stateRootPath, exportId).manifest).then(() => true, () => false);
+    }
+    async reconcileRasterExport(input) {
+        return await new RasterExportReconciler({ bridge: this.bridge, exportStore: this.exportStore }).reconcile(input);
     }
 }

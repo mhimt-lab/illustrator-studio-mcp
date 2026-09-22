@@ -8,7 +8,7 @@ export const EDIT_SESSION_SUPPORT_PROFILE = 'An edit session is an occupancy dec
     'is refused when saving, before anything is written. Appearance stacks, graphic styles, symbols, placed-image pixels, document settings and attributes after the first character ' +
     'of a text are NOT detected. The only restore point is the backup the session was opened with; restoring it loses every change made after it. Measured envelope: Illustrator 30.8.1 ' +
     'foreground and unlocked, at most 2,000 items (nested ones included; in practice at most 1,000, the ceiling of the backup a session needs) that are paths, text, groups, clip groups, compound paths or linked placed images under top-level layers; ' +
-    'no sublayers, embedded images or other item types. delete_objects, embed_image and import_vector_artwork are refused while a session is open.';
+    'no sublayers, embedded images or other item types. delete_objects, embed_image, import_vector_artwork and update_artboard are refused while a session is open.';
 export const sessionIdSchema = z.string().regex(/^es_[0-9a-f]{32}$/u);
 const headSchema = z.strictObject({
     structureDigest: z.string(),

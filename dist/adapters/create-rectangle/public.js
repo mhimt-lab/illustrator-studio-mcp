@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { applyCommandIdSchema } from '../../command-id.js';
 import { layerPathSchema } from '../../mutation-result-schema-core.js';
 import { rectangleResponseSchema } from './result-schema.js';
+import { creationAppearanceSchema } from '../create-appearance.js';
 const confirmationSchema = z.strictObject({
     reason_code: z.literal('template_state_unknown'),
     operation: z.literal('create_rectangle'),
@@ -14,6 +15,7 @@ const common = {
     width: z.number().positive().finite(), height: z.number().positive().finite(), name: z.string().max(255).optional(),
     template_state_risk_confirmation: confirmationSchema.optional()
         .describe('Optional. Template state is assumed non_template by default; when supplied it must match exactly or apply is blocked.'),
+    appearance: creationAppearanceSchema.optional(),
 };
 export const createRectanglePublicInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...common, apply: z.literal(false).default(false) }),
@@ -34,12 +36,13 @@ export function normalizeCreateRectanglePublicInput(input) {
                 expectedLayerPath: params.template_state_risk_confirmation.expected_layer_path,
                 decision: params.template_state_risk_confirmation.decision,
             } }),
+        ...(params.appearance === undefined ? {} : { appearance: params.appearance }),
     };
     return params.apply ? { ...commonInput, apply: true, commandId: params.command_id } : { ...commonInput, apply: false };
 }
 export const createRectangleToolContract = {
     name: 'illustrator_create_rectangle', title: 'Plan or Create Rectangle',
-    description: 'Run a plan-first mutation transaction for an explicit layer path. Apply revalidates in the same JSX call, verifies by native UUID, and rolls back only its own created object. expected_document_key accepts the full key or keyShort; unsaved documents are mutable (mutationProfile unsaved_document).',
+    description: 'Run a plan-first mutation transaction for an explicit layer path. Apply revalidates in the same JSX call, verifies by native UUID, and rolls back only its own created object. Optional appearance (opacity, fill, stroke) is set and read back in the same apply. expected_document_key accepts the full key or keyShort; unsaved documents are mutable (mutationProfile unsaved_document).',
     inputSchema: createRectangleInputSchema, publicInputSchema: createRectanglePublicInputSchema,
     outputSchema: rectangleResponseSchema,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },

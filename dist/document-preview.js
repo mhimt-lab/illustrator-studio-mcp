@@ -35,7 +35,7 @@ export const previewResultSchema = z.strictObject({
     image: z.strictObject({
         format: z.literal('png'),
         mimeType: z.literal('image/png'),
-        pixelFormat: z.literal('rgba8_straight_alpha'),
+        pixelFormat: z.enum(['rgba8_straight_alpha', 'rgb8_opaque']),
         width: z.number().int().positive(),
         height: z.number().int().positive(),
         bytes: z.number().int().positive().max(VISUAL_DIFF_MAX_FILE_BYTES),
@@ -237,8 +237,6 @@ export async function capturePreview(deps, input) {
         try {
             source = await readStableImage(stagedPath, 'preview');
             const dimensions = inspectSupportedPng(source.bytes, 'preview');
-            if (source.bytes[25] !== 6)
-                throw new Error('the capture is not an RGBA PNG');
             if (dimensions.width !== width || dimensions.height !== height) {
                 throw new Error(`the capture is ${dimensions.width}x${dimensions.height} px, expected ${width}x${height} px`);
             }
@@ -255,7 +253,7 @@ export async function capturePreview(deps, input) {
             image: {
                 format: 'png',
                 mimeType: 'image/png',
-                pixelFormat: 'rgba8_straight_alpha',
+                pixelFormat: source.bytes[25] === 6 ? 'rgba8_straight_alpha' : 'rgb8_opaque',
                 width,
                 height,
                 bytes: source.metadata.bytes,

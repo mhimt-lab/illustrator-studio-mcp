@@ -2,14 +2,15 @@ import { z } from 'zod';
 import { canonicalCommandIdSchema } from '../../command-id.js';
 import { canonicalSha256 } from '../../mutation-canonical.js';
 import { CREATE_RECTANGLE_MUTATION_VALIDATOR } from './identity.js';
+import { creationAppearanceSchema } from '../create-appearance.js';
 const canonicalNumberSchema = z.number().finite().transform((value) => Object.is(value, -0) ? 0 : value);
 const positiveCanonicalNumberSchema = canonicalNumberSchema.pipe(z.number().positive());
 const riskConfirmationSchema = z.strictObject({ reasonCode: z.literal('template_state_unknown'), operation: z.literal('create_rectangle'), expectedLayerPath: z.array(z.number().int().safe().nonnegative()).min(1).max(64), decision: z.literal('proceed_despite_unknown_template_state') });
-const fields = { expectedDocumentKey: z.string().min(1).max(16_384), expectedLayerPath: z.array(z.number().int().safe().nonnegative()).min(1).max(64), artboardIndex: z.number().int().safe().nonnegative(), x: canonicalNumberSchema, y: canonicalNumberSchema, width: positiveCanonicalNumberSchema, height: positiveCanonicalNumberSchema, name: z.string().max(255).optional(), templateStateRiskConfirmation: riskConfirmationSchema.optional() };
+const fields = { expectedDocumentKey: z.string().min(1).max(16_384), expectedLayerPath: z.array(z.number().int().safe().nonnegative()).min(1).max(64), artboardIndex: z.number().int().safe().nonnegative(), x: canonicalNumberSchema, y: canonicalNumberSchema, width: positiveCanonicalNumberSchema, height: positiveCanonicalNumberSchema, name: z.string().max(255).optional(), templateStateRiskConfirmation: riskConfirmationSchema.optional(), appearance: creationAppearanceSchema.optional() };
 export const createRectangleMutationRequestSchema = z.strictObject({ commandId: canonicalCommandIdSchema, ...fields, apply: z.literal(true) });
 const planningSchema = z.strictObject({ ...fields, apply: z.literal(false) });
 function requestFields(request) {
-    return { expectedDocumentKey: request.expectedDocumentKey, expectedLayerPath: request.expectedLayerPath, artboardIndex: request.artboardIndex, x: request.x, y: request.y, width: request.width, height: request.height, ...(request.name === undefined ? {} : { name: request.name }), ...(request.templateStateRiskConfirmation === undefined ? {} : { templateStateRiskConfirmation: request.templateStateRiskConfirmation }), apply: request.apply };
+    return { expectedDocumentKey: request.expectedDocumentKey, expectedLayerPath: request.expectedLayerPath, artboardIndex: request.artboardIndex, x: request.x, y: request.y, width: request.width, height: request.height, ...(request.name === undefined ? {} : { name: request.name }), ...(request.templateStateRiskConfirmation === undefined ? {} : { templateStateRiskConfirmation: request.templateStateRiskConfirmation }), ...(request.appearance === undefined ? {} : { appearance: request.appearance }), apply: request.apply };
 }
 function digest(request) {
     return canonicalSha256({ operation: 'create_rectangle', validator: CREATE_RECTANGLE_MUTATION_VALIDATOR, request: requestFields(request) });

@@ -38,11 +38,20 @@ export class CommandQuarantinedError extends Error {
 export class ProvenPreApplyFailureError extends Error {
     commandId;
     hostMessage;
+    audit;
+    refusal;
     code = 'PROVEN_PRE_APPLY_FAILURE';
-    constructor(commandId, hostMessage = null) {
-        super(`Command ${commandId} failed before the side-effect attempt boundary and will not be reapplied.`);
+    constructor(commandId, hostMessage = null, audit = null, refusal = null) {
+        super(refusal === null
+            ? `Command ${commandId} failed before the side-effect attempt boundary and will not be reapplied.`
+            : `Command ${commandId} was refused by the ${refusal.phase} check (${refusal.reasonCode})` +
+                `${refusal.reason === null ? '.' : `: ${refusal.reason}`} Nothing was written, and this ` +
+                'command_id will not be reapplied. Read the target again with apply:false to get a new plan, then apply ' +
+                'that plan with a new command_id.');
         this.commandId = commandId;
         this.hostMessage = hostMessage;
+        this.audit = audit;
+        this.refusal = refusal;
         this.name = 'ProvenPreApplyFailureError';
     }
 }

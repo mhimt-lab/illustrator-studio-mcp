@@ -16,6 +16,7 @@ import { expectedIllustratorBundleId, OsascriptHostProfileProbe } from './host-p
 import { doctorExitCode, formatDoctorReport, runDoctor } from './doctor.js';
 import { HTTP_ENV, resolveStreamableHttpConfig, startStreamableHttpServer } from './http-transport.js';
 import { StdioProtocolVersionGate } from './stdio-version-gate.js';
+import { CallTimingTransport, callTimingEnabled } from './call-timing.js';
 import { resolveIllustratorApplication, STABLE_ILLUSTRATOR_APPLICATION } from './illustrator-application.js';
 async function runDoctorCommand(args) {
     const unknown = args.filter((argument) => argument !== '--json');
@@ -103,7 +104,9 @@ async function main() {
     }
     const { operations, mutationAdapters } = buildOperations();
     serveStdio(() => createServer(operations, mutationAdapters), {
-        transport: new StdioProtocolVersionGate(new StdioServerTransport()),
+        transport: callTimingEnabled()
+            ? new CallTimingTransport(new StdioProtocolVersionGate(new StdioServerTransport()))
+            : new StdioProtocolVersionGate(new StdioServerTransport()),
     });
 }
 main().catch((error) => {

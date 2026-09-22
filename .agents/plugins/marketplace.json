@@ -1,0 +1,20 @@
+{
+  "name": "illustrator-studio-mcp",
+  "interface": {
+    "displayName": "Illustrator Studio MCP"
+  },
+  "plugins": [
+    {
+      "name": "illustrator-studio-mcp",
+      "source": {
+        "source": "local",
+        "path": "./plugins/illustrator-studio-mcp"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

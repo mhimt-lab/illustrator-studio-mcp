@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { RECTANGLE_BOUNDS_PRECISION_DIGITS, RECTANGLE_BOUNDS_TOLERANCE_PT, } from './domain.js';
 import { boundsSchema, documentContextSchema, layerPathSchema, layerStructuralReasonSchema, mutationAuditSchema, } from '../../mutation-result-schema-core.js';
+import { creationAppearanceMatches, creationAppearanceSchema, creationAppearanceStateSchema } from '../create-appearance.js';
 export function normalizeRectangleDistance(value) {
     return Number(value.toFixed(RECTANGLE_BOUNDS_PRECISION_DIGITS));
 }
@@ -49,6 +50,7 @@ const rectanglePlanSchema = z.strictObject({
         'document_mutation_not_allowed',
         'template_state_confirmation_mismatch',
     ])),
+    appearance: creationAppearanceSchema.optional(),
 }).superRefine((plan, context) => {
     if (plan.applyAllowed !== (plan.applyBlockedReasonCodes.length === 0)) {
         context.addIssue({
@@ -115,6 +117,7 @@ const rectangleItemSchema = z.strictObject({
     type: z.literal('PathItem'),
     name: z.string().max(255),
     bounds: boundsSchema,
+    appearance: creationAppearanceStateSchema.optional(),
 });
 const applyFailureSchema = z.strictObject({
     phase: z.literal('apply'),
@@ -343,6 +346,15 @@ export const rectangleResultSchema = z.union([
                     path: ['item', 'bounds', index],
                 });
             }
+        }
+        if ((result.plan.appearance === undefined) !== (result.item.appearance === undefined) ||
+            (result.plan.appearance !== undefined && result.item.appearance !== undefined &&
+                !creationAppearanceMatches(result.plan.appearance, result.item.appearance))) {
+            context.addIssue({
+                code: 'custom',
+                message: 'A verified rectangle carries a read-back appearance exactly when one was requested, and it must match.',
+                path: ['item', 'appearance'],
+            });
         }
         if (result.plan.withinArtboard !== rectangleWithinArtboard(result.item.bounds, result.plan.artboardBounds)) {
             context.addIssue({

@@ -188,7 +188,9 @@ function esExpandAffected(doc, uuids) {
   var seen = {};
   function mark(item) {
     var uuid = esEnum(function () { return item.uuid; });
-    if (uuid[0] === "e" || seen.hasOwnProperty(uuid[1])) return false;
+    // An item whose uuid cannot be read may still be in the document; dropping it would hide its subtree.
+    if (uuid[0] === "e") throw new Error("An edit session item native UUID is unreadable.");
+    if (seen.hasOwnProperty(uuid[1])) return false;
     seen[uuid[1]] = true;
     out.push(uuid[1]);
     return true;
@@ -319,6 +321,47 @@ function esLookup(doc, uuid) {
   var typed = esTypedLookup(function () { return doc.compoundPathItems; }, uuid);
   if (typed === null) typed = esTypedLookup(function () { return doc.placedItems; }, uuid);
   return ((typed === null) ? item : typed);
+}
+
+/**
+ * A uuid lookup that throws MRAP, or a captured reference that reads ReferenceError 45, does not prove
+ * absence; live Illustrator 30.8.1 kept such an invalid GroupItem in its collections. Absence is proved only when
+ * every item on doc.pageItems, doc.groupItems and each layer's pageItems (sublayers included) reads its uuid and
+ * none is one of uuids; the observed invalid items showed on some of these routes and not others. Returns null
+ * when proved, otherwise the reason. Called only where absence decides an outcome, in the same host call.
+ */
+function esAbsenceUnproved(doc, uuids) {
+  var wanted = {};
+  for (var index = 0; index < uuids.length; index++) wanted[uuids[index]] = true;
+  function check(read) {
+    var collection = esRead(read);
+    if (collection[0] === "e") return "collection_unreadable";
+    var count = esLength(function () { return collection[1].length; });
+    if (count === null) return "collection_unreadable";
+    for (var itemIndex = 0; itemIndex < count; itemIndex++) {
+      var uuid = esEnum(function () { return collection[1][itemIndex].uuid; });
+      if (uuid[0] === "e") return "item_uuid_unreadable";
+      if (wanted.hasOwnProperty(uuid[1])) return "uuid_present";
+    }
+    return null;
+  }
+  function checkLayers(read) {
+    var layers = esRead(read);
+    if (layers[0] === "e") return "collection_unreadable";
+    var count = esLength(function () { return layers[1].length; });
+    if (count === null) return "collection_unreadable";
+    for (var layerIndex = 0; layerIndex < count; layerIndex++) {
+      var layer = layers[1][layerIndex];
+      var reason = check(function () { return layer.pageItems; });
+      if (reason === null) reason = checkLayers(function () { return layer.layers; });
+      if (reason !== null) return reason;
+    }
+    return null;
+  }
+  var result = check(function () { return doc.pageItems; });
+  if (result === null) result = check(function () { return doc.groupItems; });
+  if (result === null) result = checkLayers(function () { return doc.layers; });
+  return result;
 }
 
 /** Rows of the declared affected items, resolved by uuid; an item that no longer resolves contributes nothing. */

@@ -158,12 +158,16 @@ export class OsascriptBridge {
     }
     async observeProvenPreApplyFailure(commandId) {
         if (await this.store.readLockOwner() !== commandId)
-            return null;
+            return { message: null, audit: null };
         const status = await this.store.readStatus(commandId);
         const message = status.state === 'failed' ? status.message ?? null : null;
+        const failed = (await this.store.readMutationAudit(commandId))?.at(-1);
+        const audit = failed?.event === 'failed' && (failed.phase === 'preflight' || failed.phase === 'plan')
+            ? { phase: failed.phase, message: failed.message }
+            : null;
         if (this.terminalObserver !== null)
             await this.terminalObserver.provenPreApplyFailure({ commandId, message });
-        return message;
+        return { message, audit };
     }
     async observeUnresolved(commandId, reason = 'indeterminate') {
         if (this.terminalObserver === null || await this.store.readLockOwner() !== commandId)
@@ -702,7 +706,7 @@ export class OsascriptBridge {
             if (error instanceof IndeterminateExecutionError)
                 throw error;
             if (files && command.kind === 'mutation') {
-                let hostFailureMessage = null;
+                let hostFailure = { message: null, audit: null };
                 try {
                     if (!expectedExecution || executionLiveness !== 'inactive') {
                         throw new Error('Mutation execution inactivity is not proven.');
@@ -710,13 +714,13 @@ export class OsascriptBridge {
                     const metadata = await this.store.readMetadata(commandId);
                     if (metadata?.kind !== 'mutation')
                         throw new Error('Mutation metadata is unavailable for failure tombstone.');
-                    hostFailureMessage = await this.observeProvenPreApplyFailure(commandId);
+                    hostFailure = await this.observeProvenPreApplyFailure(commandId);
                     await this.store.finalizeProvenPreApplyFailure(files, metadata);
                 }
                 catch (_terminalError) {
                     throw new IndeterminateExecutionError(`Illustrator mutation does not have one complete, consistent proven pre-apply terminal snapshot; outcome is indeterminate (${commandId}).`, commandId);
                 }
-                throw new ProvenPreApplyFailureError(commandId, hostFailureMessage);
+                throw new ProvenPreApplyFailureError(commandId, hostFailure.message, hostFailure.audit);
             }
             if (files) {
                 try {

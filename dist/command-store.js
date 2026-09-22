@@ -180,6 +180,31 @@ function parseReleasedUnverifiedRecord(value, commandId) {
         return null;
     return value;
 }
+export const CAPACITY_SCAN_LSTAT_CONCURRENCY = 16;
+export async function lstatAllInOrder(paths, limit, statPath = lstat) {
+    if (!Number.isSafeInteger(limit) || limit < 1)
+        throw new Error('lstat concurrency must be a positive integer.');
+    const settled = new Array(paths.length);
+    let next = 0;
+    const worker = async () => {
+        while (next < paths.length) {
+            const index = next;
+            next += 1;
+            try {
+                settled[index] = { status: 'fulfilled', value: await statPath(paths[index]) };
+            }
+            catch (reason) {
+                settled[index] = { status: 'rejected', reason };
+            }
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, paths.length) }, worker));
+    return settled.map((result) => {
+        if (result.status === 'rejected')
+            throw result.reason;
+        return result.value;
+    });
+}
 export class FileCommandStore {
     root;
     lockPath;
@@ -873,9 +898,11 @@ export class FileCommandStore {
                         await commandScope.assertStable();
                         return;
                     }
-                    for (const artifact of artifacts) {
-                        const artifactPath = join(directory, artifact.name);
-                        const artifactMetadata = await lstat(artifactPath);
+                    const artifactPaths = artifacts.map((artifact) => join(directory, artifact.name));
+                    const artifactStats = await lstatAllInOrder(artifactPaths, CAPACITY_SCAN_LSTAT_CONCURRENCY);
+                    for (const [index, artifact] of artifacts.entries()) {
+                        const artifactPath = artifactPaths[index];
+                        const artifactMetadata = artifactStats[index];
                         if (!artifact.isFile() || artifact.isSymbolicLink() ||
                             !artifactMetadata.isFile() || artifactMetadata.isSymbolicLink()) {
                             violations.push(`nonregular artifact: ${describeStateEntry(artifactPath, artifactMetadata, 0o600)}`);

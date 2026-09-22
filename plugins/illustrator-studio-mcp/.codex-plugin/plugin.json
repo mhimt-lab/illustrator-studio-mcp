@@ -1,0 +1,27 @@
+{
+  "name": "illustrator-studio-mcp",
+  "version": "0.1.0-beta.4",
+  "description": "Mac の Adobe Illustrator を、変更前の確認と結果の検証を伴って操作します。Public Beta です。",
+  "author": {
+    "name": "mhimt"
+  },
+  "homepage": "https://github.com/mhimt-lab/illustrator-studio-mcp",
+  "repository": "https://github.com/mhimt-lab/illustrator-studio-mcp",
+  "license": "BUSL-1.1",
+  "interface": {
+    "displayName": "Illustrator Studio MCP",
+    "shortDescription": "Mac の Illustrator を確認しながら編集",
+    "longDescription": "同じ Mac の ChatGPT Work Local と Adobe Illustrator 用です。Node.js 20 以上と macOS の操作許可が必要です。Illustrator を前面に表示し、画面ロックを解除して使います。",
+    "developerName": "mhimt",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/mhimt-lab/illustrator-studio-mcp",
+    "defaultPrompt": [
+      "Illustrator Studio MCP の illustrator-studio-plugin で、開いているドキュメントの一覧を読み取りだけで確認してください。"
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

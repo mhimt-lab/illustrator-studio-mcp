@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "illustrator-studio-plugin": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "illustrator-studio-mcp@0.1.0-beta.4"
+      ],
+      "env": {
+        "ILLUSTRATOR_APPLICATION": "id:com.adobe.illustrator"
+      }
+    }
+  }
+}

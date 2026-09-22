@@ -1,5 +1,6 @@
 import { MUTATION_TRANSACTION_SCRIPT } from '../../mutation-transaction.js';
 import { RECTANGLE_BOUNDS_PRECISION_DIGITS, RECTANGLE_BOUNDS_TOLERANCE_PT } from './domain.js';
+import { CREATION_APPEARANCE_MODULE_SCRIPT } from '../create-appearance.js';
 export const CREATE_RECTANGLE_MODULE_SCRIPT = `var RECTANGLE_BOUNDS_TOLERANCE_PT = ${RECTANGLE_BOUNDS_TOLERANCE_PT};
 var RECTANGLE_BOUNDS_PRECISION_DIGITS = ${RECTANGLE_BOUNDS_PRECISION_DIGITS};
 
@@ -96,6 +97,18 @@ function mutationFindPageItemByUuid(document, uuid) {
   }
 }
 
+/**
+ * MRAP from the lookup plus ReferenceError 45 on the captured reference is not absence on its own;
+ * rollback is verified only when every collection route proves the created UUID gone.
+ */
+function mutationCreatedObjectAbsence(document, createdUuid) {
+  var unproved;
+  try { unproved = esAbsenceUnproved(document, [createdUuid]); }
+  catch (scanError) { unproved = "scan_failed"; }
+  if (unproved === null) return { status: "verified" };
+  return { status: "indeterminate", message: "Rollback could not prove the created object absent (" + unproved + ")." };
+}
+
 function mutationCreatedObjectReferenceState(expectedObject, expectedUuid) {
   try {
     var referenceUuid = expectedObject.uuid;
@@ -144,6 +157,7 @@ function rectanglePreflight(forApply) {
   if (params.name !== undefined && (typeof params.name !== "string" || params.name.length > 255)) {
     throw mutationError("preflight_failed", "Rectangle name must be a string of at most 255 characters.");
   }
+  if (params.appearance !== undefined) creationAppearanceValidate(doc, context, params.appearance);
 
   var layerChain = mutationResolveLayerPath(doc, params.expectedLayerPath);
   var layerInspection = mutationInspectLayerChain(layerChain);
@@ -205,7 +219,7 @@ function rectanglePreflight(forApply) {
 }
 
 function rectanglePlan(preflight) {
-  return {
+  var plan = {
     operation: "create_rectangle",
     documentKey: preflight.context.key,
     coordinateSpace: "artboard_top_left",
@@ -232,6 +246,8 @@ function rectanglePlan(preflight) {
     applyAllowed: preflight.applyBlockedReasonCodes.length === 0,
     applyBlockedReasonCodes: preflight.applyBlockedReasonCodes
   };
+  if (params.appearance !== undefined) plan.appearance = params.appearance;
+  return plan;
 }
 
 function rectangleRevalidate(preflight, plan) {
@@ -264,6 +280,9 @@ function rectangleApply(preflight, plan, state) {
   var nativeUuid = rectangle.uuid;
   state.operationState.createdUuid = nativeUuid;
   if (params.name !== undefined) rectangle.name = params.name;
+  if (params.appearance !== undefined) {
+    state.operationState.appearanceState = creationAppearanceApply(preflight.doc, rectangle, params.appearance);
+  }
   return rectangle;
 }
 
@@ -294,12 +313,16 @@ function rectangleVerify(preflight, plan, state) {
   if (params.name !== undefined && rectangle.name !== params.name) {
     throw mutationError("verify_mismatch", "The created rectangle name does not match the plan.");
   }
-  return {
+  var verified = {
     uuid: state.operationState.createdUuid,
     type: rectangle.typename,
     name: rectangle.name || "",
     bounds: [actualBounds[0], actualBounds[1], actualBounds[2], actualBounds[3]]
   };
+  if (params.appearance !== undefined) {
+    verified.appearance = creationAppearanceVerify(rectangle, state.operationState.appearanceState);
+  }
+  return verified;
 }
 
 function rectangleRollback(state) {
@@ -324,7 +347,7 @@ function rectangleRollback(state) {
     } catch (identityLookupError) {
       return { status: "indeterminate", message: "Rollback object-identity lookup is indeterminate." };
     }
-    if (referenceState === "invalid") return { status: "verified" };
+    if (referenceState === "invalid") return mutationCreatedObjectAbsence(doc, state.operationState.createdUuid);
     if (referenceState === "present") {
       return { status: "indeterminate", message: "Rollback UUID lookup reported absence while the created object still exists." };
     }
@@ -365,7 +388,7 @@ function rectangleRollback(state) {
     } catch (remainingIdentityLookupError) {
       return { status: "indeterminate", message: "Rollback post-remove identity lookup is indeterminate." };
     }
-    if (remainingReferenceState === "invalid") return { status: "verified" };
+    if (remainingReferenceState === "invalid") return mutationCreatedObjectAbsence(doc, state.operationState.createdUuid);
     if (remainingReferenceState === "present") {
       return { status: "indeterminate", message: "Rollback UUID disappeared but the created object still exists." };
     }
@@ -431,4 +454,4 @@ if (transactionExecution.transaction.state === "verified") {
 export const CREATE_RECTANGLE_SCRIPT = `
 ${MUTATION_TRANSACTION_SCRIPT}
 
-${CREATE_RECTANGLE_MODULE_SCRIPT}${CREATE_RECTANGLE_RUNNER_SCRIPT}`;
+${CREATION_APPEARANCE_MODULE_SCRIPT}${CREATE_RECTANGLE_MODULE_SCRIPT}${CREATE_RECTANGLE_RUNNER_SCRIPT}`;

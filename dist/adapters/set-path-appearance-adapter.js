@@ -16,20 +16,20 @@ const canonicalFiveDecimals = (value) => {
     const rounded = Math.round(value * 100_000) / 100_000;
     return Object.is(rounded, -0) ? 0 : rounded;
 };
-const rgbColorSchema = z.strictObject({
+export const rgbColorSchema = z.strictObject({
     model: z.literal('rgb'),
     red: z.number().finite().min(0).max(255).overwrite(canonicalFiveDecimals),
     green: z.number().finite().min(0).max(255).overwrite(canonicalFiveDecimals),
     blue: z.number().finite().min(0).max(255).overwrite(canonicalFiveDecimals),
 });
-const cmykColorSchema = z.strictObject({
+export const cmykColorSchema = z.strictObject({
     model: z.literal('cmyk'),
     cyan: z.number().finite().min(0).max(100).overwrite(canonicalFiveDecimals),
     magenta: z.number().finite().min(0).max(100).overwrite(canonicalFiveDecimals),
     yellow: z.number().finite().min(0).max(100).overwrite(canonicalFiveDecimals),
     black: z.number().finite().min(0).max(100).overwrite(canonicalFiveDecimals),
 });
-const grayColorSchema = z.strictObject({
+export const grayColorSchema = z.strictObject({
     model: z.literal('gray'),
     gray: z.number().finite().min(0).max(100).overwrite(canonicalFiveDecimals),
 });
@@ -969,16 +969,18 @@ function appearanceCanonicalColorState(color) {
 }
 
 /**
- * A stroke turned off reads NoColor afterwards and keeps its width (cells STROKE-CMYK / STROKE-RGB, same and
- * next call), so the planned none stroke carries no colour and the before width. The fill is left as it was: what
- * \`filled = false\` does to fillColor is unmeasured.
+ * A paint turned off reads NoColor afterwards, in the same and the next call: the stroke (cells STROKE-CMYK /
+ * STROKE-RGB), which keeps its width, and the fill (the #306 fill-none cells, on a path created in that call and on an
+ * existing one). So a planned none paint carries no colour, and a none stroke the before width. Before #306 the
+ * planned none fill kept the before colour, so every apply that turned an existing fill off failed verification and
+ * rolled back.
  */
 function appearanceDesiredState(desired, before) {
   return {
     opacity: desired.opacity,
     fill: desired.fill.kind === "solid"
       ? { kind: "solid", color: appearanceCanonicalColorState(desired.fill.color) }
-      : { kind: "none", color: before.fill.color },
+      : { kind: "none", color: { model: "none" } },
     stroke: desired.stroke.kind === "solid"
       ? { kind: "solid", color: appearanceCanonicalColorState(desired.stroke.color), width: desired.stroke.width }
       : { kind: "none", color: { model: "none" }, width: before.stroke.width }

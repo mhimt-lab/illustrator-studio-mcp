@@ -7,6 +7,11 @@ const defaultExec = async (command, args, options) => {
     return { stdout: String(stdout) };
 };
 export const HOST_PROBE_TIMEOUT_MS = 5_000;
+const LSAPPINFO_ASN = /^ASN:0x[0-9a-f]+-0x[0-9a-f]+:?$/iu;
+export function parseLsappinfoBundleId(output) {
+    const match = /"?bundleID"?\s*=\s*"([^"\s]+)"/u.exec(output);
+    return match === null ? null : match[1];
+}
 export function parseScreenLockState(ioregOutput) {
     const observations = [...ioregOutput.matchAll(/(?:CGSSessionScreenIsLocked|IOConsoleLocked)"\s*=\s*(Yes|No)\b/g)]
         .map((match) => match[1]);
@@ -27,6 +32,23 @@ export class OsascriptHostProfileProbe {
         this.exec = exec;
     }
     async observe() {
+        return this.observeWith(async () => {
+            const { stdout } = await this.exec('osascript', [
+                '-e',
+                'tell application "System Events" to tell first application process whose frontmost is true to return bundle identifier',
+            ], { timeout: HOST_PROBE_TIMEOUT_MS });
+            return stdout.trim() === '' ? null : stdout.trim();
+        });
+    }
+    async observeForEditSession() {
+        return this.observeWith(async () => {
+            const front = (await this.exec('lsappinfo', ['front'], { timeout: HOST_PROBE_TIMEOUT_MS })).stdout.trim();
+            if (!LSAPPINFO_ASN.test(front))
+                return null;
+            return parseLsappinfoBundleId((await this.exec('lsappinfo', ['info', '-only', 'bundleid', front], { timeout: HOST_PROBE_TIMEOUT_MS })).stdout);
+        });
+    }
+    async observeWith(frontmost) {
         const observedAt = new Date().toISOString();
         let lockState = 'unknown';
         try {
@@ -43,11 +65,7 @@ export class OsascriptHostProfileProbe {
         }
         let frontmostBundleId = null;
         try {
-            const { stdout } = await this.exec('osascript', [
-                '-e',
-                'tell application "System Events" to tell first application process whose frontmost is true to return bundle identifier',
-            ], { timeout: HOST_PROBE_TIMEOUT_MS });
-            frontmostBundleId = stdout.trim() === '' ? null : stdout.trim();
+            frontmostBundleId = await frontmost();
         }
         catch {
             frontmostBundleId = null;

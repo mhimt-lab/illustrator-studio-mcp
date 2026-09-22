@@ -3,6 +3,7 @@ import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
+import { CREATION_APPEARANCE_MODULE_SCRIPT, creationAppearanceMatches, creationAppearanceSchema, creationAppearanceStateSchema, } from './create-appearance.js';
 import { documentContextSchema, layerPathSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 export const CREATE_SHAPE_OPERATION = 'create_shape';
@@ -17,8 +18,8 @@ export const CREATE_SHAPE_MAX_STAR_POINTS = 24;
 export const CREATE_SHAPE_TOLERANCE_PT = 0.01;
 export const CREATE_SHAPE_MAX_COORDINATE_PT = 16_383;
 export const CREATE_SHAPE_PRECISION_DIGITS = 6;
-const CANONICAL_VERSION = 1;
-const RESULT_SCHEMA_VERSION = 1;
+const CANONICAL_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 2;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
@@ -195,9 +196,9 @@ const publicStarSchema = z.strictObject({
     if (!(star.outer_radius > star.inner_radius))
         context.addIssue({ code: 'custom', message: 'A star needs an outer radius larger than its inner radius.' });
 });
-const publicShapeSchema = z.discriminatedUnion('kind', [publicEllipseSchema, publicPolygonSchema, lineSchema, pathSchema, publicStarSchema, curveSchema]);
+export const publicShapeSchema = z.discriminatedUnion('kind', [publicEllipseSchema, publicPolygonSchema, lineSchema, pathSchema, publicStarSchema, curveSchema]);
 const handleSchema = z.strictObject({ left: z.tuple([z.number().finite(), z.number().finite()]), right: z.tuple([z.number().finite(), z.number().finite()]), smooth: z.boolean() });
-const geometrySchema = z.strictObject({
+export const geometrySchema = z.strictObject({
     closed: z.boolean(),
     anchors: z.array(z.tuple([z.number().finite(), z.number().finite()])).min(2).max(CREATE_SHAPE_MAX_PATH_POINTS),
     geometricBounds: z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]),
@@ -322,6 +323,7 @@ const commonInternal = {
     artboardIndex: z.number().int().safe().nonnegative(),
     shape: createShapeShapeSchema,
     name: z.string().max(255).optional(),
+    appearance: creationAppearanceSchema.optional(),
 };
 const internalInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonInternal, apply: z.literal(false) }),
@@ -333,6 +335,7 @@ const commonPublic = {
     artboard_index: z.number().int().safe().nonnegative(),
     shape: publicShapeSchema,
     name: z.string().max(255).optional(),
+    appearance: creationAppearanceSchema.optional(),
 };
 export const createShapePublicInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonPublic, apply: z.literal(false).default(false) }),
@@ -341,22 +344,27 @@ export const createShapePublicInputSchema = z.discriminatedUnion('apply', [
 const inputSchema = z.strictObject({ ...commonPublic, apply: z.boolean().default(false), command_id: applyCommandIdSchema.optional() });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(createShapePublicInputSchema, { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
+export function normalizePublicShape(value) {
+    let shape;
+    if (value.kind === 'polygon')
+        shape = { kind: 'polygon', centerX: value.center_x, centerY: value.center_y, radius: value.radius, sides: value.sides };
+    else if (value.kind === 'star')
+        shape = { kind: 'star', centerX: value.center_x, centerY: value.center_y, outerRadius: value.outer_radius, innerRadius: value.inner_radius, points: value.points };
+    else if (value.kind === 'path')
+        shape = { kind: 'path', points: value.points, closed: value.closed };
+    else if (value.kind === 'curve')
+        shape = { kind: 'curve', points: value.points.map((point) => ({ anchor: point.anchor, left: point.left, right: point.right, smooth: point.smooth })), closed: value.closed };
+    else
+        shape = value;
+    return shape;
+}
 function normalizePublicInput(input) {
     const value = createShapePublicInputSchema.parse(input);
-    let shape;
-    if (value.shape.kind === 'polygon')
-        shape = { kind: 'polygon', centerX: value.shape.center_x, centerY: value.shape.center_y, radius: value.shape.radius, sides: value.shape.sides };
-    else if (value.shape.kind === 'star')
-        shape = { kind: 'star', centerX: value.shape.center_x, centerY: value.shape.center_y, outerRadius: value.shape.outer_radius, innerRadius: value.shape.inner_radius, points: value.shape.points };
-    else if (value.shape.kind === 'path')
-        shape = { kind: 'path', points: value.shape.points, closed: value.shape.closed };
-    else if (value.shape.kind === 'curve')
-        shape = { kind: 'curve', points: value.shape.points.map((point) => ({ anchor: point.anchor, left: point.left, right: point.right, smooth: point.smooth })), closed: value.shape.closed };
-    else
-        shape = value.shape;
+    const shape = normalizePublicShape(value.shape);
     const common = {
         expectedDocumentKey: value.expected_document_key, expectedLayerPath: value.expected_layer_path,
         artboardIndex: value.artboard_index, shape, ...(value.name === undefined ? {} : { name: value.name }),
+        ...(value.appearance === undefined ? {} : { appearance: value.appearance }),
     };
     return value.apply ? { ...common, apply: true, commandId: value.command_id } : { ...common, apply: false };
 }
@@ -384,6 +392,7 @@ const planSchema = z.strictObject({
     withinArtboard: z.boolean(),
     layer: layerStateSchema,
     applyBlockedReasonCodes: z.array(blockerSchema),
+    appearance: creationAppearanceSchema.optional(),
     applyAllowed: z.boolean(),
 }).superRefine((plan, context) => {
     if (plan.applyAllowed !== (plan.applyBlockedReasonCodes.length === 0)) {
@@ -470,6 +479,7 @@ const createdSchema = z.strictObject({
     name: z.string().max(255),
     geometry: geometrySchema,
     layerItemUuids: z.array(z.string().min(1).max(255)).min(1).max(CREATE_SHAPE_MAX_DIRECT_ITEMS + 1),
+    appearance: creationAppearanceStateSchema.optional(),
 });
 export const createShapeResultSchema = z.union([
     z.strictObject({ operation: z.literal(CREATE_SHAPE_OPERATION), applied: z.literal(false),
@@ -508,6 +518,11 @@ export const createShapeResultSchema = z.union([
         if (!geometryWithinTolerance(result.created.geometry, result.plan.geometry) ||
             (result.plan.name !== null && result.created.name !== result.plan.name)) {
             context.addIssue({ code: 'custom', message: 'A created shape must match the planned geometry and name.' });
+        }
+        if ((result.plan.appearance === undefined) !== (result.created.appearance === undefined) ||
+            (result.plan.appearance !== undefined && result.created.appearance !== undefined &&
+                !creationAppearanceMatches(result.plan.appearance, result.created.appearance))) {
+            context.addIssue({ code: 'custom', message: 'A created shape carries a read-back appearance exactly when one was requested, and it must match.' });
         }
     }
     else if (result.transaction.state === 'verified') {
@@ -602,8 +617,7 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
         throw new Error('Shape creation terminal result requires attestation.');
     await assertOperationSafetyAdapterConformance({ registration: CREATE_SHAPE_SAFETY, plan, result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
-export const CREATE_SHAPE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
-var CREATE_SHAPE_MAX_DIRECT_ITEMS = ${CREATE_SHAPE_MAX_DIRECT_ITEMS};
+export const CREATE_SHAPE_MODULE_SCRIPT = `var CREATE_SHAPE_MAX_DIRECT_ITEMS = ${CREATE_SHAPE_MAX_DIRECT_ITEMS};
 var CREATE_SHAPE_MAX_LAYER_DEPTH = ${CREATE_SHAPE_MAX_LAYER_DEPTH};
 var CREATE_SHAPE_MAX_PATH_POINTS = ${CREATE_SHAPE_MAX_PATH_POINTS};
 var CREATE_SHAPE_MIN_POLYGON_SIDES = ${CREATE_SHAPE_MIN_POLYGON_SIDES};
@@ -994,6 +1008,7 @@ function shapeResolve(forApply) {
   if (params.name !== undefined && (typeof params.name !== "string" || params.name.length > 255)) {
     throw mutationError("preflight_failed", "Shape name must be a string of at most 255 characters.");
   }
+  if (params.appearance !== undefined) creationAppearanceValidate(document, context, params.appearance);
   var layer = shapeResolveLayer(document, params.expectedLayerPath);
   var ancestry = shapeLayerAncestry(layer);
   var order = shapeLayerOrder(layer);
@@ -1018,7 +1033,7 @@ function shapeResolve(forApply) {
 }
 
 function shapePlan(preflight) {
-  return {
+  var plan = {
     operation: "create_shape", documentKey: preflight.context.key, coordinateSpace: "artboard_top_left", unit: "pt",
     artboardIndex: params.artboardIndex, artboardBounds: preflight.rect, shape: params.shape,
     name: params.name === undefined ? null : params.name, geometry: preflight.geometry,
@@ -1027,6 +1042,8 @@ function shapePlan(preflight) {
       itemUuids: preflight.order, ancestry: preflight.ancestry },
     applyBlockedReasonCodes: preflight.blockers, applyAllowed: preflight.blockers.length === 0
   };
+  if (params.appearance !== undefined) plan.appearance = params.appearance;
+  return plan;
 }
 
 function shapeRevalidate(preflight, plan) {
@@ -1046,8 +1063,6 @@ function shapeApply(preflight, plan, state) {
   var item;
   if (shape.kind === "ellipse") {
     item = preflight.layer.pathItems.ellipse(plan.geometry.geometricBounds[1], plan.geometry.geometricBounds[0], shape.width, shape.height);
-  } else if (shape.kind === "star") {
-    item = preflight.layer.pathItems.star(shapeRound(preflight.rect[0] + shape.centerX), shapeRound(preflight.rect[1] - shape.centerY), shape.outerRadius, shape.innerRadius, shape.points);
   } else if (shape.kind === "curve") {
     item = preflight.layer.pathItems.add();
     state.operationState.createdObject = item;
@@ -1064,6 +1079,9 @@ function shapeApply(preflight, plan, state) {
   } else if (shape.kind === "polygon") {
     item = preflight.layer.pathItems.polygon(shapeRound(preflight.rect[0] + shape.centerX), shapeRound(preflight.rect[1] - shape.centerY), shape.radius, shape.sides);
   } else {
+    // Line, path, and star. The host's star call leaves the new star selected and a selection write in the same
+    // call does not clear it (measured 2026-09-23), so the star is drawn from the plan's vertices, which follow that
+    // call's measured order; add + setEntirePath leaves the selection unchanged (measured).
     item = preflight.layer.pathItems.add();
     state.operationState.createdObject = item;
     state.operationState.createdUuid = String(item.uuid);
@@ -1074,10 +1092,17 @@ function shapeApply(preflight, plan, state) {
   if (typeof item.uuid !== "string" || item.uuid.length === 0) throw mutationError("apply_failed", "Illustrator did not return a valid native UUID.");
   state.operationState.createdUuid = String(item.uuid);
   if (params.name !== undefined) item.name = params.name;
+  if (params.appearance !== undefined) {
+    state.operationState.appearanceState = creationAppearanceApply(preflight.document, item, params.appearance);
+  }
   return item;
 }
 
-function shapeVerify(preflight, plan, state) {
+/**
+ * The created item's postcondition. verifyOrder, when given, proves the layer order and returns it; the batch
+ * passes none because it proves every touched layer itself.
+ */
+function shapeVerifyCreated(preflight, plan, state, verifyOrder) {
   if (app.documents.length === 0 || app.activeDocument !== preflight.document) throw mutationError("verify_mismatch", "Active document changed during shape verification.");
   var createdUuid = state.operationState.createdUuid;
   if (typeof createdUuid !== "string" || createdUuid.length === 0) throw mutationError("verify_mismatch", "The created shape has no captured native UUID.");
@@ -1087,14 +1112,24 @@ function shapeVerify(preflight, plan, state) {
   if (typeof item.locked !== "boolean" || typeof item.hidden !== "boolean" || typeof item.editable !== "boolean" || item.locked || item.hidden || !item.editable) {
     throw mutationError("verify_mismatch", "The created shape is not verifiably editable.");
   }
-  var order = shapeLayerOrder(preflight.layer);
-  if (order.length !== plan.layer.itemUuids.length + 1 || order[0] !== createdUuid || !mutationSameSequence(order.slice(1), plan.layer.itemUuids)) {
-    throw mutationError("verify_mismatch", "The created shape is not the only new front item of its layer.");
-  }
+  var order = verifyOrder === null ? null : verifyOrder(createdUuid);
   var geometry = shapeReadGeometry(item);
   if (!shapeGeometryMatches(geometry, plan.geometry)) throw mutationError("verify_mismatch", "The created shape geometry does not match the plan.");
   if (params.name !== undefined && item.name !== params.name) throw mutationError("verify_mismatch", "The created shape name does not match the plan.");
-  return { uuid: createdUuid, type: "PathItem", name: item.name || "", geometry: geometry, layerItemUuids: order };
+  var verified = { uuid: createdUuid, type: "PathItem", name: item.name || "", geometry: geometry };
+  if (order !== null) verified.layerItemUuids = order;
+  if (params.appearance !== undefined) verified.appearance = creationAppearanceVerify(item, state.operationState.appearanceState);
+  return verified;
+}
+
+function shapeVerify(preflight, plan, state) {
+  return shapeVerifyCreated(preflight, plan, state, function (createdUuid) {
+    var order = shapeLayerOrder(preflight.layer);
+    if (order.length !== plan.layer.itemUuids.length + 1 || order[0] !== createdUuid || !mutationSameSequence(order.slice(1), plan.layer.itemUuids)) {
+      throw mutationError("verify_mismatch", "The created shape is not the only new front item of its layer.");
+    }
+    return order;
+  });
 }
 
 function shapeRollback(state) {
@@ -1114,6 +1149,8 @@ function shapeRollback(state) {
     var absentOrder;
     try { absentOrder = shapeLayerOrder(preflight.layer); } catch (e) { return { status: "indeterminate", message: "Rollback layer order is indeterminate." }; }
     if (!mutationSameSequence(absentOrder, preflight.order)) return { status: "indeterminate", message: "Rollback refused because the layer no longer matches the baseline." };
+    var absentUnproved = shapeAbsenceUnproved(preflight.document, createdUuid);
+    if (absentUnproved !== null) return { status: "indeterminate", message: "Rollback could not prove the created item absent (" + absentUnproved + ")." };
     state.operationState.rollbackEvidence.restoredItemUuids = absentOrder;
     return { status: "verified" };
   }
@@ -1130,10 +1167,24 @@ function shapeRollback(state) {
   try { stillPresent = shapeFind(preflight.document, createdUuid) !== null; } catch (e) { return { status: "indeterminate", message: "Rollback absence lookup is indeterminate." }; }
   if (stillPresent) return { status: "failed", message: "Rollback did not remove the created native UUID." };
   // The item is gone but the layer is not the baseline: something else moved, which this rollback cannot name.
-  return mutationSameSequence(restored, preflight.order) ? { status: "verified" } : { status: "indeterminate", message: "Rollback removed the created item but the layer does not match the baseline." };
+  if (!mutationSameSequence(restored, preflight.order)) return { status: "indeterminate", message: "Rollback removed the created item but the layer does not match the baseline." };
+  var removedUnproved = shapeAbsenceUnproved(preflight.document, createdUuid);
+  if (removedUnproved !== null) return { status: "indeterminate", message: "Rollback could not prove the created item absent (" + removedUnproved + ")." };
+  return { status: "verified" };
 }
 
-var shapeExecution = runMutationTransaction({
+/**
+ * A UUID lookup that answers MRAP, and a layer order without the item, are not absence on their own (#268: an invalid
+ * item was visible on some routes and not on others). Absence is verified only when every collection route proves it,
+ * as create_rectangle's rollback requires. Returns null when proven, otherwise the unproved route.
+ */
+function shapeAbsenceUnproved(document, uuid) {
+  try { return esAbsenceUnproved(document, [uuid]); }
+  catch (scanError) { return "scan_failed"; }
+}
+
+`;
+const CREATE_SHAPE_RUNNER_SCRIPT = `var shapeExecution = runMutationTransaction({
   apply: params.apply === true,
   editSessionLayers: function (phase, preflight) { return [preflight.layer]; },
   // the items this change reads and writes, so an edit session can advance its item aggregate.
@@ -1156,6 +1207,8 @@ var result = { operation: "create_shape", applied: shapeExecution.transaction.st
   document: shapeDocument, plan: shapeExecution.plan, transaction: shapeExecution.transaction };
 if (shapeExecution.transaction.state === "verified") result.created = shapeExecution.value;
 `;
+export const CREATE_SHAPE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
+${CREATION_APPEARANCE_MODULE_SCRIPT}${CREATE_SHAPE_MODULE_SCRIPT}${CREATE_SHAPE_RUNNER_SCRIPT}`;
 export const CREATE_SHAPE_HOST_SCRIPT_DIGEST = canonicalSha256(CREATE_SHAPE_SCRIPT);
 export const CREATE_SHAPE_ADAPTER_IDENTITY = mutationAdapterIdentity({
     version: 2, contractVersion: 1, operation: CREATE_SHAPE_OPERATION, validator: CREATE_SHAPE_VALIDATOR,
@@ -1173,7 +1226,7 @@ function normalizedRequest(input) {
 export const createShapeToolContract = {
     name: 'illustrator_create_shape',
     title: 'Plan or Create Shape',
-    description: `Plan or create one ellipse, regular polygon (${CREATE_SHAPE_MIN_POLYGON_SIDES}-${CREATE_SHAPE_MAX_POLYGON_SIDES} sides), star (${CREATE_SHAPE_MIN_STAR_POINTS}-${CREATE_SHAPE_MAX_STAR_POINTS} points, outer radius larger than inner), straight line, straight-segment path, or curve with explicit direction handles and smooth/corner point types (2-${CREATE_SHAPE_MAX_PATH_POINTS} points, open or closed) on an explicit layer path in artboard-top-left points. Degenerate shapes (zero size, coincident consecutive points or star vertices, closed curves that enclose no area) and self-intersecting straight paths are rejected before any write; curve self-intersection is not checked. Apply creates once, verifies the native UUID, layer order, closed state, anchors, handles, point types and bounds against the plan, and rolls back only its own created item with absence proven.`,
+    description: `Plan or create one ellipse, regular polygon (${CREATE_SHAPE_MIN_POLYGON_SIDES}-${CREATE_SHAPE_MAX_POLYGON_SIDES} sides), star (${CREATE_SHAPE_MIN_STAR_POINTS}-${CREATE_SHAPE_MAX_STAR_POINTS} points, outer radius larger than inner), straight line, straight-segment path, or curve with explicit direction handles and smooth/corner point types (2-${CREATE_SHAPE_MAX_PATH_POINTS} points, open or closed) on an explicit layer path in artboard-top-left points. Degenerate shapes (zero size, coincident consecutive points or star vertices, closed curves that enclose no area) and self-intersecting straight paths are rejected before any write; curve self-intersection is not checked. Apply creates once, verifies the native UUID, layer order, closed state, anchors, handles, point types and bounds against the plan, and rolls back only its own created item with absence proven. Optional appearance (opacity, fill, stroke) is set and read back in the same apply.`,
     inputSchema,
     publicInputSchema: createShapePublicInputSchema,
     outputSchema: createShapeResponseSchema,

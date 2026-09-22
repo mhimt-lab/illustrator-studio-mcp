@@ -2,7 +2,7 @@
 
 [日本語](install.md) | **English**
 
-**Public Beta 0.1.0-beta.3.** Requires macOS, stable Illustrator, and Node.js 20+. Keep Illustrator in the foreground and the screen unlocked. Check [client-specific verification](compatibility.en.md).
+**Public Beta 0.1.0-beta.4.** Requires macOS, stable Illustrator, and Node.js 20+. Keep Illustrator in the foreground and the screen unlocked. Check [client-specific verification](compatibility.en.md).
 
 ## Install from npm
 
@@ -12,7 +12,7 @@ illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
 
-The version should be `0.1.0-beta.3`. It is not Stable. Always include `@beta`: a plain `npm install illustrator-studio-mcp` uses the `latest` tag, which may not be this version. Use `@0.1.0-beta.3` instead to pin the version.
+The version should be `0.1.0-beta.4`. It is not Stable. Always include `@beta`: a plain `npm install illustrator-studio-mcp` uses the `latest` tag, which may not be this version. Use `@0.1.0-beta.4` instead to pin the version.
 
 To launch without a global install:
 
@@ -24,11 +24,11 @@ This starts a stdio server waiting for an AI app, not an interactive terminal UI
 
 ## Install the release file
 
-Download the tgz and `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.3) into the same directory, then run there. `SHA256SUMS` also lists the Desktop extension (`.mcpb`); `--ignore-missing` skips files you did not download.
+Download the tgz and `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.4) into the same directory, then run there. `SHA256SUMS` also lists the Desktop extension (`.mcpb`); `--ignore-missing` skips files you did not download.
 
 ```bash
 shasum -a 256 -c SHA256SUMS --ignore-missing
-npm install -g ./illustrator-studio-mcp-0.1.0-beta.3.tgz
+npm install -g ./illustrator-studio-mcp-0.1.0-beta.4.tgz
 illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
@@ -61,8 +61,8 @@ Restart and check `/mcp`.
 
 The Desktop extension runs on the Node.js built into Claude Desktop. It needs neither the npm install nor configuration file edits.
 
-1. Download `illustrator-studio-mcp-0.1.0-beta.3.mcpb` and `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.3) into the same directory and run `shasum -a 256 -c SHA256SUMS --ignore-missing` there. If the hash does not match, stop and do not install.
-2. Double-click the `.mcpb` file to open it in Claude Desktop. In the install dialog, confirm the author **mhimt**, version **0.1.0-beta.3**, and license **BUSL-1.1**, then choose Install. The extension is not signed.
+1. Download `illustrator-studio-mcp-0.1.0-beta.4.mcpb` and `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.4) into the same directory and run `shasum -a 256 -c SHA256SUMS --ignore-missing` there. If the hash does not match, stop and do not install.
+2. Double-click the `.mcpb` file to open it in Claude Desktop. In the install dialog, confirm the author **mhimt**, version **0.1.0-beta.4**, and license **BUSL-1.1**, then choose Install. The extension is not signed.
 3. For stable Illustrator, keep the default "Illustrator application" setting `id:com.adobe.illustrator` and save (use `id:com.adobe.illustratorBeta` for Illustrator Beta).
 4. Confirm the extension is enabled, then start a new chat with a read-only request ([Start with a read](#start-with-a-read)).
 
@@ -120,7 +120,7 @@ ILLUSTRATOR_APPLICATION = "id:com.adobe.illustrator"
 
 If `npx` is not found, use its absolute path from `command -v npx` and ensure Node.js is visible to the launch environment. Restart Codex and check `/mcp`.
 
-For editing tools, the `apply: false` plan returns a `next_call`. Codex can apply by sending those arguments (including `command_id`) unchanged. Review the plan before approving a change. On beta.3, Codex CLI completed rectangle plan, apply, save, and reopen without extra instructions ([verification status](compatibility.en.md)).
+For editing tools, the `apply: false` plan returns a `next_call`. Codex can apply by sending those arguments (including `command_id`) unchanged. Review the plan before approving a change. On beta.4, Codex CLI completed rectangle plan, apply, save, and reopen without extra instructions ([verification status](compatibility.en.md)).
 
 ### ChatGPT Work Local
 
@@ -162,7 +162,7 @@ Notes:
 - If the plan result has `next_call`, use its arguments (including `command_id`) for the apply as is. Reuse the same value only to retry the same apply.
 - The state directory (`ILLUSTRATOR_STUDIO_MCP_STATE_DIR`) normally needs no setting (default: `~/Library/Application Support/illustrator-studio-mcp`). If you point it at a directory you created, set its permissions to `0700` (`chmod 700 <directory>`); a directory you do not own or with wider permissions is refused when the server uses it.
 
-Verification status: the beta.3 package itself, registered with the same one-line `codex mcp add … -- npx -y …` command (before publication, with the package argument replaced by the path of the distribution file), completed rectangle plan, apply, read-back, save, and reopen from a new Work locally chat. See [compatibility and verification scope](compatibility.en.md).
+Verification status: the beta.4 package itself, registered with the same one-line `codex mcp add … -- npx -y …` command (before publication, with the package argument replaced by the path of the distribution file), completed rectangle plan, apply, read-back, save, and reopen from a new Work locally chat. See [compatibility and verification scope](compatibility.en.md).
 
 ## Start with a read
 

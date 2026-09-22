@@ -29,7 +29,8 @@ import { structureDiffIdSchema, structureDiffPageSchema, structureSnapshotIdSche
 import { STRUCTURE_DIFF_DEFAULT_TOLERANCE_PT, STRUCTURE_DIFF_MAX_TOLERANCE_PT, STRUCTURE_SNAPSHOT_LIMITS, } from './structure-diff.js';
 import { comparePngImages, visualDiffResultSchema } from './visual-diff.js';
 import { PREVIEW_MAX_SIDE_PT, previewBoundsSchema, previewResultSchema } from './document-preview.js';
-import { NEXT_CALL_PLAN_ECHOES, buildNextCall, formatToolArgumentError, nextCallSchema, toolArgumentIssueMessage } from './tool-arguments.js';
+import { rasterExportInputSchema, rasterExportResultSchema, rasterReconcileResultSchema } from './raster-export.js';
+import { NEXT_CALL_BUILDERS, buildNextCall, formatToolArgumentError, nextCallSchema, toolArgumentIssueMessage } from './tool-arguments.js';
 export { imagePreflightItemSchema, imagePreflightPageSchema } from './image-preflight-schema.js';
 export { printPreflightFindingSchema, printPreflightResultSchema } from './print-preflight-schema.js';
 export { structureDiffPageSchema, structureSnapshotSummarySchema } from './structure-diff-schema.js';
@@ -1219,7 +1220,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     });
     server.registerTool('illustrator_capture_preview', {
         title: 'Capture Illustrator Preview',
-        description: `Render one explicit rectangle of the bound document to a PNG and return it as MCP image content, without changing the document. bounds is [left, top, right, bottom] in document points (the coordinates of artboard and object bounds), integer edges, at most ${PREVIEW_MAX_SIDE_PT} pt per side, entirely inside one artboard; the image is 72 ppi (1 px per pt), anti-aliased, RGBA with a transparent background. Only a document with saved=false (unsaved changes, or new and never saved) is captured: Illustrator's capture marks a saved document as changed, so a saved document is refused before anything is written. Requires stable Illustrator 30.8.1 frontmost with the screen unlocked. The saved state, document key, item and layer counts, and artboards are re-read after the capture; any change is an error and no image is returned. The temporary PNG is written to a private directory and removed.`,
+        description: `Render one explicit rectangle of the bound document to a PNG and return it as MCP image content, without changing the document. bounds is [left, top, right, bottom] in document points (the coordinates of artboard and object bounds), integer edges, at most ${PREVIEW_MAX_SIDE_PT} pt per side, entirely inside one artboard; the image is 72 ppi (1 px per pt) and anti-aliased, with a transparent background: RGBA when the range has any uncovered pixel, RGB (image.pixelFormat rgb8_opaque) when artwork covers every pixel. Only a document with saved=false (unsaved changes, or new and never saved) is captured: Illustrator's capture marks a saved document as changed, so a saved document is refused before anything is written. Requires stable Illustrator 30.8.1 frontmost with the screen unlocked. The saved state, document key, item and layer counts, and artboards are re-read after the capture; any change is an error and no image is returned. The temporary PNG is written to a private directory and removed.`,
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             bounds: previewBoundsSchema,
@@ -1370,7 +1371,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
             inputSchema: adapter.tool.inputSchema,
             outputSchema: z.object({
                 result: adapter.tool.outputSchema,
-                ...(NEXT_CALL_PLAN_ECHOES[adapter.tool.name] === undefined ? {} : { next_call: nextCallSchema.optional() }),
+                ...(NEXT_CALL_BUILDERS[adapter.tool.name] === undefined ? {} : { next_call: nextCallSchema.optional() }),
             }),
             annotations: adapter.tool.annotations,
         }, async (params) => {
@@ -1448,7 +1449,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         title: 'Open Edit Session',
         description: 'Declare occupancy of one saved, clean Illustrator file so that verified changes can continue while the document is dirty. ' +
             'backup_id must name a verified illustrator_create_backup record of the exact bytes on disk (same path, revision and SHA-256); it is the session\'s only restore point. ' +
-            'One host call binds the key, reads the structure digest and scans every item (at most 2,000, foreground and unlocked, canonical path, no groups, compound paths, placed images or sublayers); anything else is rejected without writing. ' +
+            'One host call binds the key, reads the structure digest and scans every item (at most 2,000 including nested ones, foreground and unlocked, canonical path; paths, text, groups, clip groups, compound paths and linked placed images under top-level layers; no sublayers, embedded images or other item types); anything else is rejected without writing. ' +
             'While the session is open, only operations that declare the items they change run on the file (the others are refused with EDIT_SESSION_OPERATION_UNSUPPORTED before any change); ' +
             'illustrator_save_document with the same backup_id scans the document again and writes only if it still matches, which closes the session. ' + EDIT_SESSION_SUPPORT_PROFILE,
         inputSchema: {
@@ -1559,16 +1560,43 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         ...(params.target_uuids === undefined ? {} : { targetUuids: params.target_uuids }),
         ...(params.output_path === undefined ? {} : { outputPath: params.output_path }),
     })));
+    server.registerTool('illustrator_export', {
+        title: 'Export One Artboard as PNG or JPEG',
+        description: 'Export one artboard of the bound, clean, saved RGB Illustrator document as one new PNG24 or JPEG file, ' +
+            'without touching the source document or file. apply=false (default) is a read-only plan (one host call) that returns the ' +
+            'expected pixel size and nextCall; apply with those arguments unchanged. The saved file is copied into the private state root, ' +
+            'only the copy is opened, the target artboard is selected and exported once to a private staging folder, the file is fully ' +
+            'decoded and its pixel size must equal the plan, the copy is closed without saving, and the file is published at output_path ' +
+            'with link(2), which never overwrites (an existing path is refused). Supported: artboards whose edges are whole points, scale 1 ' +
+            'or 2 (size = artboard pt x scale, exact), at most 4000 px per side and 12,000,000 px in total, artboard ruler origin [0,0]; ' +
+            'an opaque PNG only at 1x. Anything else is refused in the plan. Unsaved changes, never-saved documents, open edit sessions, ' +
+            'CMYK and linked images are refused (save first). SVG is not supported yet. Exports run one at a time. The same command_id ' +
+            'replays the stored result without calling Illustrator; a timeout leaves a session that blocks mutations until ' +
+            'illustrator_reconcile_export resolves it.',
+        inputSchema: rasterExportInputSchema.shape,
+        outputSchema: { result: rasterExportResultSchema },
+        annotations: BACKUP,
+    }, async (params) => text(await operations.rasterExport(params)));
     server.registerTool('illustrator_reconcile_export', {
         title: 'Reconcile Illustrator Export Session',
-        description: 'Resolve an unresolved illustrator_export_outlined or illustrator_optimize_images session after a timeout or indeterminate result. Reads which open documents still use the work copy or the output path; releases the session only when none does. With action close_work_copy the single matching document is closed without saving after its identity and content are re-verified in the same host call. Output files and work copies are never deleted. Mutations stay blocked until every session is released.',
+        description: 'Resolve an unresolved illustrator_export_outlined, illustrator_optimize_images or illustrator_export session after a timeout or indeterminate result. ' +
+            'For outlined/optimize sessions (actions inspect, close_work_copy): reads which open documents still use the work copy or the output path; releases the session only when none does; close_work_copy closes the single matching document without saving after re-verifying it. ' +
+            'For illustrator_export sessions the result names the stop point (window) and what is allowed there: inspect; close_work_copy (only a copy that matches the recorded state); ' +
+            'finalize (record a publication that already happened, then clean up); abandon (record the export as failed without publishing; keeps every file); ' +
+            'release_quarantined with confirm_export_id equal to export_id (release a quarantined or unreadable export after you have checked its files). ' +
+            'Nothing is exported, linked or deleted again, output files are never touched, and every change runs under the command lock. Mutations stay blocked until every session is released.',
         inputSchema: {
             export_id: z.uuid(),
-            action: z.enum(['inspect', 'close_work_copy']).default('inspect'),
+            action: z.enum(['inspect', 'close_work_copy', 'finalize', 'abandon', 'release_quarantined']).default('inspect'),
+            confirm_export_id: z.uuid().optional(),
         },
-        outputSchema: { result: reconcileExportResultSchema },
+        outputSchema: { result: z.union([reconcileExportResultSchema, rasterReconcileResultSchema]) },
         annotations: BACKUP,
-    }, async (params) => text(await operations.reconcileExport({ exportId: params.export_id, action: params.action })));
+    }, async (params) => text(await operations.reconcileExport({
+        exportId: params.export_id,
+        action: params.action,
+        ...(params.confirm_export_id === undefined ? {} : { confirmExportId: params.confirm_export_id }),
+    })));
     server.registerTool('illustrator_reconcile', {
         title: 'Reconcile Illustrator Command',
         description: 'Check durable command and transaction-phase status after a timeout or other indeterminate result before another mutation is allowed. action=quarantine moves one command whose unsafe state is confined to it (reported by the state scan) out of the live state, unchanged, so other mutations can continue; that command is never replayed or reapplied. It requires command_id and an identical confirm_command_id. action=release_unverified is the last resort for a stopped command whose outcome cannot be verified (inspect reports canReleaseUnverified): check the document in Illustrator first, then it records the command as released without verification and frees the lock; the document state stays unknown and the command is never replayed or reapplied. It also requires command_id and an identical confirm_command_id.',

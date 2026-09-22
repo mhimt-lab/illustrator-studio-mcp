@@ -111,7 +111,7 @@ const updateExistingPolicySchema = z.strictObject({
     class: z.literal('update_existing'),
     destructive: z.literal(false),
     evidence: z.strictObject({
-        identity: z.enum(['target_native_uuid', 'target_native_uuid_set', 'target_layer_identity', 'target_text_style_identity']),
+        identity: z.enum(['target_native_uuid', 'target_native_uuid_set', 'target_layer_identity', 'target_text_style_identity', 'ordered_artboard_collection_v1']),
         beforeState: z.literal('before_state_hash'),
         postcondition: z.literal('updated_state_matches_plan'),
     }),
@@ -401,11 +401,14 @@ const textStyleUpdateTargetSchema = z.strictObject({
     collectionIndex: z.number().int().nonnegative().max(511),
     name: z.string().min(1).max(TEXT_STYLE_RESOURCE_NAME_MAX),
 });
+const artboardIdentityTokenSchema = z.string().regex(/^artboard-update-v1:[a-f0-9]{64}$/);
 function sameUpdateTarget(left, right) {
     if ('targetUuid' in left)
         return 'targetUuid' in right && left.targetUuid === right.targetUuid;
     if ('targetLayerIdentity' in left)
         return 'targetLayerIdentity' in right && left.targetLayerIdentity === right.targetLayerIdentity;
+    if ('targetArtboardIdentityV1' in left)
+        return 'targetArtboardIdentityV1' in right && left.targetArtboardIdentityV1 === right.targetArtboardIdentityV1;
     if ('targetTextStyle' in left) {
         return 'targetTextStyle' in right && canonicalDigest(left.targetTextStyle) === canonicalDigest(right.targetTextStyle);
     }
@@ -418,6 +421,8 @@ function updateTargetIdentity(evidence) {
         return 'target_native_uuid';
     if ('targetLayerIdentity' in evidence)
         return 'target_layer_identity';
+    if ('targetArtboardIdentityV1' in evidence)
+        return 'ordered_artboard_collection_v1';
     if ('targetTextStyle' in evidence)
         return 'target_text_style_identity';
     return 'target_native_uuid_set';
@@ -446,6 +451,13 @@ const updateExistingPlanSchema = z.strictObject({
         z.strictObject({
             documentKey: nonemptyBoundedStringSchema,
             targetLayerIdentity: layerIdentityTokenSchema,
+            beforeStateHash: digestSchema,
+            plannedAfterStateHash: digestSchema,
+            plannedChangeSetDigest: digestSchema,
+        }),
+        z.strictObject({
+            documentKey: nonemptyBoundedStringSchema,
+            targetArtboardIdentityV1: artboardIdentityTokenSchema,
             beforeStateHash: digestSchema,
             plannedAfterStateHash: digestSchema,
             plannedChangeSetDigest: digestSchema,
@@ -786,6 +798,13 @@ export const operationSafetyResultSchema = z.discriminatedUnion('operationClass'
             }).superRefine(assertUpdateTargetSetHash),
             z.strictObject({
                 targetLayerIdentity: layerIdentityTokenSchema,
+                beforeStateHash: digestSchema,
+                afterStateHash: digestSchema.nullable(),
+                restoredStateHash: digestSchema.nullable(),
+                restoredBeforeStateVerified: z.boolean(),
+            }),
+            z.strictObject({
+                targetArtboardIdentityV1: artboardIdentityTokenSchema,
                 beforeStateHash: digestSchema,
                 afterStateHash: digestSchema.nullable(),
                 restoredStateHash: digestSchema.nullable(),

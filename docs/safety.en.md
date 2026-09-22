@@ -4,7 +4,7 @@
 
 Illustrator Studio MCP checks the change, not just the command. Planning the edit and verifying its actual result are one flow.
 
-> **Public Beta 0.1.0-beta.3.** A trial release. Try it on a copy of your artwork. Illustrator must be in the foreground with the screen unlocked. In the background or with the screen locked, operations are refused or fail with an unclear reason.
+> **Public Beta 0.1.0-beta.4.** A trial release. Try it on a copy of your artwork. Illustrator must be in the foreground with the screen unlocked. In the background or with the screen locked, operations are refused or fail with an unclear reason.
 
 ## What to know before editing
 
@@ -16,7 +16,7 @@ Illustrator Studio MCP checks the change, not just the command. Planning the edi
 
 ## Consecutive edits
 
-Continuous editing of saved files (edit sessions, experimental) requires a verified backup and exclusive use of the document. It supports 36 of 39 editing operations; delete, embed, and vector import are excluded. The backup a session needs stops at 1,000 objects, so that is the effective session ceiling (extrapolated from one 600-object live run; 1,000 objects has not been measured). Do not edit the same document through another person or app during the session. Not every external change is detected.
+Continuous editing of saved files (edit sessions, experimental) requires a verified backup and exclusive use of the document. It supports 36 of 40 editing operations; delete, embed, vector import and artboard updates are excluded. The backup a session needs stops at 1,000 objects, so that is the effective session ceiling (checked in one 1,000-object live run). Do not edit the same document through another person or app during the session. Not every external change is detected.
 
 ## Known limits
 
@@ -78,7 +78,7 @@ For what to do when an operation stops, see the [recovery steps](runbook.en.md#n
 ## Saving over, exporting, and backups
 
 - **Saving over a file** (`illustrator_save_document`) requires the `backup_id` of a verified backup from `illustrator_create_backup`. If the hashes of the backup and the file on disk do not match, the call is rejected before Illustrator is touched.
-- **Backups** (`illustrator_create_backup`) copy the saved file create-exclusively, then open a restore-test copy and compare its structure. The source document and file are never modified. Backups are never deleted automatically. The effective ceiling is 1,000 objects (extrapolated from one 600-object live run).
+- **Backups** (`illustrator_create_backup`) copy the saved file create-exclusively, then open a restore-test copy and compare its structure. The source document and file are never modified. Backups are never deleted automatically. The effective ceiling is 1,000 objects (one 1,000-object live run took about 18.3 s).
 - **Save-as and export** (`illustrator_save_document_as`, `illustrator_export_outlined`, `illustrator_optimize_images`) write only to paths that do not exist yet. Outlining happens only on the export copy.
 - If a backup or export ends with an unknown result, changes stay blocked until `illustrator_reconcile_backup` / `illustrator_reconcile_export` releases the session.
 - **Embedding an image** (`illustrator_embed_image`) covers only a linked JPEG/PNG directly on a layer in an RGB document. It cannot be undone in the document, so like deletion it requires a clean saved document, a verified backup's `backup_id`, and the echo of the plan's before / after. If the result is unknown after the embed ran, the Illustrator lock stays held; after releasing it with `illustrator_reconcile` `action=release_unverified`, the unchanged file equals the backup, so closing without saving and reopening returns to the state before embedding (never done automatically). Only an `embed()` that Illustrator refused while the linked item still reads back unchanged is settled as "no change".
