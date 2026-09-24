@@ -216,7 +216,7 @@ npm root -g
 
 更新は `npm install -g illustrator-studio-mcp@beta` または新しいtgzで行い、AIアプリを再起動します。[変更履歴](../CHANGELOG.md)と版を確認してください。削除は `npm uninstall -g illustrator-studio-mcp` の後にAIアプリのserver設定を外します。未解決の実行記録は削除しません。
 
-GitHubのmain上の案内は公開後にも訂正されることがあります。npmに公開済みの各版のREADMEとtgzは、後からの文書修正では変わりません。最新の案内は[公開README](../README.md)を参照してください。
+GitHubのmain上の案内は公開後にも訂正されることがあります。npmに公開済みの各版のREADMEとtgzは、後からの文書修正では変わりません。最新の案内は[公開README](../README.ja.md)を参照してください。
 
 設定形式の出典: [Claude Code](https://code.claude.com/docs/en/mcp)、[Claude DesktopのローカルMCP](https://modelcontextprotocol.io/docs/develop/connect-local-servers)、[Codex MCP](https://learn.chatgpt.com/docs/extend/mcp)、[npm exec / npx](https://docs.npmjs.com/cli/v11/commands/npm-exec/)。接続例の仕様と実機確認範囲は別です。
 

@@ -216,7 +216,7 @@ Compare the response with Illustrator. No document and no selection are differen
 
 Update with `npm install -g illustrator-studio-mcp@beta` or a newer tgz, then restart the AI app. Check the version and [changelog](../CHANGELOG.en.md). To uninstall, run `npm uninstall -g illustrator-studio-mcp`, then remove that server entry from the app. Preserve unresolved execution records.
 
-Documentation on GitHub main can be corrected after publication. Later documentation changes do not replace the README or tarball of any version already published on npm. Use the [public README](../README.en.md) for current guidance.
+Documentation on GitHub main can be corrected after publication. Later documentation changes do not replace the README or tarball of any version already published on npm. Use the [public README](../README.md) for current guidance.
 
 Configuration references: [Claude Code](https://code.claude.com/docs/en/mcp), [Claude Desktop local MCP](https://modelcontextprotocol.io/docs/develop/connect-local-servers), [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp), [npm exec / npx](https://docs.npmjs.com/cli/v11/commands/npm-exec/). Configuration syntax is separate from live verification.
 
