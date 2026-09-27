@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { boundsSchema } from '../mutation-result-schema-core.js';
 import { SUPPORTED_PATH_ITEM_HOST_SCRIPT, SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS, SUPPORTED_PATH_ITEM_MAX_PATH_POINTS, supportedPathCmykPaintSchema, } from './supported-path-item-host-script.js';
-export const CLIPPING_MASK_MEASURED_APP_VERSION = '30.8.1';
+import { HOST_VERSION_POLICY_JSX } from '../host-version-policy.js';
 const uuidSchema = z.string().min(1).max(255);
 const numberSchema = z.number().finite();
 const pointSchema = z.tuple([numberSchema, numberSchema]);
@@ -78,7 +78,7 @@ export const clipParentOrderSchema = z.array(uuidSchema).min(1).max(SUPPORTED_PA
     }
 });
 export const clipBlockerSchema = z.enum([
-    'document_mutation_not_allowed', 'unsupported_host_version',
+    'document_mutation_not_allowed', 'host_version_unmeasured',
     'mask_locked', 'mask_hidden', 'content_locked', 'content_hidden', 'group_locked', 'group_hidden',
     'target_not_editable', 'layer_hidden', 'layer_locked',
 ]);
@@ -159,7 +159,7 @@ export function clipAuditMatches(transaction) {
     return true;
 }
 export const CLIPPING_MASK_HOST_SCRIPT = `${SUPPORTED_PATH_ITEM_HOST_SCRIPT}
-var CLIP_MEASURED_APP_VERSION = ${JSON.stringify(CLIPPING_MASK_MEASURED_APP_VERSION)};
+${HOST_VERSION_POLICY_JSX}
 
 function clipIndexOf(list, value) {
   for (var index = 0; index < list.length; index++) if (list[index] === value) return index;
@@ -374,12 +374,12 @@ function clipAddBlocker(blockers, code) {
 }
 
 function clipHostVersionMeasured() {
-  return String(app.version) === CLIP_MEASURED_APP_VERSION;
+  return hostVersionAdmitted("clipping_mask", String(app.version));
 }
 
 function clipCommonBlockers(context, layerState, blockers) {
   if (!context.mutationAllowed) clipAddBlocker(blockers, "document_mutation_not_allowed");
-  if (!clipHostVersionMeasured()) clipAddBlocker(blockers, "unsupported_host_version");
+  if (!clipHostVersionMeasured()) clipAddBlocker(blockers, "host_version_unmeasured");
   if (!layerState.visible) clipAddBlocker(blockers, "layer_hidden");
   if (layerState.locked) clipAddBlocker(blockers, "layer_locked");
 }

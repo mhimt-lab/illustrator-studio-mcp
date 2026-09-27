@@ -29,6 +29,7 @@ import { createRelinkImageAdapter } from './adapters/relink-image-adapter.js';
 import { createEmbedImageAdapter } from './adapters/embed-image-adapter.js';
 import { createSetObjectStateAdapter } from './adapters/set-object-state-adapter.js';
 import { createCreateLayerAdapter } from './adapters/create-layer-adapter.js';
+import { createCreateTrimMarksAdapter } from './adapters/create-trim-marks-adapter.js';
 import { createSetLayerStateAdapter } from './adapters/set-layer-state-adapter.js';
 import { createReorderLayerAdapter } from './adapters/reorder-layer-adapter.js';
 import { createEditPathPointsAdapter } from './adapters/edit-path-points-adapter.js';
@@ -81,6 +82,7 @@ export function createCanonicalMutationOperationRegistry() {
         .register(createApplyPathfinderAdapter())
         .register(createDeleteObjectsAdapter())
         .register(createImportVectorArtworkAdapter())
+        .register(createCreateTrimMarksAdapter())
         .seal();
 }
 export function defaultMutationOperationRegistry() {

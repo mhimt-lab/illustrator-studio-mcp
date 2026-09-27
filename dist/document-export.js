@@ -1,14 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, realpath, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { documentContextSchema } from './mutation-result-schema-core.js';
-import { BackupCopyError, captureFileIdentity, fileIdentitySchema, hostDocumentIdentitySchema, sameFileIdentity, serializeFileIdentity, } from './document-backup.js';
+import { BackupCopyError, captureFileIdentity, fileIdentitySchema, hostDocumentIdentitySchema, CTIME_ONLY_READ_ATTEMPTS, onlyCtimeDiffers, sameContentIdentity, sameFileIdentity, serializeFileIdentity, } from './document-backup.js';
 import { atomicCreatePrivateRecord, readSecurePrivateRecord, unlinkPrivateRecord } from './private-record.js';
 import { classifyExportEntry, ExportSessionFormatError, RASTER_EXPORT_RECORD_MAX_BYTES, RASTER_EXPORT_RECORD_SCHEMAS, RASTER_EXPORT_RECORD_SUFFIXES, RASTER_EXPORT_SESSION_MAX_BYTES, rasterExportSessionSchema, } from './raster-export-records.js';
-import { ensurePrivateDirectory, isMissingPath } from './private-state.js';
+import { ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath } from './private-state.js';
 import { temporaryTwinPattern } from './state-quarantine.js';
+import { noFollowReadFlags, noFollowDirectoryFlags, currentUid } from './platform-primitives.js';
 export const EXPORT_REQUIRES_SAVED_FILE_MESSAGE = 'Export requires a saved, file-backed document with a verified file revision; unsaved documents have no file to export.';
 export const EXPORT_RECORD_VERSION = 1;
 export const EXPORT_RECORD_MAX_BYTES = 16_384;
@@ -625,7 +625,7 @@ export async function validateOutputLocation(outputPath, sourceRealPath, stateRo
     const parentMetadata = await lstat(parent);
     if (!parentMetadata.isDirectory())
         throw invalid('The output directory is not a directory.');
-    if (typeof process.getuid === 'function' && parentMetadata.uid !== process.getuid() && parentMetadata.uid !== 0) {
+    if (parentMetadata.uid !== currentUid() && parentMetadata.uid !== 0) {
         throw invalid('The output directory is owned by another user.');
     }
     if ((parentMetadata.mode & 0o022) !== 0 && (parentMetadata.mode & 0o1000) === 0) {
@@ -682,7 +682,7 @@ async function scanOpenFile(handle) {
     let fontObjects = 0;
     let imageObjects = 0;
     for (;;) {
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, total);
         if (bytesRead === 0)
             break;
         const chunk = buffer.subarray(0, bytesRead);
@@ -705,7 +705,7 @@ async function scanOpenFile(handle) {
     };
 }
 export async function scanPdfObjects(path) {
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(path, noFollowReadFlags());
     try {
         const stat = await handle.stat();
         if (!stat.isFile())
@@ -718,35 +718,40 @@ export async function scanPdfObjects(path) {
 }
 export async function verifyOutputFile(path, expectedArtboards, parentSync) {
     let handle;
+    const flags = noFollowReadFlags();
     try {
-        handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        handle = await open(path, flags);
     }
     catch (error) {
         throw new OutputVerificationError(`The output file could not be opened: ${describeError(error)}`);
     }
     try {
-        const before = await handle.stat({ bigint: true });
-        if (!before.isFile())
-            throw new OutputVerificationError('The output path is not a regular file.');
-        if (before.size <= 0n)
-            throw new OutputVerificationError('The output file is empty.');
-        const scan = await scanOpenFile(handle);
-        if (!scan.header.startsWith('%PDF-'))
-            throw new OutputVerificationError(`The output file does not start with a PDF header (got ${JSON.stringify(scan.header)}).`);
-        if (expectedArtboards !== null && scan.pageObjects !== expectedArtboards) {
-            throw new OutputVerificationError(`The output file has ${scan.pageObjects} page object(s); the source has ${expectedArtboards} artboard(s).`);
-        }
-        await handle.sync();
-        if (parentSync)
-            await parentSync();
-        const after = await handle.stat({ bigint: true });
-        if (BigInt(scan.bytes) !== before.size || !sameFileIdentity(fileIdentityOf(before), fileIdentityOf(after))) {
+        for (let attempt = 1;; attempt += 1) {
+            const before = await handle.stat({ bigint: true });
+            if (!before.isFile())
+                throw new OutputVerificationError('The output path is not a regular file.');
+            if (before.size <= 0n)
+                throw new OutputVerificationError('The output file is empty.');
+            const scan = await scanOpenFile(handle);
+            if (!scan.header.startsWith('%PDF-'))
+                throw new OutputVerificationError(`The output file does not start with a PDF header (got ${JSON.stringify(scan.header)}).`);
+            if (expectedArtboards !== null && scan.pageObjects !== expectedArtboards) {
+                throw new OutputVerificationError(`The output file has ${scan.pageObjects} page object(s); the source has ${expectedArtboards} artboard(s).`);
+            }
+            await handle.sync();
+            if (parentSync)
+                await parentSync();
+            const after = await handle.stat({ bigint: true });
+            if (BigInt(scan.bytes) === before.size && sameFileIdentity(fileIdentityOf(before), fileIdentityOf(after))) {
+                return {
+                    bytes: scan.bytes, sha256: scan.sha256, identity: fileIdentityOf(after), header: scan.header,
+                    pageObjects: scan.pageObjects, fontObjects: scan.fontObjects, imageObjects: scan.imageObjects,
+                };
+            }
+            if (attempt < CTIME_ONLY_READ_ATTEMPTS && BigInt(scan.bytes) === before.size && onlyCtimeDiffers(fileIdentityOf(before), fileIdentityOf(after)))
+                continue;
             throw new OutputVerificationError('The output file changed while it was being verified.');
         }
-        return {
-            bytes: scan.bytes, sha256: scan.sha256, identity: fileIdentityOf(after), header: scan.header,
-            pageObjects: scan.pageObjects, fontObjects: scan.fontObjects, imageObjects: scan.imageObjects,
-        };
     }
     finally {
         await handle.close();
@@ -756,10 +761,10 @@ function fileIdentityOf(metadata) {
     return { dev: metadata.dev, ino: metadata.ino, size: metadata.size, mtimeNs: metadata.mtimeNs, ctimeNs: metadata.ctimeNs };
 }
 export async function verifyOutputUnchanged(path, expected) {
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(path, noFollowReadFlags());
     try {
         const before = await handle.stat({ bigint: true });
-        if (!before.isFile() || !sameFileIdentity(expected.identity, fileIdentityOf(before))) {
+        if (!before.isFile() || !sameContentIdentity(expected.identity, fileIdentityOf(before))) {
             throw new BackupCopyError(`The output file ${path} was replaced or modified.`);
         }
         const hash = createHash('sha256');
@@ -773,7 +778,7 @@ export async function verifyOutputUnchanged(path, expected) {
             total += bytesRead;
         }
         const after = await handle.stat({ bigint: true });
-        if (total !== expected.bytes || hash.digest('hex') !== expected.sha256 || !sameFileIdentity(expected.identity, fileIdentityOf(after))) {
+        if (total !== expected.bytes || hash.digest('hex') !== expected.sha256 || !sameContentIdentity(expected.identity, fileIdentityOf(after))) {
             throw new BackupCopyError(`The output file ${path} no longer matches its verified bytes.`);
         }
     }
@@ -782,7 +787,7 @@ export async function verifyOutputUnchanged(path, expected) {
     }
 }
 export async function withOutputParentScope(parent, operation) {
-    const handle = await open(parent, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    const handle = await open(parent, noFollowDirectoryFlags());
     try {
         const identity = await handle.stat({ bigint: true });
         if (!identity.isDirectory())
@@ -838,10 +843,10 @@ export async function createStagingDirectory(parent, exportId, outputPath, prefi
 }
 export async function publishOutput(stagedPath, outputPath, expected, parentScope, options = {}) {
     const linkFile = options.linkImpl ?? link;
-    const handle = await open(stagedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(stagedPath, noFollowReadFlags());
     try {
         const before = await handle.stat({ bigint: true });
-        if (!before.isFile() || !sameFileIdentity(expected.identity, fileIdentityOf(before)) || before.nlink !== 1n) {
+        if (!before.isFile() || !sameContentIdentity(expected.identity, fileIdentityOf(before)) || before.nlink !== 1n) {
             throw new BackupCopyError(`The staged file ${stagedPath} was replaced or modified before publication.`);
         }
         await parentScope.assertStable();
@@ -919,7 +924,7 @@ export class DocumentExportStore {
         return this.stateRoot;
     }
     async ensure() {
-        await ensurePrivateDirectory(this.stateRoot, 'state root');
+        await ensurePrivateStateRoot(this.stateRoot);
         await ensurePrivateDirectory(this.recordDirectory, 'export record directory');
     }
     recordPath(exportId) {

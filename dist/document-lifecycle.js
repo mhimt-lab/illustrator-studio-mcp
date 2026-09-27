@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
 import { link, lstat, open, realpath, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
-import { fileIdentitySchema, serializeFileIdentity } from './document-backup.js';
+import { CTIME_ONLY_READ_ATTEMPTS, fileIdentitySchema, onlyCtimeDiffers, sameContentIdentity, sameFileIdentity, serializeFileIdentity, } from './document-backup.js';
+export { sameContentIdentity };
 import { documentContextSchema, documentContextWithApplicationSchema } from './mutation-result-schema-core.js';
 import { EDIT_SESSION_JSX } from './edit-session-jsx.js';
+import { noFollowReadFlags } from './platform-primitives.js';
 export const LIFECYCLE_HOST_TIMEOUT_MS = 300_000;
 const HASH_CHUNK_BYTES = 1024 * 1024;
 const MAX_HASHED_FILE_BYTES = 2n ** 31n;
@@ -77,6 +78,10 @@ const documentIdentitySummarySchema = z.strictObject({
     fileRevision: z.string().nullable(),
     colorSpace: z.enum(['RGB', 'CMYK', 'unknown']),
 });
+export const saveAsNextCallSchema = z.strictObject({
+    tool: z.literal('illustrator_reconcile_save_as'),
+    arguments: z.strictObject({ save_as_id: z.uuid() }),
+});
 const indeterminateSchema = z.strictObject({
     outcome: z.literal('indeterminate'),
     stage: lifecycleStageSchema,
@@ -87,7 +92,11 @@ const indeterminateSchema = z.strictObject({
     files: z.strictObject({ stagedPath: z.string().nullable(), outputPath: z.string().nullable() }).optional()
         .describe('save-as only: the staged file (retained) and the published output, when they exist.'),
 });
-export const saveDocumentAsRejectionReasonSchema = z.enum(['document_key_mismatch', 'document_not_admitted', 'output_path_invalid', 'output_exists']);
+const saveAsIndeterminateSchema = indeterminateSchema.extend({
+    saveAsId: z.uuid().optional().describe('The unresolved save-as session. Mutations stay blocked until illustrator_reconcile_save_as resolves it.'),
+    nextCall: saveAsNextCallSchema.optional(),
+});
+export const saveDocumentAsRejectionReasonSchema = z.enum(['document_key_mismatch', 'document_not_admitted', 'output_path_invalid', 'output_exists', 'owner_identity_unavailable']);
 export const saveDocumentAsFailureReasonSchema = z.enum(['save_failed', 'output_exists', 'output_cross_device']);
 export const saveDocumentAsResultSchema = z.discriminatedUnion('outcome', [
     z.strictObject({
@@ -97,6 +106,7 @@ export const saveDocumentAsResultSchema = z.discriminatedUnion('outcome', [
         output: fileFactsSchema,
         previousFilePreserved: z.boolean().nullable().describe('true when the file the document pointed at before is byte-identical; null for a document that had no file.'),
         staging: z.strictObject({ directory: z.string().min(1), removed: z.boolean() }),
+        outputHidden: z.boolean().nullable().describe('true when the output still carries the hidden flag a sync folder (iCloud Drive) sets while the staging name existed; it clears within about 2 s. null when the flags could not be read.'),
     }),
     z.strictObject({ outcome: z.literal('rejected'), reason: saveDocumentAsRejectionReasonSchema, message: z.string().min(1), document: documentContextSchema.nullable() }),
     z.strictObject({
@@ -105,8 +115,10 @@ export const saveDocumentAsResultSchema = z.discriminatedUnion('outcome', [
         message: z.string().min(1),
         document: documentContextSchema.nullable().describe('For output_exists: the document is still open and points at the retained staged file.'),
         files: z.strictObject({ stagedPath: z.string().nullable(), outputPath: z.string().nullable() }),
+        saveAsId: z.uuid().optional().describe('Present when the saved file is retained: the save-as session stays unresolved until illustrator_reconcile_save_as.'),
+        nextCall: saveAsNextCallSchema.optional(),
     }),
-    indeterminateSchema,
+    saveAsIndeterminateSchema,
 ]);
 export const saveDocumentRejectionReasonSchema = z.enum([
     'document_key_mismatch', 'document_not_admitted', 'nothing_to_save', 'backup_not_found', 'backup_invalid', 'backup_mismatch', 'backup_stale', 'backup_file_unavailable', 'source_file_unavailable',
@@ -355,6 +367,7 @@ try {
     result = { outcome: "edit_session_mismatch", check: lifecycleSessionCheck, document: lifecycleSafeContext() };
   } else {
     try {
+      lifecycleBeginSideEffect();
       lifecycleDoc.save();
     } catch (saveError) {
       lifecycleSaveError = lifecycleMessage(saveError);
@@ -510,6 +523,20 @@ try {
   app.userInteractionLevel = lifecyclePreviousInteraction;
 }
 `;
+export const SAVE_AS_INVENTORY_SCRIPT = `
+${LIFECYCLE_SHARED}
+if (typeof params.stagedPath !== "string" || typeof params.outputPath !== "string") lifecycleError("LIFECYCLE_INVALID_INPUT", { message: "stagedPath and outputPath are required." });
+var saveAsInventory = [];
+for (var saveAsCursor = 0; saveAsCursor < app.documents.length; saveAsCursor++) {
+  var saveAsDoc = app.documents[saveAsCursor];
+  var saveAsPath = lifecyclePathOf(saveAsDoc);
+  if (saveAsPath === params.stagedPath || saveAsPath === params.outputPath) {
+    var saveAsIdentity = getDocumentIdentity(saveAsDoc, saveAsCursor);
+    saveAsInventory.push({ key: saveAsIdentity.key, path: saveAsPath, saved: saveAsIdentity.saved, index: saveAsCursor });
+  }
+}
+var result = { documents: saveAsInventory, documentCount: app.documents.length };
+`;
 export const SAVE_AS_SWITCH_SCRIPT = `
 ${LIFECYCLE_SHARED}
 if (typeof params.stagedPath !== "string" || typeof params.outputPath !== "string") lifecycleError("LIFECYCLE_INVALID_INPUT", { message: "stagedPath and outputPath are required." });
@@ -655,43 +682,48 @@ function fileIdentityOf(metadata) {
 }
 export async function readFileFacts(path) {
     let handle;
+    const flags = noFollowReadFlags();
     try {
-        handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        handle = await open(path, flags);
     }
     catch (error) {
         throw new LifecyclePreconditionError('file_unavailable', `The file could not be opened: ${describeError(error)}`);
     }
     try {
-        const before = await handle.stat({ bigint: true });
-        if (!before.isFile())
-            throw new LifecyclePreconditionError('file_unavailable', 'The path is not a regular file.');
-        if (before.size <= 0n)
-            throw new LifecyclePreconditionError('file_unavailable', 'The file is empty.');
-        if (before.size > MAX_HASHED_FILE_BYTES)
-            throw new LifecyclePreconditionError('file_unavailable', 'The file is too large to verify.');
-        const hash = createHash('sha256');
-        const buffer = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
-        let total = 0n;
-        for (;;) {
-            const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
-            if (bytesRead === 0)
-                break;
-            hash.update(buffer.subarray(0, bytesRead));
-            total += BigInt(bytesRead);
-        }
-        const after = await handle.stat({ bigint: true });
-        const identity = fileIdentityOf(before);
-        if (total !== before.size || !sameIdentity(identity, fileIdentityOf(after))) {
+        for (let attempt = 1;; attempt += 1) {
+            const before = await handle.stat({ bigint: true });
+            if (!before.isFile())
+                throw new LifecyclePreconditionError('file_unavailable', 'The path is not a regular file.');
+            if (before.size <= 0n)
+                throw new LifecyclePreconditionError('file_unavailable', 'The file is empty.');
+            if (before.size > MAX_HASHED_FILE_BYTES)
+                throw new LifecyclePreconditionError('file_unavailable', 'The file is too large to verify.');
+            const hash = createHash('sha256');
+            const buffer = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
+            let total = 0n;
+            for (;;) {
+                const { bytesRead } = await handle.read(buffer, 0, buffer.length, Number(total));
+                if (bytesRead === 0)
+                    break;
+                hash.update(buffer.subarray(0, bytesRead));
+                total += BigInt(bytesRead);
+            }
+            const after = await handle.stat({ bigint: true });
+            const identity = fileIdentityOf(before);
+            if (total === before.size && sameIdentity(identity, fileIdentityOf(after))) {
+                return { path, bytes: Number(before.size), sha256: hash.digest('hex'), identity };
+            }
+            if (attempt < CTIME_ONLY_READ_ATTEMPTS && total === before.size && onlyCtimeDiffers(identity, fileIdentityOf(after)))
+                continue;
             throw new LifecyclePreconditionError('file_unavailable', 'The file changed while it was being read.');
         }
-        return { path, bytes: Number(before.size), sha256: hash.digest('hex'), identity };
     }
     finally {
         await handle.close().catch(() => undefined);
     }
 }
 export function sameIdentity(left, right) {
-    return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+    return sameFileIdentity(left, right);
 }
 export function serializeFileFacts(facts) {
     return { path: facts.path, bytes: facts.bytes, sha256: facts.sha256, identity: serializeFileIdentity(facts.identity) };
@@ -758,10 +790,10 @@ export class OutputLinkError extends Error {
 }
 export async function linkStagedToOutput(stagedPath, outputPath, expected, parentScope, options = {}) {
     const linkFile = options.linkImpl ?? link;
-    const handle = await open(stagedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(stagedPath, noFollowReadFlags());
     try {
         const before = await handle.stat({ bigint: true });
-        if (!before.isFile() || !sameIdentity(expected.identity, fileIdentityOf(before)) || before.nlink !== 1n) {
+        if (!before.isFile() || !sameContentIdentity(expected.identity, fileIdentityOf(before)) || before.nlink !== 1n) {
             throw new LifecyclePreconditionError('file_unavailable', `The staged file ${stagedPath} was replaced or modified before publication.`);
         }
         await parentScope.assertStable();
@@ -790,22 +822,42 @@ export async function linkStagedToOutput(stagedPath, outputPath, expected, paren
 }
 export async function removeStagedFile(stagedPath, expected, parentScope) {
     let handle;
+    const flags = noFollowReadFlags();
     try {
-        handle = await open(stagedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+            handle = await open(stagedPath, flags);
+        }
+        catch (_error) {
+            return 'identity_mismatch';
+        }
         const before = await handle.stat({ bigint: true });
-        if (!before.isFile() || before.dev !== expected.dev || before.ino !== expected.ino || before.nlink !== 2n)
-            return false;
-        await parentScope.assertStable();
-        await unlink(stagedPath);
+        if (!before.isFile() || before.dev !== expected.dev || before.ino !== expected.ino)
+            return 'identity_mismatch';
+        if (before.nlink !== 2n)
+            return 'not_linked';
+        try {
+            await parentScope.assertStable();
+            await unlink(stagedPath);
+        }
+        catch (_error) {
+            return 'unlink_failed';
+        }
         const after = await handle.stat({ bigint: true });
         if (after.nlink !== 1n)
-            return false;
-        await rmdir(dirname(stagedPath));
-        await parentScope.sync();
-        return true;
-    }
-    catch {
-        return false;
+            return 'unlink_failed';
+        try {
+            await rmdir(dirname(stagedPath));
+        }
+        catch (_error) {
+            return 'staging_not_empty';
+        }
+        try {
+            await parentScope.sync();
+        }
+        catch (_error) {
+            return 'sync_failed';
+        }
+        return 'removed';
     }
     finally {
         await handle?.close().catch(() => undefined);

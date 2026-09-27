@@ -1,7 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicCreatePrivateRecord, PRIVATE_RECORD_LIMITS, readSecurePrivateRecord, } from './private-record.js';
-import { ensurePrivateDirectory, isMissingPath, validatePrivateDirectory, withPrivateDirectoryScope, } from './private-state.js';
+import { ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath, validatePrivateDirectory, validatePrivateStateRoot, withPrivateDirectoryScope, } from './private-state.js';
 import { canonicalRecipeDefinition, recipeHash, recipeIdSchema, recipeVersionSchema, } from './recipe-schema.js';
 export const RECIPE_RECORD_VERSION = 1;
 const RECIPES_DIRECTORY = 'recipes';
@@ -54,7 +54,7 @@ export class RecipeStore {
         this.recipesRoot = join(root, RECIPES_DIRECTORY);
     }
     async initialize() {
-        await ensurePrivateDirectory(this.root, 'state root');
+        await ensurePrivateStateRoot(this.root);
         await ensurePrivateDirectory(this.recipesRoot, 'recipes directory');
     }
     recipePath(recipeId, recipeVersion) {
@@ -92,7 +92,7 @@ export class RecipeStore {
     async get(recipeId, recipeVersion) {
         const path = this.recipePath(recipeId, recipeVersion);
         try {
-            await validatePrivateDirectory(this.root, 0o700, 'state root');
+            await validatePrivateStateRoot(this.root);
             await validatePrivateDirectory(this.recipesRoot, 0o700, 'recipes directory');
         }
         catch (error) {
@@ -104,7 +104,7 @@ export class RecipeStore {
     }
     async list() {
         try {
-            await validatePrivateDirectory(this.root, 0o700, 'state root');
+            await validatePrivateStateRoot(this.root);
             await validatePrivateDirectory(this.recipesRoot, 0o700, 'recipes directory');
         }
         catch (error) {

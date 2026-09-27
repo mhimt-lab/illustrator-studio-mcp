@@ -797,15 +797,41 @@ function updStyleRevalidate(preflight, plan) {
   }
 }
 
-/** Measured primitive (measured operation): hold the style's attributes, then write each requested value. */
+/** Whether a requested value differs from the style's value read before the update. */
+function updStyleChanges(before) {
+  var requested = updStyleRequested();
+  for (var index = 0; index < requested.length; index++) {
+    var reading = before.attributes[requested[index]];
+    if (!reading || reading.status !== "defined" ||
+        updStyleCanonicalNumber(reading.value) !== updStyleCanonicalNumber(params.attributes[requested[index]])) return true;
+  }
+  return false;
+}
+
+/**
+ * Measured primitive (measured operation): hold the style's attributes, then write each requested value. The style
+ * write leaves the document's saved flag true (measured on 30.8.1 and 30.8.2), so a save skipped it; when a value
+ * changes, the apply writes saved = false, which holds into the next call and lets a save write the update.
+ */
 function updStyleApply(preflight, plan, state) {
   var requested = updStyleRequested();
   var attributes = preflight.style.characterAttributes;
   state.operationState.mutationStarted = true;
+  state.operationState.savedBefore = preflight.document.saved === true;
   for (var index = 0; index < requested.length; index++) {
     attributes[requested[index]] = params.attributes[requested[index]];
   }
+  if (updStyleChanges(plan.style)) preflight.document.saved = false;
   return preflight.style;
+}
+
+/** Puts the saved flag read before the apply back, once the style and text are the before state again. */
+function updStyleRestoreSaved(preflight, state) {
+  if (typeof state.operationState.savedBefore !== "boolean") return true;
+  try {
+    preflight.document.saved = state.operationState.savedBefore;
+    return preflight.document.saved === state.operationState.savedBefore;
+  } catch (savedError) { return false; }
 }
 
 function updStyleEntryMatchesUpdate(before, after) {
@@ -873,6 +899,9 @@ function updStyleVerify(preflight, plan) {
       throw mutationError("verify_mismatch", "Area text using the style overflows after the update.");
     }
   }
+  if (updStyleChanges(plan.style) && preflight.document.saved !== false) {
+    throw mutationError("verify_mismatch", "The document is not marked changed after the character-style update.");
+  }
   return { style: resolved.entry, collections: collections };
 }
 
@@ -926,14 +955,16 @@ function updStyleRollback(state) {
       !updStyleSame(scan.records, preflight.scan.records)) {
     return { status: "failed", message: "Rollback did not restore the exact before style and text state." };
   }
-  return { status: "verified" };
+  return updStyleRestoreSaved(preflight, state)
+    ? { status: "verified" }
+    : { status: "indeterminate", message: "Rollback could not restore the document saved flag." };
 }
 
 var updStyleExecution = runMutationTransaction({
   apply: params.apply === true,
   editSessionAffected: function (phase, preflight) { var uuids = []; var frames = preflight.scan.usage.frameList; for (var i = 0; i < frames.length; i++) uuids.push(frames[i].uuid); return uuids; },
   initialOperationState: function () {
-    return { mutationStarted: false, rollbackEvidence: { restoredStyle: null } };
+    return { mutationStarted: false, savedBefore: null, rollbackEvidence: { restoredStyle: null } };
   },
   preflight: updStylePreflight,
   plan: updStylePlan,

@@ -1,8 +1,8 @@
-import { constants } from 'node:fs';
-import { link, open, rename, unlink } from 'node:fs/promises';
+import { link, rename, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
-import { withPrivateDirectoryScope, } from './private-state.js';
+import { createPrivateFileExclusive, openPrivateFileForRead, isWindowsPrivateState, withPrivateDirectoryScope, } from './private-state.js';
+import { currentUid } from './platform-primitives.js';
 export const PRIVATE_RECORD_LIMITS = {
     lock: 128,
     metadata: 4_096,
@@ -14,27 +14,18 @@ export const PRIVATE_RECORD_LIMITS = {
     idempotency: 4_096,
     editSession: 4_096,
 };
-function currentUid() {
-    if (typeof process.getuid !== 'function') {
-        throw new Error('Secure private records require process.getuid support.');
-    }
-    return process.getuid();
-}
-function secureReadFlags() {
-    if (typeof constants.O_NOFOLLOW !== 'number' || typeof constants.O_NONBLOCK !== 'number') {
-        throw new Error('Secure private records require O_NOFOLLOW and O_NONBLOCK support.');
-    }
-    return constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
-}
 export async function readSecurePrivateHandle(handle, maxBytes, maxLinkCount = 1) {
+    const uid = isWindowsPrivateState() ? null : BigInt(currentUid());
     try {
         const before = await handle.stat({ bigint: true });
         if (!before.isFile())
             return { state: 'invalid', reason: 'not_regular_file' };
-        if (before.uid !== BigInt(currentUid()))
-            return { state: 'invalid', reason: 'wrong_owner' };
-        if ((before.mode & 4095n) !== 384n)
-            return { state: 'invalid', reason: 'unsafe_mode' };
+        if (uid !== null) {
+            if (before.uid !== uid)
+                return { state: 'invalid', reason: 'wrong_owner' };
+            if ((before.mode & 4095n) !== 384n)
+                return { state: 'invalid', reason: 'unsafe_mode' };
+        }
         if (before.nlink < 1n || before.nlink > BigInt(maxLinkCount))
             return { state: 'invalid', reason: 'unexpected_link_count' };
         if (before.size < 0n || before.size > BigInt(maxBytes))
@@ -74,7 +65,7 @@ export async function readSecurePrivateRecord(path, maxBytes, options) {
     return await withRecordScope(path, options, async (scope) => {
         let handle;
         try {
-            handle = await open(path, secureReadFlags());
+            handle = await openPrivateFileForRead(path, { nonBlocking: true });
         }
         catch (error) {
             if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
@@ -96,7 +87,7 @@ async function writeSyncedTemporary(path, contents, options) {
     const temporaryPath = `${path}.${randomUUID()}.tmp`;
     let handle;
     try {
-        handle = await open(temporaryPath, 'wx', 0o600);
+        handle = await createPrivateFileExclusive(temporaryPath);
         await handle.writeFile(contents);
         await handle.sync();
         await options?.durabilityBoundary?.('temporary_synced');
@@ -204,7 +195,7 @@ export async function atomicCreatePrivateRecords(records, options) {
         }
     });
 }
-export async function createEmptyPrivateStagingRecords(paths, options) {
+export async function createEmptyPrivateStagingRecords(paths, options, prepared = new Map()) {
     const [first] = paths;
     if (first === undefined)
         return;
@@ -215,8 +206,15 @@ export async function createEmptyPrivateStagingRecords(paths, options) {
     await withRecordScope(first, options, async (scope) => {
         for (const path of paths) {
             await scope.assertStable();
-            const handle = await open(path, 'wx', 0o600);
-            await handle.close();
+            const handle = await createPrivateFileExclusive(path);
+            try {
+                const contents = prepared.get(path);
+                if (contents !== undefined)
+                    await handle.writeFile(contents, 'utf8');
+            }
+            finally {
+                await handle.close();
+            }
             await options?.durabilityBoundary?.('staging_created');
         }
         await scope.assertStable();

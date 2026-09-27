@@ -1,3 +1,5 @@
+import { hostVersionConsentSchema } from '../host-version-consent.js';
+import { hostVersionPublicFields, hostVersionInternalFields, normalizeHostVersionConsent } from '../host-version-consent.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
@@ -6,7 +8,8 @@ import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { SUPPORTED_PATH_ITEM_HOST_SCRIPT } from './supported-path-item-host-script.js';
-import { PATH_EDIT_MAX_POINTS, PATH_EDIT_MEASURED_APP_VERSIONS, samePathXY, PATH_POINTS_READ_MODULE_SCRIPT, pathEditBlockerSchema, pathEditBlockers, pathEditErrorMessage, pathGeometrySchema, pathTargetSnapshotSchema, pathXYSchema, sameCanonical, samePathTarget, } from '../path-points.js';
+import { PATH_EDIT_MAX_POINTS, samePathXY, PATH_POINTS_READ_MODULE_SCRIPT, pathEditBlockerSchema, pathEditBlockers, pathEditErrorMessage, pathGeometrySchema, pathTargetSnapshotSchema, pathXYSchema, sameCanonical, samePathTarget, } from '../path-points.js';
+import { describeHostVersionScope } from '../host-version-admission.js';
 export const EDIT_PATH_POINTS_OPERATION = 'edit_path_points';
 export const EDIT_PATH_POINTS_VALIDATOR = { kind: EDIT_PATH_POINTS_OPERATION, version: 1 };
 export const PATH_EDIT_MIN_POINTS = 2;
@@ -85,12 +88,12 @@ export function derivePathEdit(before, edit) {
     }
     return { closed, points };
 }
-const commonInternal = { expectedDocumentKey: documentKeySchema, targetUuid: uuidSchema, expectedPath: pathGeometrySchema, edit: pathEditSchema };
+const commonInternal = { ...hostVersionInternalFields, expectedDocumentKey: documentKeySchema, targetUuid: uuidSchema, expectedPath: pathGeometrySchema, edit: pathEditSchema };
 const internalInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonInternal, apply: z.literal(false) }),
     z.strictObject({ ...commonInternal, confirmedAfter: pathGeometrySchema, apply: z.literal(true), commandId: canonicalCommandIdSchema }),
 ]);
-const commonPublic = {
+const commonPublic = { ...hostVersionPublicFields,
     expected_document_key: documentKeySchema,
     target_uuid: uuidSchema.describe('Native PageItem.uuid of the target PathItem.'),
     expected_path: pathGeometrySchema.describe('The target path exactly as illustrator_get_path_points returned it (closed and every point); any difference beyond 0.01 pt is refused.'),
@@ -118,10 +121,11 @@ function normalizeEdit(edit) {
 }
 function normalizePublicInput(input) {
     const value = editPathPointsPublicInputSchema.parse(input);
-    const common = { expectedDocumentKey: value.expected_document_key, targetUuid: value.target_uuid, expectedPath: value.expected_path, edit: normalizeEdit(value.edit) };
+    const common = { ...normalizeHostVersionConsent(value), expectedDocumentKey: value.expected_document_key, targetUuid: value.target_uuid, expectedPath: value.expected_path, edit: normalizeEdit(value.edit) };
     return value.apply ? { ...common, confirmedAfter: value.confirmed_after, apply: true, commandId: value.command_id } : { ...common, apply: false };
 }
 const planSchema = z.strictObject({
+    hostVersionConsent: hostVersionConsentSchema,
     operation: z.literal(EDIT_PATH_POINTS_OPERATION),
     documentKey: documentKeySchema,
     targetUuid: uuidSchema,
@@ -204,12 +208,12 @@ export const editPathPointsResultSchema = z.union([
 ]).superRefine((result, context) => {
     if (result.transaction.state === 'planned') {
         if (result.plan.confirmationStatus !== 'required' ||
-            !sameCanonical(result.plan.applyBlockedReasonCodes, pathEditBlockers(result.document.mutationAllowed, result.document.appVersion, result.plan.before))) {
+            !sameCanonical(result.plan.applyBlockedReasonCodes, pathEditBlockers(result.document.mutationAllowed, result.document.appVersion, result.plan.before, result.plan.hostVersionConsent))) {
             context.addIssue({ code: 'custom', message: 'Planned path edit must expose exact blockers.' });
         }
     }
     else if (result.plan.confirmationStatus !== 'confirmed' || result.plan.applyBlockedReasonCodes.length !== 0 || !result.plan.applyAllowed ||
-        pathEditBlockers(true, result.document.appVersion, result.plan.before).length !== 0) {
+        pathEditBlockers(true, result.document.appVersion, result.plan.before, result.plan.hostVersionConsent).length !== 0) {
         context.addIssue({ code: 'custom', message: 'Applied path edit attempt must derive from an allowed confirmed plan.' });
     }
     if (result.applied) {
@@ -370,9 +374,12 @@ function pathEditResolve(forApply) {
 }
 
 function pathEditPlan(preflight) {
-  return { operation: "edit_path_points", documentKey: preflight.context.key, targetUuid: params.targetUuid, edit: params.edit,
+  var plan = { operation: "edit_path_points", documentKey: preflight.context.key, targetUuid: params.targetUuid, edit: params.edit,
     before: preflight.before, after: preflight.after, applyBlockedReasonCodes: preflight.blockers,
     confirmationStatus: params.apply === true ? "confirmed" : "required", applyAllowed: params.apply === true && preflight.blockers.length === 0 };
+  var consent = hostVersionConsent(params);
+  if (consent !== null) plan.hostVersionConsent = consent;
+  return plan;
 }
 
 function pathEditRevalidate(preflight, plan) {
@@ -477,7 +484,7 @@ function normalizedRequest(input) {
 export const editPathPointsToolContract = {
     name: 'illustrator_edit_path_points',
     title: 'Plan or Edit Path Points',
-    description: `Plan or apply one measured point edit to one PathItem bound by document key, native UUID, and expected_path (the closed flag and every point from illustrator_get_path_points; 0.01 pt tolerance). edit.kind is move_anchor, set_left_direction, or set_right_direction (corner points only), append_point (adds a corner point at the end), remove_point (at least ${PATH_EDIT_MIN_POINTS} points remain), or set_closed. Coordinates are points in Illustrator document coordinates, the same space as geometricBounds. The plan returns the full before and after path and blockers (locked or hidden target or layer; unmeasured Illustrator version — only ${PATH_EDIT_MEASURED_APP_VERSIONS.join(', ')}). Apply echoes plan.after.path as confirmed_after, requires the unlocked foreground host, verifies the whole path by native read-back, and on failure restores the exact before path with the measured inverse. Group members, CompoundPathItem members, clipping paths, guides, and paths with more than ${PATH_EDIT_MAX_POINTS} points are refused. Changing a point type is not offered: on the measured host a SMOOTH write reads back SMOOTH in the same call but CORNER in the next call.`,
+    description: `Plan or apply one measured point edit to one PathItem bound by document key, native UUID, and expected_path (the closed flag and every point from illustrator_get_path_points; 0.01 pt tolerance). edit.kind is move_anchor, set_left_direction, or set_right_direction (corner points only), append_point (adds a corner point at the end), remove_point (at least ${PATH_EDIT_MIN_POINTS} points remain), or set_closed. Coordinates are points in Illustrator document coordinates, the same space as geometricBounds. The plan returns the full before and after path and blockers (locked or hidden target or layer; unmeasured Illustrator version — only ${describeHostVersionScope('edit_path_points')}). Apply echoes plan.after.path as confirmed_after, requires the unlocked foreground host, verifies the whole path by native read-back, and on failure restores the exact before path with the measured inverse. Group members, CompoundPathItem members, clipping paths, guides, and paths with more than ${PATH_EDIT_MAX_POINTS} points are refused. Changing a point type is not offered: on the measured host a SMOOTH write reads back SMOOTH in the same call but CORNER in the next call.`,
     inputSchema,
     publicInputSchema: editPathPointsPublicInputSchema,
     outputSchema: editPathPointsResponseSchema,
@@ -493,6 +500,7 @@ export function createEditPathPointsAdapter() {
         resultSchema: editPathPointsResultSchema, resultSchemaVersion: RESULT_SCHEMA_VERSION, terminalClassifierVersion: CLASSIFIER_VERSION,
         safetyConformanceVersion: CONFORMANCE_VERSION, errorMappingVersion: ERROR_MAPPING_VERSION, hostScriptDigest: EDIT_PATH_POINTS_HOST_SCRIPT_DIGEST,
         mutationHostApplicationMode: 'foreground',
+        hostVersionOperation: () => 'edit_path_points',
         buildCommand(input) {
             const normalized = normalizedRequest(input);
             const { commandId: _commandId, ...params } = normalized.request;

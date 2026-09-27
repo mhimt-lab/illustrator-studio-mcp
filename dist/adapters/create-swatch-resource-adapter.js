@@ -45,6 +45,7 @@ export function createSwatchResourceAdapter() {
         safetyConformanceVersion: SAFETY_CONFORMANCE_VERSION,
         errorMappingVersion: ERROR_MAPPING_VERSION,
         hostScriptDigest: CREATE_SWATCH_RESOURCE_HOST_SCRIPT_DIGEST,
+        hostVersionOperation: (outcome) => (outcome.plan?.resource?.kind === 'spot' ? 'spot_rollback' : null),
         buildCommand: (input) => {
             const value = input;
             if (!value.apply)

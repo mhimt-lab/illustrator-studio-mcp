@@ -5,13 +5,16 @@ import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
 import { documentContextSchema, documentKeyShortSchema } from './mutation-result-schema-core.js';
 import { atomicCreatePrivateRecord, readSecurePrivateRecord, unlinkPrivateRecord } from './private-record.js';
-import { ensurePrivateDirectory, isMissingPath, validatePrivateDirectory, withPrivateDirectoryScope } from './private-state.js';
+import { ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath, validatePrivateDirectory, withPrivateDirectoryScope } from './private-state.js';
+import { noFollowReadFlags, directoryFlags, exclusiveCreateNoFollowFlags, currentUid } from './platform-primitives.js';
 export const BACKUP_RECORD_VERSION = 1;
 export const BACKUP_RECORD_MAX_BYTES = 16_384;
 export const BACKUP_MAX_PAGE_ITEMS = 1_000;
 export const BACKUP_STRUCTURE_TOLERANCE_PT = 0.001;
 export const BACKUP_NUMERIC_TOLERANCE = 0.0001;
 const COPY_CHUNK_BYTES = 1024 * 1024;
+export const EMPTY_COMPOUND_DROPPED_ON_SAVE = 'empty_compound_path_dropped_on_save';
+export const AREA_TEXT_OPTIONS_NOT_IN_FILE = 'area_text_options_not_in_file';
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 const backupFilesSchema = z.strictObject({
     backupPath: z.string().nullable(),
@@ -90,6 +93,16 @@ export const createBackupResultSchema = z.discriminatedUnion('outcome', [
         message: z.string(),
         files: backupFilesSchema,
         deltas: z.array(structureDeltaSchema),
+        cause: z.strictObject({
+            code: z.enum([EMPTY_COMPOUND_DROPPED_ON_SAVE, AREA_TEXT_OPTIONS_NOT_IN_FILE]),
+            items: z.array(z.strictObject({
+                documentIndex: z.number().int().nonnegative(),
+                type: z.string(),
+                name: z.string(),
+                layer: z.strictObject({ name: z.string(), path: z.array(z.number().int().nonnegative()) }),
+                parentType: z.string().nullable(),
+            })),
+        }).optional(),
     }),
     z.strictObject({
         outcome: z.literal('indeterminate'),
@@ -344,7 +357,7 @@ export function parseFileIdentity(value) {
     return { dev: BigInt(value.dev), ino: BigInt(value.ino), size: BigInt(value.size), mtimeNs: BigInt(value.mtimeNs), ctimeNs: BigInt(value.ctimeNs) };
 }
 export async function captureFileIdentity(path) {
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(path, noFollowReadFlags());
     try {
         const metadata = await handle.stat({ bigint: true });
         if (!metadata.isFile())
@@ -356,7 +369,7 @@ export async function captureFileIdentity(path) {
     }
 }
 export async function verifyTrackedFile(path, identity, sha256) {
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(path, noFollowReadFlags());
     try {
         const before = await handle.stat({ bigint: true });
         if (!before.isFile() || !sameFileIdentity(identity, fileIdentity(before))) {
@@ -382,8 +395,57 @@ export async function verifyTrackedFile(path, identity, sha256) {
     }
 }
 export function sameFileIdentity(left, right) {
-    return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-        left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+    return sameContentIdentity(left, right) && left.ctimeNs === right.ctimeNs;
+}
+export function sameContentIdentity(left, right) {
+    return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeNs === right.mtimeNs;
+}
+export function onlyCtimeDiffers(left, right) {
+    return sameContentIdentity(left, right) && left.ctimeNs !== right.ctimeNs;
+}
+export const CTIME_ONLY_READ_ATTEMPTS = 3;
+export async function sameFileOrSameBytes(path, current, recorded, expectedSha256) {
+    if (sameFileIdentity(current, recorded))
+        return true;
+    if (!onlyCtimeDiffers(current, recorded))
+        return false;
+    try {
+        const reread = await hashFileStable(path);
+        return sameContentIdentity(reread.identity, recorded) && reread.sha256 === expectedSha256;
+    }
+    catch (_error) {
+        return false;
+    }
+}
+async function hashFileStable(path) {
+    const handle = await open(path, noFollowReadFlags());
+    try {
+        for (let attempt = 1;; attempt += 1) {
+            const before = await handle.stat({ bigint: true });
+            if (!before.isFile())
+                throw new BackupCopyError(`${path} is not a regular file.`);
+            const hash = createHash('sha256');
+            const buffer = Buffer.allocUnsafe(COPY_CHUNK_BYTES);
+            let total = 0n;
+            for (;;) {
+                const { bytesRead } = await handle.read(buffer, 0, buffer.length, Number(total));
+                if (bytesRead === 0)
+                    break;
+                hash.update(buffer.subarray(0, bytesRead));
+                total += BigInt(bytesRead);
+            }
+            const identity = fileIdentity(before);
+            const after = fileIdentity(await handle.stat({ bigint: true }));
+            if (total === before.size && sameFileIdentity(identity, after))
+                return { sha256: hash.digest('hex'), identity };
+            if (attempt < CTIME_ONLY_READ_ATTEMPTS && total === before.size && onlyCtimeDiffers(identity, after))
+                continue;
+            throw new BackupCopyError(`${path} changed while it was being read.`);
+        }
+    }
+    finally {
+        await handle.close();
+    }
 }
 export async function inspectSourceFile(path) {
     let resolved;
@@ -444,9 +506,7 @@ export async function resolveBackupRoot(path) {
     return resolved;
 }
 export async function assertManagedNamespace(resolvedPath) {
-    if (typeof process.getuid !== 'function')
-        throw new Error('the current user cannot be verified.');
-    const uid = process.getuid();
+    const uid = currentUid();
     let current = dirname(resolvedPath);
     const visited = new Set();
     while (!visited.has(current)) {
@@ -469,7 +529,7 @@ export async function withBackupRootScope(backupRoot, operation) {
     return await withPrivateDirectoryScope([{ path: backupRoot, description: 'backup root' }], operation);
 }
 async function hashFile(path) {
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(path, noFollowReadFlags());
     try {
         const hash = createHash('sha256');
         const buffer = Buffer.allocUnsafe(COPY_CHUNK_BYTES);
@@ -489,7 +549,7 @@ async function hashFile(path) {
     }
 }
 async function syncParentDirectory(path) {
-    const directory = await open(dirname(path), constants.O_RDONLY | constants.O_DIRECTORY);
+    const directory = await open(dirname(path), directoryFlags());
     try {
         await directory.sync();
     }
@@ -504,12 +564,13 @@ export async function copyFileExclusive(sourcePath, destinationPath, expectedIde
         const before = await input.stat({ bigint: true });
         if (!before.isFile())
             throw new BackupCopyError('The copy source is not a regular file.');
-        if (expectedIdentity && !sameFileIdentity(expectedIdentity, fileIdentity(before))) {
+        if (expectedIdentity && !sameContentIdentity(expectedIdentity, fileIdentity(before))) {
             throw new BackupCopyError('The copy source changed before the copy started.');
         }
         let output;
+        const flags = exclusiveCreateNoFollowFlags();
         try {
-            output = await open(destinationPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+            output = await open(destinationPath, flags, 0o600);
         }
         catch (error) {
             throw new BackupCopyError(`The copy destination could not be created exclusively: ${describeError(error)}`);
@@ -535,7 +596,7 @@ export async function copyFileExclusive(sourcePath, destinationPath, expectedIde
         }
         await syncParentDirectory(destinationPath);
         const after = await input.stat({ bigint: true });
-        if (!sameFileIdentity(fileIdentity(before), fileIdentity(after)) || BigInt(total) !== before.size) {
+        if (!sameContentIdentity(fileIdentity(before), fileIdentity(after)) || BigInt(total) !== before.size) {
             throw new BackupCopyError('The copy source changed while it was being copied.');
         }
         const sourceSha256 = hash.digest('hex');
@@ -607,6 +668,22 @@ function comparableItem(item, indexByUuid) {
             },
         }
         : item.parent;
+    if (item.areaText !== undefined) {
+        return {
+            type: item.type,
+            name: item.name,
+            layer: item.layer,
+            bounds: item.bounds,
+            visibleBounds: item.visibleBounds,
+            documentIndex: item.documentIndex,
+            parent,
+            locked: item.locked,
+            hidden: item.hidden,
+            appearance: item.appearance,
+            text: item.text,
+            areaText: item.areaText,
+        };
+    }
     return {
         type: item.type,
         name: item.name,
@@ -633,6 +710,59 @@ export function compareRestoredStructure(source, restored) {
     }
     return deltas;
 }
+function invertedBounds(bounds) {
+    return bounds[0] > bounds[2] || bounds[1] < bounds[3];
+}
+function mismatchItem(item) {
+    return {
+        documentIndex: item.documentIndex,
+        type: item.type,
+        name: item.name,
+        layer: { name: item.layer.name, path: [...item.layer.path] },
+        parentType: item.parent.status === 'available' && item.parent.value.kind === 'page_item' ? item.parent.value.type : null,
+    };
+}
+export function explainRestoredStructure(source, restored) {
+    return explainEmptyCompounds(source, restored) ?? explainAreaTextOptions(source, restored);
+}
+function explainEmptyCompounds(source, restored) {
+    const dropped = new Set();
+    for (const item of source.items) {
+        const parent = item.parent.status === 'available' && item.parent.value.kind === 'page_item' ? item.parent.value.uuid : null;
+        if ((item.type === 'CompoundPathItem' && invertedBounds(item.bounds)) || (parent !== null && dropped.has(parent)))
+            dropped.add(item.uuid);
+    }
+    if (dropped.size === 0)
+        return null;
+    const kept = source.items.filter((item) => !dropped.has(item.uuid)).map((item, documentIndex) => ({ ...item, documentIndex }));
+    const reduced = { ...source, items: kept, scan: { ...source.scan, totalPageItems: kept.length } };
+    if (compareRestoredStructure(reduced, restored).length > 0)
+        return null;
+    return { code: EMPTY_COMPOUND_DROPPED_ON_SAVE, items: source.items.filter((item) => dropped.has(item.uuid)).map(mismatchItem) };
+}
+function explainAreaTextOptions(source, restored) {
+    if (source.items.length !== restored.items.length)
+        return null;
+    const deltas = compareRestoredStructure(source, restored);
+    const indexes = new Set();
+    for (const delta of deltas) {
+        const match = /^\$\.items\[(\d+)\]\.(?:areaText|visibleBounds)(?:[.[]|$)/u.exec(delta.at);
+        if (match === null)
+            return null;
+        indexes.add(Number(match[1]));
+    }
+    if (indexes.size === 0)
+        return null;
+    for (const index of indexes) {
+        const before = source.items[index]?.areaText;
+        const after = restored.items[index]?.areaText;
+        if (before === undefined)
+            return null;
+        if (after !== undefined && deepDifferences(before.options, after.options).length === 0)
+            return null;
+    }
+    return { code: AREA_TEXT_OPTIONS_NOT_IN_FILE, items: [...indexes].sort((a, b) => a - b).map((index) => mismatchItem(source.items[index])) };
+}
 export function backupFileName(backupId, sourcePath) {
     return `${backupId}-${basename(sourcePath)}`;
 }
@@ -651,7 +781,7 @@ export class DocumentBackupStore {
         return this.recordDirectory;
     }
     async ensure() {
-        await ensurePrivateDirectory(this.stateRoot, 'state root');
+        await ensurePrivateStateRoot(this.stateRoot);
         await ensurePrivateDirectory(this.recordDirectory, 'backup record directory');
     }
     recordPath(backupId) {
@@ -763,8 +893,9 @@ export function newBackupId() {
 }
 export async function removeRestoreTestFile(path, identity, scope) {
     let handle;
+    const flags = noFollowReadFlags();
     try {
-        handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        handle = await open(path, flags);
         const before = await handle.stat({ bigint: true });
         if (!before.isFile() || !sameFileIdentity(identity, fileIdentity(before)) || before.nlink !== 1n)
             return false;

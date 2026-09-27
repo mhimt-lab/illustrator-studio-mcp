@@ -2,7 +2,7 @@
 
 **日本語** | [English](install.en.md)
 
-**Public Beta 0.1.0-beta.4。** Mac、通常版Illustrator、Node.js 20以上が必要です（Claude DesktopのDesktop拡張はNode.js不要）。AIアプリの利用条件・料金は別で、このツール自体のAPIキーは不要です。Illustratorを前面に表示し、画面ロックを解除して使います。[アプリ別の確認範囲](compatibility.md)を確認してください。
+**Public Beta 0.1.0-beta.5。** Mac、通常版Illustrator、Node.js 20以上が必要です（Claude DesktopのDesktop拡張はNode.js不要）。AIアプリの利用条件・料金は別で、このツール自体のAPIキーは不要です。Illustratorを前面に表示し、画面ロックを解除して使います。[アプリ別の確認範囲](compatibility.md)を確認してください。
 
 ## npmから入れる
 
@@ -12,7 +12,7 @@ illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
 
-版の表示は `0.1.0-beta.4` です。Stable版ではありません。手順では必ず `@beta` を付けてください。タグなしの `npm install illustrator-studio-mcp` は `latest` を使うため、この版になるとは限りません。版を固定したい場合は `@0.1.0-beta.4` に置き換えてください。
+版の表示は `0.1.0-beta.5` です。Stable版ではありません。手順では必ず `@beta` を付けてください。タグなしの `npm install illustrator-studio-mcp` は `latest` を使うため、この版になるとは限りません。版を固定したい場合は `@0.1.0-beta.5` に置き換えてください。
 
 グローバルインストールなしで起動するには、次を使います。
 
@@ -24,11 +24,11 @@ npx -y illustrator-studio-mcp@beta
 
 ## 配布用ファイルから入れる
 
-[GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.4)からtgzと `SHA256SUMS` を同じフォルダへ取得し、そのフォルダで実行します。`SHA256SUMS` にはDesktop拡張（`.mcpb`）の行もあるため、取得していないファイルは `--ignore-missing` で飛ばします。
+[GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.5)からtgzと `SHA256SUMS` を同じフォルダへ取得し、そのフォルダで実行します。`SHA256SUMS` にはDesktop拡張（`.mcpb`）の行もあるため、取得していないファイルは `--ignore-missing` で飛ばします。
 
 ```bash
 shasum -a 256 -c SHA256SUMS --ignore-missing
-npm install -g ./illustrator-studio-mcp-0.1.0-beta.4.tgz
+npm install -g ./illustrator-studio-mcp-0.1.0-beta.5.tgz
 illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
@@ -61,8 +61,8 @@ claude mcp add --transport stdio illustrator-studio -- npx -y illustrator-studio
 
 Desktop拡張は、Claude Desktopに内蔵されたNode.jsで動きます。npmでのインストールも設定ファイルの編集も不要です。
 
-1. [illustrator-studio-mcp-0.1.0-beta.4.mcpb をダウンロード](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.4/illustrator-studio-mcp-0.1.0-beta.4.mcpb)します。ファイルを確かめる場合は、[GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.4)から `SHA256SUMS` を同じフォルダへ取得し、そのフォルダで `shasum -a 256 -c SHA256SUMS --ignore-missing` を実行します。hash不一致なら導入せず停止してください。
-2. `.mcpb` ファイルをダブルクリックしてClaude Desktopで開きます。インストール画面で提供元 **mhimt**、版 **0.1.0-beta.4**、ライセンス **BUSL-1.1** を確認して「インストール」を押します。この拡張には署名がありません。
+1. [illustrator-studio-mcp-0.1.0-beta.5.mcpb をダウンロード](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.5/illustrator-studio-mcp-0.1.0-beta.5.mcpb)します。ファイルを確かめる場合は、[GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.5)から `SHA256SUMS` を同じフォルダへ取得し、そのフォルダで `shasum -a 256 -c SHA256SUMS --ignore-missing` を実行します。hash不一致なら導入せず停止してください。
+2. `.mcpb` ファイルをダブルクリックしてClaude Desktopで開きます。インストール画面で提供元 **mhimt**、版 **0.1.0-beta.5**、ライセンス **BUSL-1.1** を確認して「インストール」を押します。この拡張には署名がありません。
 3. 設定の「Illustrator application」は、通常版なら既定値 `id:com.adobe.illustrator` のまま保存します（Illustrator Beta版は `id:com.adobe.illustratorBeta`）。
 4. 拡張が有効になっていることを確かめ、新しいチャットで読み取りだけを依頼します（[書類を変えずに試す](#書類を変えずに試す)）。
 
@@ -128,10 +128,10 @@ ChatGPTデスクトップアプリの「Work」で、実行場所（入力欄の
 
 #### pluginで追加する（主な手順）
 
-ChatGPTの画面だけで追加できます。必要なのはNode.js 20以上です（[公式サイト](https://nodejs.org/ja)のインストーラーで入れます。pluginは `npx` で `illustrator-studio-mcp@0.1.0-beta.4` を起動します）。
+ChatGPTの画面だけで追加できます。必要なのはNode.js 20以上です（[公式サイト](https://nodejs.org/ja)のインストーラーで入れます。pluginは `npx` で `illustrator-studio-mcp@0.1.0-beta.5` を起動します）。
 
 1. ChatGPTのサイドバーで「プラグイン」を開き、右上の「追加」→「マーケットプレイスを追加」を選びます（「設定」→「プラグイン」→「追加」にも同じメニューがあります）。
-2. 「プラグインマーケットプレイスを追加」で、「ソース」に `mhimt-lab/illustrator-studio-mcp`、「Git ref」に `v0.1.0-beta.4` を入力し、「マーケットプレイスを追加」を押します。Git ref は版の固定です。版を固定して追加することをおすすめします。
+2. 「プラグインマーケットプレイスを追加」で、「ソース」に `mhimt-lab/illustrator-studio-mcp`、「Git ref」に `v0.1.0-beta.5` を入力し、「マーケットプレイスを追加」を押します。Git ref は版の固定です。版を固定して追加することをおすすめします。
 3. 同じ画面で「Illustrator」を検索し、**Illustrator Studio MCP** の「＋」を押します。「Illustrator Studio MCP プラグインをインストールしました」と表示されれば完了です。
 4. 上の「Work」を選び、入力欄の右下のパソコンのアイコンが「お使いのコンピューターで」になっていることを確かめて、新しいチャットでまず読み取りだけを依頼します（[書類を変えずに試す](#書類を変えずに試す)）。
 
@@ -146,11 +146,11 @@ ChatGPTのモデルによっては、ツールを探さずに失敗すること�
 Codex CLIがあれば、ターミナルで次の2行を実行しても同じように追加できます。
 
 ```bash
-codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.4
+codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.5
 codex plugin add illustrator-studio-mcp@illustrator-studio-mcp
 ```
 
-1行目の `--ref v0.1.0-beta.4` は版の固定です。追加したらChatGPTを完全に終了して起動し直し、「設定」→「プラグイン」で **Illustrator Studio MCP** が有効になっていること、「MCP」タブの「プラグインから」に `illustrator-studio-plugin` があることを確かめます。
+1行目の `--ref v0.1.0-beta.5` は版の固定です。追加したらChatGPTを完全に終了して起動し直し、「設定」→「プラグイン」で **Illustrator Studio MCP** が有効になっていること、「MCP」タブの「プラグインから」に `illustrator-studio-plugin` があることを確かめます。
 
 コマンドで削除する場合は、「プラグイン」でアンインストールした後、`codex plugin marketplace remove illustrator-studio-mcp` を実行します。確認では、pluginの更新でほかの設定は変わらず、削除で消えたのはこのpluginとmarketplaceの項目だけでした（手動で登録したMCP・ほかのplugin・実行記録は残りました）。
 

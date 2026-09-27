@@ -73,6 +73,45 @@ export class StaleCursorError extends Error {
         this.name = 'StaleCursorError';
     }
 }
+export const HOST_REFERENCE_INVALID_CODE = 'ILLUSTRATOR_HOST_REFERENCE_INVALID';
+export function hostReferenceInvalidReason(detail) {
+    const where = [
+        typeof detail.uuid === 'string' ? `UUID ${JSON.stringify(detail.uuid)}` : null,
+        typeof detail.route === 'string' ? `route ${detail.route}` : null,
+        typeof detail.index === 'number' ? `index ${detail.index}` : null,
+    ].filter((part) => part !== null).join(', ');
+    const host = detail.hostError ?? null;
+    const hostError = host === null ? '' : ` (${[host.name, host.number].filter((part) => part !== null && part !== undefined).join(' ')})`;
+    const absence = typeof detail.absenceUnproved === 'string'
+        ? ` The lookup found no item, but absence is unproved (${detail.absenceUnproved}): an item that cannot be read is still in the document.`
+        : '';
+    return `${HOST_REFERENCE_INVALID_CODE}: Illustrator returned an invalid object reference${where === '' ? '' : ` at ${where}`}` +
+        `${hostError}.${absence} It is not treated as absent, skipped, or retried; tell the user before continuing.`;
+}
+export function hostReferenceInvalidDetail(message) {
+    if (typeof message !== 'string' || !message.startsWith('MCP_ERROR:'))
+        return null;
+    let parsed;
+    try {
+        parsed = JSON.parse(message.slice('MCP_ERROR:'.length));
+    }
+    catch {
+        return null;
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+        return null;
+    const { code, ...detail } = parsed;
+    return code === HOST_REFERENCE_INVALID_CODE ? detail : null;
+}
+export class HostReferenceInvalidError extends Error {
+    detail;
+    code = HOST_REFERENCE_INVALID_CODE;
+    constructor(detail) {
+        super(hostReferenceInvalidReason(detail));
+        this.detail = detail;
+        this.name = 'HostReferenceInvalidError';
+    }
+}
 export class ObjectNotFoundError extends Error {
     constructor(uuid) {
         super(`No PageItem with UUID ${JSON.stringify(uuid)} exists in the bound document.`);

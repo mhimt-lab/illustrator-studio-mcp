@@ -37,7 +37,7 @@ export function groupRowsMatch(a, b) {
     });
 }
 export const TRANSFORM_GROUP_SCRIPT = `
-function transformGroupRows(target) {
+function transformGroupRows(target, enclosingBlocked) {
   var rows = [], seen = {}, characters = 0, pointCount = 0;
   function paint(color) {
     var t = String(color.typename);
@@ -51,7 +51,9 @@ function transformGroupRows(target) {
     if (depth > 8 || rows.length >= 128) throw mutationError("preflight_failed", "Group translation traversal limit exceeded.");
     var type = String(item.typename), uuid = item.uuid;
     if (typeof uuid !== "string" || !uuid || seen.hasOwnProperty(uuid)) throw mutationError("preflight_failed", "Group descendant UUID is missing or duplicated.");
-    if (item.locked !== false || item.hidden !== false || item.editable !== true) {
+    // The group's own flags, its layer and its ancestors are plan blockers. Under any of them every descendant reads
+    // editable false, so editable only proves a descendant when the enclosing state is clear.
+    if (depth > 0 && (item.locked !== false || item.hidden !== false || (!enclosingBlocked && item.editable !== true))) {
       throw mutationError("preflight_failed", "Group translation requires editable visible unlocked descendants.");
     }
     seen[uuid] = true;

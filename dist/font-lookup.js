@@ -13,8 +13,14 @@ export const fontLookupEntrySchema = z.discriminatedUnion('status', [
         status: z.literal('not_installed'),
         reason: z.enum(['no_such_font', 'name_mismatch']),
     }),
+    z.strictObject({
+        requested: fontPostScriptNameSchema,
+        status: z.literal('unverified'),
+        font: fontDescriptorSchema,
+        reason: z.literal('not_found_outside_illustrator'),
+    }),
 ]).superRefine((entry, context) => {
-    if (entry.status === 'installed' && entry.font.postScriptName !== entry.requested) {
+    if (entry.status !== 'not_installed' && entry.font.postScriptName !== entry.requested) {
         context.addIssue({ code: 'custom', message: 'An installed font must carry exactly the requested PostScript name.' });
     }
 });

@@ -1,3 +1,4 @@
+import { hostVersionPublicFields, hostVersionInternalFields, normalizeHostVersionConsent } from '../host-version-consent.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
@@ -8,6 +9,8 @@ import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, layerPathSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { SUPPORTED_PATH_ITEM_HOST_SCRIPT } from './supported-path-item-host-script.js';
+import { describeHostVersionScope } from '../host-version-admission.js';
+import { HOST_VERSION_POLICY_JSX } from '../host-version-policy.js';
 export const DELETE_OBJECTS_OPERATION = 'delete_objects';
 export const DELETE_OBJECTS_VALIDATOR = { kind: DELETE_OBJECTS_OPERATION, version: 1 };
 export const DELETE_MEASURED_MAX_TARGETS = 1;
@@ -15,7 +18,6 @@ export const DELETE_MAX_REMOVED_ITEMS = 64;
 export const DELETE_MAX_PARENT_ITEMS = 128;
 export const DELETE_MAX_DEPTH = 32;
 export const DELETE_NAME_MAX = 1024;
-export const DELETE_MEASURED_APP_VERSION = '30.8.1';
 export const DELETE_TARGET_TYPES = ['PathItem', 'TextFrame', 'GroupItem'];
 export const DELETE_TARGET_SET_HASH_VERSION = 1;
 const CANONICAL_VERSION = 1;
@@ -98,7 +100,7 @@ export function deleteTargetSetHash(entries) {
 export function deleteRemovedUuids(entries) {
     return entries.flatMap((entry) => [entry.uuid, ...entry.descendants.map((child) => child.uuid)]);
 }
-const commonInternal = { expectedDocumentKey: documentKeySchema, targetUuids: targetUuidsSchema, backupId: backupIdSchema, backup: deleteBackupFactsSchema.optional() };
+const commonInternal = { ...hostVersionInternalFields, expectedDocumentKey: documentKeySchema, targetUuids: targetUuidsSchema, backupId: backupIdSchema, backup: deleteBackupFactsSchema.optional() };
 const internalInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonInternal, apply: z.literal(false) }),
     z.strictObject({
@@ -110,7 +112,7 @@ const internalInputSchema = z.discriminatedUnion('apply', [
         context.addIssue({ code: 'custom', message: 'Admitted backup facts must name the requested backup_id.' });
     }
 });
-const commonPublic = {
+const commonPublic = { ...hostVersionPublicFields,
     expected_document_key: documentKeySchema,
     target_uuids: targetUuidsSchema.describe(`Native PageItem.uuid of each item to delete (currently exactly ${DELETE_MEASURED_MAX_TARGETS}; more is refused as too_many_targets until the multi-target path is measured).`),
     backup_id: backupIdSchema.describe('backup_id of a verified illustrator_create_backup record of this document\'s current file.'),
@@ -136,7 +138,7 @@ const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(dele
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
 function normalizePublicInput(input) {
     const value = deleteObjectsPublicInputSchema.parse(input);
-    const common = { expectedDocumentKey: value.expected_document_key, targetUuids: value.target_uuids, backupId: value.backup_id };
+    const common = { ...normalizeHostVersionConsent(value), expectedDocumentKey: value.expected_document_key, targetUuids: value.target_uuids, backupId: value.backup_id };
     return value.apply
         ? { ...common, confirmTargetSetHash: value.confirm_target_set_hash, confirmRemovedCount: value.confirm_removed_count, apply: true, commandId: value.command_id }
         : { ...common, apply: false };
@@ -346,7 +348,7 @@ var DELETE_MAX_REMOVED_ITEMS = ${DELETE_MAX_REMOVED_ITEMS};
 var DELETE_MAX_PARENT_ITEMS = ${DELETE_MAX_PARENT_ITEMS};
 var DELETE_MAX_DEPTH = ${DELETE_MAX_DEPTH};
 var DELETE_NAME_MAX = ${DELETE_NAME_MAX};
-var DELETE_MEASURED_APP_VERSION = ${JSON.stringify(DELETE_MEASURED_APP_VERSION)};
+${HOST_VERSION_POLICY_JSX}
 var DELETE_TARGET_SET_HASH_VERSION = ${DELETE_TARGET_SET_HASH_VERSION};
 
 function deleteContains(list, value) { for (var i = 0; i < list.length; i++) if (list[i] === value) return true; return false; }
@@ -385,7 +387,10 @@ function deleteAnalyze(document, context, forApply) {
   if (!context.mutationAllowed) block("document_not_saved", null, "Only a clean saved_file document can be deleted from: " + String(context.mutationBlockedReason));
   if (context.path !== params.backup.sourcePath) block("backup_mismatch", null, "Backup " + params.backup.backupId + " was taken from " + params.backup.sourcePath + ", not from " + String(context.path) + ".");
   else if (context.fileRevision !== params.backup.sourceFileRevision) block("backup_stale", null, "The document reports file revision " + String(context.fileRevision) + "; backup " + params.backup.backupId + " recorded " + params.backup.sourceFileRevision + ".");
-  if (String(app.version) !== DELETE_MEASURED_APP_VERSION) block("host_version_unmeasured", null, "Deletion is measured on Illustrator " + DELETE_MEASURED_APP_VERSION + " only; this host is " + String(app.version) + ".");
+  if (!hostVersionAdmitted("delete_objects", String(app.version))) {
+    var deleteHostVersion = hostVersionEvaluate("delete_objects", String(app.version));
+    block("host_version_unmeasured", null, "Deletion is measured on Illustrator " + deleteHostVersion.measured + " and its patch versions; this host is " + deleteHostVersion.app + " (" + deleteHostVersion.status + ").");
+  }
   if (params.targetUuids.length > DELETE_MEASURED_MAX_TARGETS) block("too_many_targets", null, "Deletion is measured for " + DELETE_MEASURED_MAX_TARGETS + " target per call; delete one item at a time.");
 
   var targets = [];
@@ -624,7 +629,7 @@ async function beforeHost(input, services) {
 export const deleteObjectsToolContract = {
     name: 'illustrator_delete_objects',
     title: 'Plan or Delete Objects',
-    description: `Plan or delete page items by native UUID, bound to a document key and a verified backup (illustrator_create_backup of the current file). Measured scope only (Illustrator ${DELETE_MEASURED_APP_VERSION}, foreground, unlocked): exactly ${DELETE_MEASURED_MAX_TARGETS} target per call; a clean saved document whose file still matches the backup; a layer-direct PathItem or point TextFrame, a GroupItem whose descendants are only PathItem, point TextFrame, and GroupItem, or a PathItem inside a group that keeps another child. Refused (nothing is deleted): unsaved or dirty documents, backup mismatch or staleness, PlacedItem, CompoundPathItem, clipping groups, other types, a TextFrame or group inside a group, a group's last child, locked or hidden items, groups, or layers, locked or hidden descendants, overlapping targets, more than ${DELETE_MAX_REMOVED_ITEMS} removed items, and other Illustrator versions. The plan lists every item that disappears (targets and descendants), removedCount, and targetSetHash; apply echoes confirm_target_set_hash and confirm_removed_count, recomputes both in the same host call, and deletes nothing unless they match. Success is verified absence: every removed UUID fails lookup, each parent keeps its other children in order, and the page-item count falls by removedCount. The document is then unsaved; save it with illustrator_save_document and the same backup_id. There is no in-call undo: a timeout or failure after the first removal is indeterminate and keeps the Illustrator lock (illustrator_reconcile cannot abandon it). The lock is released only by illustrator_reconcile with action=release_unverified (command_id and an identical confirm_command_id, once inspect reports canReleaseUnverified); after that release, illustrator_reconcile_delete inspects and, if needed, reopens the unchanged file.`,
+    description: `Plan or delete page items by native UUID, bound to a document key and a verified backup (illustrator_create_backup of the current file). Measured scope only (Illustrator ${describeHostVersionScope('delete_objects')}, foreground, unlocked): exactly ${DELETE_MEASURED_MAX_TARGETS} target per call; a clean saved document whose file still matches the backup; a layer-direct PathItem or point TextFrame, a GroupItem whose descendants are only PathItem, point TextFrame, and GroupItem, or a PathItem inside a group that keeps another child. Refused (nothing is deleted): unsaved or dirty documents, backup mismatch or staleness, PlacedItem, CompoundPathItem, clipping groups, other types, a TextFrame or group inside a group, a group's last child, locked or hidden items, groups, or layers, locked or hidden descendants, overlapping targets, more than ${DELETE_MAX_REMOVED_ITEMS} removed items, and other Illustrator versions. The plan lists every item that disappears (targets and descendants), removedCount, and targetSetHash; apply echoes confirm_target_set_hash and confirm_removed_count, recomputes both in the same host call, and deletes nothing unless they match. Success is verified absence: every removed UUID fails lookup, each parent keeps its other children in order, and the page-item count falls by removedCount. The document is then unsaved; save it with illustrator_save_document and the same backup_id. There is no in-call undo: a timeout or failure after the first removal is indeterminate and keeps the Illustrator lock (illustrator_reconcile cannot abandon it). The lock is released only by illustrator_reconcile with action=release_unverified (command_id and an identical confirm_command_id, once inspect reports canReleaseUnverified); after that release, illustrator_reconcile_delete inspects and, if needed, reopens the unchanged file.`,
     inputSchema,
     publicInputSchema: deleteObjectsPublicInputSchema,
     outputSchema: deleteObjectsResponseSchema,
@@ -642,6 +647,7 @@ export function createDeleteObjectsAdapter() {
         mutationHostApplicationMode: 'foreground',
         admit,
         beforeHost,
+        hostVersionOperation: () => 'delete_objects',
         buildCommand(input) {
             const normalized = normalizedRequest(input);
             const { commandId: _commandId, ...params } = normalized.request;

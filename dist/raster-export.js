@@ -1,12 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import jpeg from 'jpeg-js';
 import { PNG } from 'pngjs';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from './command-id.js';
-import { BackupCopyError, BackupPreconditionError, copyErrorCreatedDestination, copyFileExclusive, hostDocumentIdentitySchema, inspectSourceFile, resolveBackupRoot, sameFileIdentity, serializeFileIdentity, verifyTrackedFile, withBackupRootScope, } from './document-backup.js';
+import { BackupCopyError, BackupPreconditionError, copyErrorCreatedDestination, copyFileExclusive, hostDocumentIdentitySchema, inspectSourceFile, resolveBackupRoot, CTIME_ONLY_READ_ATTEMPTS, onlyCtimeDiffers, sameFileIdentity, sameFileOrSameBytes, serializeFileIdentity, verifyTrackedFile, withBackupRootScope, } from './document-backup.js';
 import { assertOutputAbsent, EXPORT_CLOSE_WORK_COPY_SCRIPT, EXPORT_HELPERS, EXPORT_HOST_TIMEOUT_MS, EXPORT_INVENTORY_SCRIPT, EXPORT_OPEN_PRE_ATTEMPT_CODES, EXPORT_OPEN_WORK_COPY_SCRIPT, ExportPreconditionError, parseExportHostError, STAGING_DIRECTORY_PREFIX, createOnceLinkAllowance, validateOutputLocation, withOutputParentScope, workCopyFileName, } from './document-export.js';
 import { documentKeyMatches } from './document-key.js';
 import { IndeterminateExecutionError } from './domain.js';
@@ -15,19 +14,23 @@ import { documentContextSchema } from './mutation-result-schema-core.js';
 import { atomicCreatePrivateRecord, atomicReplacePrivateRecord, readSecurePrivateRecord } from './private-record.js';
 import { temporaryTwinPattern } from './state-quarantine.js';
 import { assessRasterRecordSet, RASTER_EXPORT_KIND, RASTER_EXPORT_RECORD_SUFFIXES, RASTER_EXPORT_RECORD_VERSION, rasterExportArtifactSchema, rasterExportOptionsSchema, } from './raster-export-records.js';
+import { noFollowReadFlags, noFollowNonBlockingReadFlags, noFollowDirectoryFlags, currentUid } from './platform-primitives.js';
 export const RASTER_EXPORT_TOOL = 'illustrator_export';
 export const RASTER_EXPORT_PROFILE = 'raster_export_v1';
 export const RASTER_MAX_SIDE_PX = 4000;
 export const RASTER_MAX_TOTAL_PX = 12_000_000;
 export const RASTER_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const MEASURED_EDGE_FRACTIONS = { 1: [0, 0.5], 2: [0, 0.25, 0.5] };
 export const WEB_RGB_PIXEL_CONTRACT = ({ options, artboard }) => {
     const unsupported = (reason, message) => ({ status: 'unsupported', reason, message });
     const [left, top, right, bottom] = artboard.rect;
-    if (!artboard.rect.every((edge) => Number.isInteger(edge))) {
-        return unsupported('fractional_artboard_edge', 'The artboard has a non-integer edge in points; only integer-pt artboards have a measured pixel size.');
+    const fractions = MEASURED_EDGE_FRACTIONS[options.scale];
+    const unmeasured = artboard.rect.filter((edge) => !fractions.includes(Math.abs(edge % 1)));
+    if (unmeasured.length > 0) {
+        return unsupported('fractional_edge_unmeasured', `The artboard edge(s) ${JSON.stringify(unmeasured)} pt have an unmeasured fraction at ${options.scale}x; only .5 pt (1x) and .25/.5 pt (2x) are measured.`);
     }
-    if (artboard.origin[0] !== 0 || artboard.origin[1] !== 0) {
-        return unsupported('artboard_ruler_origin_unmeasured', 'The artboard has its own ruler origin; only [0,0] is measured.');
+    if (!Number.isInteger(artboard.origin[0]) || !Number.isInteger(artboard.origin[1])) {
+        return unsupported('artboard_ruler_origin_unmeasured', 'The artboard has a non-integer ruler origin; only integer origins are measured.');
     }
     if (options.format === 'png' && !options.transparent && options.scale === 2) {
         return unsupported('opaque_png_2x_unmeasured', 'An opaque PNG at 2x is not measured; export it at 1x or with transparency.');
@@ -36,6 +39,9 @@ export const WEB_RGB_PIXEL_CONTRACT = ({ options, artboard }) => {
     const height = (top - bottom) * options.scale;
     if (!(width > 0 && height > 0))
         return unsupported('empty_artboard', 'The artboard has no area.');
+    if (!Number.isInteger(width) || !Number.isInteger(height)) {
+        return unsupported('fractional_pixel_size', `The export would be ${width}x${height} px; a non-integer pixel size has no measured rounding rule. Make the artboard width and height multiples of ${1 / options.scale} pt.`);
+    }
     if (width > RASTER_MAX_SIDE_PX || height > RASTER_MAX_SIDE_PX || width * height > RASTER_MAX_TOTAL_PX) {
         return unsupported('large_board_unmeasured', `The export would be ${width}x${height} px; only up to ${RASTER_MAX_SIDE_PX} px per side and ${RASTER_MAX_TOTAL_PX} px in total are measured.`);
     }
@@ -273,7 +279,7 @@ export async function readBounded(handle, limit) {
     let total = 0;
     for (;;) {
         const buffer = Buffer.allocUnsafe(Math.min(1024 * 1024, limit + 1 - total));
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, total);
         if (bytesRead === 0)
             break;
         chunks.push(buffer.subarray(0, bytesRead));
@@ -293,21 +299,29 @@ function fileIdentityOf(metadata) {
 }
 export async function inspectRasterArtifact(path, format) {
     let handle;
+    const flags = noFollowReadFlags();
     try {
-        handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        handle = await open(path, flags);
     }
     catch (error) {
         throw new RasterArtifactError(`The exported file could not be opened: ${error instanceof Error ? error.message : String(error)}`);
     }
     try {
-        const before = await handle.stat({ bigint: true });
-        if (!before.isFile() || before.nlink !== 1n)
-            throw new RasterArtifactError('The exported file is not a single regular file.');
-        const bytes = await readBounded(handle, RASTER_MAX_ARTIFACT_BYTES);
-        if (bytes === null)
-            throw new RasterArtifactError(`The exported file is larger than ${RASTER_MAX_ARTIFACT_BYTES} bytes.`);
-        const after = await handle.stat({ bigint: true });
-        if (!sameFileIdentity(fileIdentityOf(before), fileIdentityOf(after)) || BigInt(bytes.length) !== after.size) {
+        let before;
+        let bytes;
+        for (let attempt = 1;; attempt += 1) {
+            before = await handle.stat({ bigint: true });
+            if (!before.isFile() || before.nlink !== 1n)
+                throw new RasterArtifactError('The exported file is not a single regular file.');
+            const read = await readBounded(handle, RASTER_MAX_ARTIFACT_BYTES);
+            if (read === null)
+                throw new RasterArtifactError(`The exported file is larger than ${RASTER_MAX_ARTIFACT_BYTES} bytes.`);
+            bytes = read;
+            const after = await handle.stat({ bigint: true });
+            if (sameFileIdentity(fileIdentityOf(before), fileIdentityOf(after)) && BigInt(bytes.length) === after.size)
+                break;
+            if (attempt < CTIME_ONLY_READ_ATTEMPTS && BigInt(bytes.length) === after.size && onlyCtimeDiffers(fileIdentityOf(before), fileIdentityOf(after)))
+                continue;
             throw new RasterArtifactError('The exported file changed while it was read.');
         }
         if (bytes.length === 0)
@@ -345,7 +359,7 @@ export async function inspectRasterArtifact(path, format) {
             bytes: bytes.length,
             sha256: createHash('sha256').update(bytes).digest('hex'),
             ...size,
-            identity: fileIdentityOf(after),
+            identity: fileIdentityOf(before),
         };
     }
     finally {
@@ -356,7 +370,7 @@ export function rasterExtension(format) {
     return format === 'png' ? '.png' : '.jpg';
 }
 async function syncDirectory(path) {
-    const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    const handle = await open(path, noFollowDirectoryFlags());
     try {
         await handle.sync();
     }
@@ -365,7 +379,7 @@ async function syncDirectory(path) {
     }
 }
 async function hashWholeFile(path) {
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(path, noFollowReadFlags());
     try {
         const hash = createHash('sha256');
         const buffer = Buffer.allocUnsafe(1024 * 1024);
@@ -566,8 +580,9 @@ export class RasterExportOperation {
         const published = set.published.record;
         const started = performance.now();
         let handle;
+        const flags = noFollowReadFlags();
         try {
-            handle = await open(published.artifact.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+            handle = await open(published.artifact.path, flags);
         }
         catch {
             return this.rejected('artifact_unavailable', `The exported file ${published.artifact.path} is gone; it is not exported again.`);
@@ -809,7 +824,7 @@ export class RasterExportOperation {
                             stage = 'verify_source';
                             try {
                                 const after = await inspectSourceFile(plan.sourceFile.path);
-                                if (after.path !== plan.sourceFile.path || !sameFileIdentity(after.identity, plan.sourceFile.identity)) {
+                                if (after.path !== plan.sourceFile.path || !await sameFileOrSameBytes(plan.sourceFile.path, after.identity, plan.sourceFile.identity, plan.sourceFile.sha256)) {
                                     failure ??= { stage, reason: 'source_changed', message: 'The source file changed during the export.' };
                                 }
                             }
@@ -975,8 +990,9 @@ async function pathTaken(path) {
 }
 export async function removeOwnedFile(path, identity) {
     let handle;
+    const flags = noFollowReadFlags();
     try {
-        handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+        handle = await open(path, flags);
     }
     catch (error) {
         if (error.code === 'ENOENT' || error.code === 'ELOOP')
@@ -1065,7 +1081,7 @@ async function ensurePrivateSubdirectory(path, parent) {
             throw error;
     }
     const metadata = await lstat(path, { bigint: true });
-    const uid = typeof process.getuid === 'function' ? process.getuid() : -1;
+    const uid = currentUid();
     if (!metadata.isDirectory() || Number(metadata.uid) !== uid || (metadata.mode & 511n) !== 448n) {
         throw new RasterQuarantineRefusal(`${path} is not a private directory of this user.`);
     }
@@ -1080,7 +1096,7 @@ class RasterQuarantineRefusal extends Error {
 const QUARANTINE_FILE_LIMIT = 1_048_576;
 const QUARANTINE_NAME = /^[A-Za-z0-9._-]{1,200}$/u;
 async function hashEntry(path, expected) {
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const handle = await open(path, noFollowNonBlockingReadFlags());
     try {
         const metadata = await handle.stat({ bigint: true });
         if (!metadata.isFile() || metadata.ino !== expected.ino || metadata.dev !== expected.dev)
@@ -1096,7 +1112,7 @@ async function hashEntry(path, expected) {
 }
 export async function moveRasterExportToQuarantine(stateRoot, exportsDirectory, exportId, now) {
     const paths = rasterQuarantinePaths(stateRoot, exportId);
-    const uid = typeof process.getuid === 'function' ? process.getuid() : -1;
+    const uid = currentUid();
     const lease = `${exportId}${RASTER_EXPORT_RECORD_SUFFIXES.session}`;
     const names = (await readdir(exportsDirectory)).filter((name) => name.startsWith(`${exportId}.`)).sort();
     if (names.length > 256)
@@ -1233,7 +1249,7 @@ async function presence(paths) {
     }));
 }
 async function w0Residue(prepare) {
-    const uid = typeof process.getuid === 'function' ? process.getuid() : -1;
+    const uid = currentUid();
     const checks = [];
     const present = async (path) => await lstat(path, { bigint: true }).catch((error) => {
         if (error.code === 'ENOENT')
@@ -1578,7 +1594,7 @@ export class RasterPublishError extends Error {
     }
 }
 export async function linkBoundArtifact(stagedPath, outputPath, bound, parentScope, linkImpl = link) {
-    const handle = await open(stagedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(stagedPath, noFollowReadFlags());
     try {
         const before = await handle.stat({ bigint: true });
         if (!before.isFile() || before.nlink !== 1n || before.dev !== bound.identity.dev || before.ino !== bound.identity.ino || before.size !== bound.identity.size) {
@@ -1596,7 +1612,7 @@ export async function linkBoundArtifact(stagedPath, outputPath, bound, parentSco
             throw error;
         }
         await parentScope.sync();
-        const published = await open(outputPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        const published = await open(outputPath, noFollowReadFlags());
         try {
             const metadata = await published.stat({ bigint: true });
             const bytes = await readBounded(published, RASTER_MAX_ARTIFACT_BYTES) ?? Buffer.alloc(0);

@@ -1,3 +1,4 @@
+import { hostVersionPublicFields, hostVersionInternalFields, normalizeHostVersionConsent } from '../host-version-consent.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
@@ -7,6 +8,7 @@ import { documentContextSchema, mutationAuditSchema } from '../mutation-result-s
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { CLIPPING_MASK_HOST_SCRIPT, clipAuditMatches, clipBlockerSchema, clipCmykWithinMeasuredScope, clipGroupSnapshotSchema, clipLayerStateSchema, clipParentOrderSchema, sameCanonical, sameGroupAfterRelease, } from './clipping-mask-shared.js';
 import { mapClipExecutionError } from './create-clipping-mask-adapter.js';
+import { describeHostVersionScope } from '../host-version-admission.js';
 export const RELEASE_CLIPPING_MASK_OPERATION = 'release_clipping_mask';
 export const RELEASE_CLIPPING_MASK_VALIDATOR = { kind: RELEASE_CLIPPING_MASK_OPERATION, version: 1 };
 const CANONICAL_VERSION = 2;
@@ -16,7 +18,7 @@ const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 2;
 const uuidSchema = z.string().min(1).max(255);
 const documentKeySchema = z.string().min(1).max(16_384);
-const commonInternal = { expectedDocumentKey: documentKeySchema, groupUuid: uuidSchema };
+const commonInternal = { ...hostVersionInternalFields, expectedDocumentKey: documentKeySchema, groupUuid: uuidSchema };
 const internalInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonInternal, apply: z.literal(false) }),
     z.strictObject({
@@ -27,7 +29,7 @@ const internalInputSchema = z.discriminatedUnion('apply', [
         commandId: canonicalCommandIdSchema,
     }),
 ]);
-const commonPublic = {
+const commonPublic = { ...hostVersionPublicFields,
     expected_document_key: documentKeySchema,
     group_uuid: uuidSchema.describe('Native PageItem.uuid of the clip group directly on a top-level layer.'),
 };
@@ -52,7 +54,7 @@ const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(rele
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
 function normalizePublicInput(input) {
     const value = releaseClippingMaskPublicInputSchema.parse(input);
-    const common = { expectedDocumentKey: value.expected_document_key, groupUuid: value.group_uuid };
+    const common = { ...normalizeHostVersionConsent(value), expectedDocumentKey: value.expected_document_key, groupUuid: value.group_uuid };
     return value.apply ? {
         ...common,
         expectedGroupBefore: value.expected_group_before,
@@ -386,7 +388,7 @@ function normalizedRequest(input) {
 export const releaseClippingMaskToolContract = {
     name: 'illustrator_release_clipping_mask',
     title: 'Read or Release Clipping Mask',
-    description: 'Read (apply=false) or release one clip group directly on a top-level layer. The plan is the clip-group read: group, mask, and content UUIDs, child order [mask, content], flags, bounds, lock/hidden state, and one nested clip group as content. Measured profile only: a two-child group [clipping PathItem without paint, PathItem or one such clip group], RGB, Illustrator 30.8.1 in the foreground; inner (nested) groups, PlacedItem, CompoundPathItem, sublayers, and other shapes are refused. Locked or hidden groups, children, and layers are refused by this tool (Illustrator itself does not refuse them). Apply compares expected_group_before and expected_parent_order, clears group.clipped and mask.clipping, verifies that the group, both children, and the parent order are otherwise unchanged, and on failure sets both flags back and proves the exact before state. The mask stays in the group without fill or stroke.',
+    description: 'Read (apply=false) or release one clip group directly on a top-level layer. The plan is the clip-group read: group, mask, and content UUIDs, child order [mask, content], flags, bounds, lock/hidden state, and one nested clip group as content. Measured profile only: a two-child group [clipping PathItem without paint, PathItem or one such clip group], RGB, Illustrator ' + describeHostVersionScope('clipping_mask') + ' in the foreground; inner (nested) groups, PlacedItem, CompoundPathItem, sublayers, and other shapes are refused. Locked or hidden groups, children, and layers are refused by this tool (Illustrator itself does not refuse them). Apply compares expected_group_before and expected_parent_order, clears group.clipped and mask.clipping, verifies that the group, both children, and the parent order are otherwise unchanged, and on failure sets both flags back and proves the exact before state. The mask stays in the group without fill or stroke.',
     inputSchema,
     publicInputSchema: releaseClippingMaskPublicInputSchema,
     outputSchema: releaseClippingMaskResponseSchema,
@@ -402,6 +404,7 @@ export function createReleaseClippingMaskAdapter() {
         resultSchema: releaseClippingMaskResultSchema, resultSchemaVersion: RESULT_SCHEMA_VERSION, terminalClassifierVersion: CLASSIFIER_VERSION,
         safetyConformanceVersion: CONFORMANCE_VERSION, errorMappingVersion: ERROR_MAPPING_VERSION, hostScriptDigest: RELEASE_CLIPPING_MASK_HOST_SCRIPT_DIGEST,
         mutationHostApplicationMode: 'foreground',
+        hostVersionOperation: () => 'clipping_mask',
         buildCommand(input) {
             const normalized = normalizedRequest(input);
             const { commandId: _commandId, ...params } = normalized.request;

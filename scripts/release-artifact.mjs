@@ -10,7 +10,7 @@
 // Every check fails closed: nothing is written when a gate fails, and no fallback masks an error.
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -79,6 +79,65 @@ async function sha256File(path) {
   const hash = createHash('sha256');
   hash.update(await readFile(path));
   return hash.digest('hex');
+}
+
+// GitHub turns a bare video attachment URL on its own line into a player; the npm package page shows it as
+// plain text. Each `<!-- demo-video:start -->` ... `<!-- demo-video:end -->` block of README.md therefore
+// carries one `<!-- npm: <markdown> -->` line, and only the packed README uses it: that line becomes its
+// markdown and the bare URL lines are dropped. The repository README is not changed.
+const DEMO_BLOCK = /<!-- demo-video:start -->\n([\s\S]*?)<!-- demo-video:end -->/g;
+const NPM_LINE = /^<!-- npm: (.+) -->$/;
+const BARE_URL_LINE = /^https:\/\/\S+$/;
+
+export function npmReadme(text) {
+  return text.replace(DEMO_BLOCK, (_block, body) => {
+    const lines = body.split('\n');
+    const npmLines = lines.filter((line) => NPM_LINE.test(line));
+    if (npmLines.length !== 1) throw new Error(`README demo-video block needs exactly one "<!-- npm: ... -->" line, found ${npmLines.length}.`);
+    if (!lines.some((line) => BARE_URL_LINE.test(line))) throw new Error('README demo-video block has no bare video URL line.');
+    const kept = lines
+      .filter((line) => !BARE_URL_LINE.test(line))
+      .map((line) => line.replace(NPM_LINE, '$1'))
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n');
+    return `<!-- demo-video:start -->\n${kept.replace(/^\n+/, '')}<!-- demo-video:end -->`;
+  });
+}
+
+// Packs from a copy of the packaged files when README.md has demo-video blocks, so the tarball carries the
+// npm README; otherwise packs the project directory itself. The copy must pack exactly the same entries as
+// the project directory (only README.md may differ in size), or the build fails.
+async function packSource(projectDir, manifest, staging) {
+  const readmePath = join(projectDir, 'README.md');
+  const readme = await readFile(readmePath, 'utf8').catch((error) => { if (error?.code === 'ENOENT') return null; throw error; });
+  if (readme === null) return projectDir;
+  const packedReadme = npmReadme(readme);
+  if (packedReadme === readme) return projectDir;
+  const copy = join(staging, 'package-source');
+  await mkdir(copy, { recursive: true });
+  const topLevel = await readdir(projectDir);
+  const alwaysIncluded = topLevel.filter((entry) => /^(readme|license|licence)(\..*)?$/i.test(entry));
+  for (const entry of new Set(['package.json', ...(manifest.files ?? []), ...alwaysIncluded])) {
+    const from = join(projectDir, entry);
+    if ((await stat(from).catch(() => null)) === null) continue;
+    await cp(from, join(copy, entry), { recursive: true, preserveTimestamps: true });
+  }
+  await writeFile(join(copy, 'README.md'), packedReadme);
+  const [original, copied] = await Promise.all([dryRunPackFiles(projectDir), dryRunPackFiles(copy)]);
+  const describe = (files) => files.map((file) => (file.path === 'README.md' ? 'README.md' : `${file.path}:${file.size}:${file.mode}`)).sort().join('\n');
+  if (describe(original) !== describe(copied)) throw new Error('The npm README copy does not pack the same entries as the project directory.');
+  return copy;
+}
+
+async function dryRunPackFiles(directory) {
+  const { stdout } = await execFileAsync('npm', ['pack', '--dry-run', '--json'], {
+    cwd: directory,
+    maxBuffer: 16 * 1024 * 1024,
+    env: { ...process.env, npm_config_loglevel: 'error' },
+  });
+  const parsed = JSON.parse(stdout);
+  if (!Array.isArray(parsed) || parsed.length !== 1) throw new Error('npm pack --dry-run --json did not return exactly one package.');
+  return parsed[0].files;
 }
 
 async function runNpmPack(projectDir, destination) {
@@ -151,10 +210,11 @@ export async function buildReleaseArtifact(options) {
   const staging = join(tmpdir(), `illustrator-studio-mcp-release-${process.pid}-${Date.now()}`);
   await mkdir(staging, { recursive: true });
   try {
-    const first = await runNpmPack(options.projectDir, join(staging, 'first'));
+    const source = await packSource(options.projectDir, manifest, staging);
+    const first = await runNpmPack(source, join(staging, 'first'));
     const firstPath = join(staging, 'first', first.filename);
     const firstDigest = await sha256File(firstPath);
-    const second = await runNpmPack(options.projectDir, join(staging, 'second'));
+    const second = await runNpmPack(source, join(staging, 'second'));
     const secondDigest = await sha256File(join(staging, 'second', second.filename));
     if (first.filename !== second.filename || firstDigest !== secondDigest) {
       throw new Error(`npm pack is not reproducible: ${firstDigest} != ${secondDigest}`);

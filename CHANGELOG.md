@@ -4,6 +4,87 @@
 
 日付は JST（Asia/Tokyo）です。
 
+## [0.1.0-beta.5] - 2026-09-27
+
+**日本語** | [English](https://github.com/mhimt-lab/illustrator-studio-mcp/blob/main/CHANGELOG.en.md)
+
+0.1.0-beta.4からの更新です。トンボ・裁ち落とし付きのPDF書き出しと文書内のトンボ、配置画像の寸法指定（枠に収める・覆う、見せる位置）と画像の移動・拡大縮小・回転・クリッピングマスク、複数のフォントの組の一括置換、日本語の改行位置を読むだけで確かめる組版の監査、文字の枠の移動、冊子規模のフォント置換、activeアートボードの移動・サイズ変更と書き出し寸法の照合、別名保存が途中で止まったときの解決手段を追加しました。Illustratorのパッチ版への更新でも変更系が止まらないようにしました。結果が確かめられないときの扱いと、ロック・非表示の確認を強めています。Windows対応の準備として、検証キットを公開しました。本番運用向けの完成版ではありません。
+
+**前提:** Illustratorを前面に表示し、画面ロックを解除した状態で使います。背面や画面ロック中は、多くの操作が拒否されます。
+
+#### 追加
+
+- `illustrator_audit_typography`（読み取りのみ）: Illustratorが実際に組んだ日本語の改行位置を読み、行頭禁則・行末禁則・分割禁止（JLReq）、指定した分割禁止語、和文に挟まれた半角約物、エリア内文字のあふれを指摘として返します。`policy` は配列で、いまは `jp_line_break_v1` だけです。1回の読み取りは200枠・20,000字・2,000行・2,000段落までで、パス上文字・連結した文字・ロックまたは非表示・縦組みのポイント文字・空の枠は理由を付けて除外します（結果は部分的になります）。文書は変更しません
+- `illustrator_reconcile_save_as`: `illustrator_save_document_as` は準備を始める前に実行を記録し、途中で止まったときは `saveAsId` と、このツールの呼び出し（`nextCall`）を返します。解決するまで、ほかの変更・バックアップ・書き出し・別名保存を止めます。このツールは止まった段階を読み取り（`inspect`）、保存せずに閉じて出力先を開き直す（`switch_document`）、隠しの一時ファイル名だけを消す（`cleanup_staging`）、何も消さずに記録を外す（`abandon`）で解決します。別のMCPサーバーが実行中の別名保存には触れません
+- `illustrator_transform_object`・`illustrator_mutate_batch` の平行移動（`translate`）で、レイヤー直下の連結していないポイント文字・エリア内文字の枠（横組み・縦組み、1〜512文字）を動かせるようにしました。内容・表示される行・文字ごとの書式・段落揃え・段組を計画に固定し、適用の直前と読み戻しで確かめます。回転・拡大縮小は対象外です
+- `illustrator_update_artboard`（実験段階）: activeのアートボードも整数ptで移動・サイズ変更できるようにしました。文書の原点は新しいボードの左下に合わせて動きます。移動・サイズ変更と追加に `pixel`（幅・高さ・倍率1または2）を指定すると、`illustrator_export` で書き出したときの画素寸法を計画で示し、合わなければ `pixel_size_mismatch` で止めます（差分を返し、自動では合わせません）
+- 変更系ツールの計画が止められたとき（blockerがあるとき）、`next_call` の代わりに `next_steps` を返します。止めた理由のコード（`blocked_by`）、次の手（`actions`: ロック解除・表示・フォントのインストール・範囲を絞るなど）、AIアプリへの短い指示（`note`）を含みます。あわせてサーバーの案内に、拒否・停止・結果不明のときは理由と次の手を利用者に伝えて判断を仰ぎ、画面の自動操作や独自のスクリプトで同じ変更をしない、という規則を加えました
+- `illustrator_export_pdf`: 保存済みの文書から選んだアートボードを、1つの新しいPDFとして書き出します。元の文書とファイルは変更せず、既存のファイルは上書きしません。PDFプリセットはIllustratorのプリセット名を完全一致で指定します（PDF/Xのプリセットは未対応）。トンボ（日本式・欧文式）・レジストレーションマーク・カラーバー・ページ情報と、四辺の裁ち落とし（0〜72pt）を指定できます。書き出したPDFのページ数・仕上がりの大きさ（TrimBox）・各辺の裁ち落としを確かめてから出力します。プリセットの設定がPDFに反映されたことまでは確かめません（結果に明記します）。途中で止まった書き出しは `illustrator_reconcile_export` で解決します
+- `illustrator_create_trim_marks`: アートボードの四隅に、編集できるトンボをパスで作ります。仕上がり線だけ（8本）か、裁ち落とし線も（16本）を選べます。新しい最前面のレイヤーに1つのグループとして作り、線はレジストレーション色です。裁ち落とし・オフセット・長さ・線幅はptで指定します。同じ名前のレイヤーがあるときは、二重に作らないよう止めます。編集セッション中は使えません
+- `illustrator_place_image` の `size`: 幅または高さ（縦横比を保つ）、枠に収める `contain`・枠を覆う `cover`、明示したときだけの `stretch` で配置寸法を指定できます。`contain`・`cover` では `focal_point`・`align_to` で見せる位置を選べます。計画で配置後の寸法と縦横の実効解像度を示し、`minimum_effective_ppi` を下回ると警告します（止めません）。`cover` のはみ出しはクリップしません。**結果の形が変わりました:** 計画と結果の版が1から3になりました
+- `illustrator_transform_object` で、リンク画像・埋め込み画像を移動・中心基準の拡大縮小・回転できるようにしました（レイヤー直下か、クリップしていないグループ1段の中）。適用に失敗したときは、確かめた逆変換で戻します。一括変更と整列では、引き続き画像を対象にしません
+- `illustrator_create_clipping_mask` で、画像のクリッピングマスクを作れるようにしました。隣り合う長方形のパスをマスクにし、同じレイヤーにある回転していない縦横同倍率の画像（RGBのPNGリンク、CMYKのTIFFリンク、文書と同じカラーの埋め込み画像）を切り抜きます。画像のクリップの解除と入れ子は未対応です。**結果の形が変わりました:** 計画と結果の版が2から3になりました
+- `illustrator_replace_font` の `mappings`: 複数のフォントの組（最大16組）を1回の適用でまとめて置換します。全部置換するか、何もしないかのどちらかです。同じ置換元の重複や、置換元でも置換先でもあるフォント（連鎖・循環）は、Illustratorを呼ぶ前に止めます。1回の適用に収まらない範囲は、途中まで置換せず `mapping_scope_exceeds_limit` で止めます。1組の指定はこれまでどおり使えます。**結果の形が変わりました:** 計画の置換元・置換先の情報は `plan.mappings[0]` に移り、計画と結果の版が1から3になりました
+- Illustratorの版の扱い: 確かめた版と同じminorのパッチ版（30.8.xなど、通常版に限る）では、変更系ツールをそのまま使えます。確かめていない版の通常版では、画像の埋め込み・削除・パスの編集・SVGの読み込みなどの一部の変更系ツールが `accept_unmeasured_host_version` を受け付けます。AIアプリはその版での実行について利用者の明示の同意を得てから指定し、ファイルを伴う変更には確認済みのバックアップが要ります。プレビューの取得と行送りの読み取りは、確かめていない版やBeta版でも使えます
+<!-- windows-probe-kit:added:start -->
+- Windows検証キット（`windows-probe/`、公開リポジトリのみ。npmのパッケージには含みません）: Windows対応は準備中です。WindowsとIllustratorをお持ちの方に向けて、Illustratorへの接続・スクリプトの実行・画面ロック中や背面での振る舞いを測る検証キットと手順書（日本語・英語）を公開しました。結果は公開リポジトリのIssueフォームから提出していただきます（提出した結果は公開されます）。MCPサーバー自体は引き続きMac専用です
+<!-- windows-probe-kit:added:end -->
+
+#### 変更
+
+- `illustrator_replace_font` が冊子規模の文書（数万字、連結した文字・複数の段落・両端揃え・縦組みを含む）で使えるようになりました。`scope`（`artboard_index`・`layer_path`・`selection: true`・`target_uuids` のいずれか1つ）で範囲を絞れます。1回の適用に収まらない範囲は区切りごとに計画を返し、区切りを適用してから同じ範囲でもう一度計画すると、次の区切りに進みます。止まった枠は、理由とレイヤーの位置を付けて最大64件返します。1回の適用は40,000字・書式の区切り1,000・512枠までです。**結果の形が変わりました:** `usage.frames`・`expected_usage.frames`・`remaining.frames` は `stories` に、`usage.frameList` は `usage.storyList` になり、各項目に `frames` が加わりました
+- `illustrator_export` で、辺に端数があっても幅・高さ×倍率が整数になるアートボード（1倍では.5pt、2倍では.25ptまたは.5pt）と、0以外の整数のボード原点を書き出せるようにしました。対応しない寸法は、書き出す前に理由を示して止めます。**拒否の理由コードが変わりました:** `fractional_artboard_edge` は `fractional_pixel_size`・`fractional_edge_unmeasured`・`artboard_ruler_origin_unmeasured` の3つに分かれました
+- 読み取りや計画の途中でIllustratorが無効になった参照を返したとき（グループの読み取りの既知の間欠事象など）、新しいエラー `ILLUSTRATOR_HOST_REFERENCE_INVALID` で止まり、経路・位置とIllustratorのエラー番号を返します。その項目を読み飛ばしたり、存在しないものとして扱ったりはしません
+- 変更の適用が1回あたり約0.2秒短くなりました（実行記録を整理するときのディスクへの書き込みの確定を1回にまとめました）。実機で、長方形の作成・見た目の変更・一括作成の適用の平均が約751msから約544msになりました（前後を交互に各5回）。記録の形と安全性の確認は変わりません
+- `illustrator_save_document` は、別の名前（ハードリンク）を持つファイルへの上書き保存を拒否します。別名保存の一時ファイルを消せなかったときは、`saved` ではなく結果不明として扱います
+- SVGの読み込み（`illustrator_import_vector_artwork`）は、文字を含むSVGで、`tspan` や入れ子のグループ、表示の判断があいまいな文字を計画の段階で止め、`next_steps` を返します。XMLとして正しくないSVGも止めます（以前はIllustratorが読み込めた不正なSVGも拒否されることがあります）
+- 確かめていない版で止めたときの理由コードを `host_version_unmeasured` にそろえました（以前の `unmeasured_app_version`・`unsupported_host_version`・`spot_host_version_unverified`・`host_version_unverified`・`app_version_unmeasured`）
+- 公開READMEを英語を主にして書き直しました（日本語は `README.ja.md`）。npmのパッケージページも英語になります
+
+#### 修正
+
+- iCloud Driveの「デスクトップと書類」などの同期フォルダで、同期の仕組みがファイルに印を付けて変更時刻（ctime）だけを進めるため、中身が同じでも別名保存・上書き保存・閉じる・バックアップ・アウトライン化した書き出し・PNG/JPEG書き出し・画像の最適化と検査が失敗や結果不明になることがあった問題を修正しました。ctimeだけが変わったときは読み直すか中身の一致を確かめ、差し替えや書き換えは引き続き検出します
+- ロックまたは非表示の親レイヤー（サブレイヤーの親）やグループの中にある対象を、`illustrator_relink_image`・`illustrator_embed_image` が変更できてしまう問題を修正しました。これらと `illustrator_transform_object`・`illustrator_align_objects`・`illustrator_mutate_batch` は、計画の段階で `ancestor_locked`・`ancestor_hidden` で止まり、`next_steps` でロック解除・表示を案内します
+- Illustrator側で結果の書き出しに失敗したとき（空のファイルなど）、完了として扱わないようにしました。書き込みを確かめてから結果を公開します。読み取りでも結果を読めないときは結果不明として扱い、`illustrator_reconcile` で解決するまで次の操作を止めます（以前は読み取りの失敗として解放していました）
+- 異体字セレクタ（U+E0100など）を含む文字がある文書で、読み取りの結果が空になって失敗することがあった問題を修正しました
+- Illustratorを操作する補助プロセスが起動の直後に終了したとき、MCPサーバーのプロセスごと終了するおそれがあった問題を修正しました。呼び出し元には従来どおり起動失敗のエラーを返します
+- 開いている文書が使っていると、この機械にないフォントもIllustratorが名前で見つけてしまうため、`illustrator_find_fonts`・`illustrator_replace_font`・`illustrator_set_text_style` が欠落フォントを「インストール済み」と判定していた問題を修正しました。Illustratorの外でもフォントを確かめ、確かめられないフォントは `unverified` と答えて、書き込みでは止めます
+- SVGの読み込みで、先頭のフォントに無い字形の文字が消えても検証を通っていた問題を修正しました。読み込んだ文字の数を元のSVGと照合し、合わなければ元に戻します。実際に使われたフォントが指定と違うときは警告します
+- `illustrator_set_area_text_columns`・`illustrator_update_character_style` で変更しても、Illustratorが文書を変更なしのまま扱うため、上書き保存が `nothing_to_save` で拒否され、閉じると変更が失われていた問題を修正しました。値が実際に変わったときは文書を変更ありにします
+- 要素の多い文書で `illustrator_create_backup` が `restore_structure_mismatch` で止まり、上書き保存の前のバックアップが取れないことがあった問題を、原因ごとに修正しました。SVGの読み込みが残す空の複合パスは読み込みの時点で止め、ファイルに保存されていない段組は原因を示して知らせます
+- 原点から離れた位置にある埋め込み画像を `illustrator_optimize_images` で縮小すると、検証で止まっていた問題を修正しました。位置を保ったまま縮小します。寸法が画素に割り切れない画像と、定規の原点が0でない文書は計画の段階で除外します
+
+#### 既知の制限
+
+- `illustrator_export_pdf` で端数の裁ち落とし（例: 3mm相当の8.5pt）を指定すると、計画は通りますが、Illustratorが整数ptに丸めて書くため、適用の検証で止まります（誤ったPDFは出力しません）。当面は整数ptで指定してください
+- Creative CloudがAdobeのアプリ専用に有効にするAdobe Fontsのフォントは、この機械にあることを確かめられず、フォントの書き込み（置換・文字の書式の変更）で止まります。これはbeta.4からの後退です。文字の作成と文字スタイルのツールは、引き続きIllustratorの中だけでフォントを確かめます
+- `illustrator_create_trim_marks` には日本式・欧文式の寸法の既定値がありません。寸法はすべて指定してください
+- `illustrator_optimize_images` は、大きな画像（原点にある800×800pt）では描画の検証で止まることがあります
+- `illustrator_audit_typography` が禁則に反する改行を見つける規則は、自動テストで確かめています。実機で確かめたのは、禁則Hardの文書で行頭・行末禁則の指摘が0件になることまでです。ルビ・割注・強制改行は判定しません
+- `illustrator_replace_font` は合成フォントに対応していません。保存済みの文書では、区切りを適用するたびにバックアップと上書き保存が要ります。置換先に対象の字形がないと、検証の不一致で元に戻ります
+- 文字の枠の平行移動は、CMYK文書では確かめていません
+- `illustrator_mutate_batch` の見た目・文字の置換・文字の書式の手順は、親グループのロック・非表示で止まったときに `next_steps` が付きません（書き込みは行いません）
+- `illustrator_run_m6_appearance_preview_recipe` のプレビューをiCloudなどの同期フォルダに出力すると、中身が同じでも変更と誤判定して止まることがあります。同期フォルダの外に出力してください
+- 作成時の見た目の指定は、特色（スポットカラー）とグラデーションに対応していません。作成後に `illustrator_set_path_appearance` を使ってください
+- 4000×3000 pxのJPEGを書き出すとき、寸法の確認でNode.jsのメモリを一時的に約570 MiB使いました（1回の実測）
+- Streamable HTTPは自動テストとAIアプリとの接続確認までです。HTTP経由でIllustratorを操作した記録はありません
+- CMYK文書では、重なり順の変更は最前面（`front`）だけ、複合パスの作成は未対応です
+- グループの読み取りで、ときどき対象を参照できなくなる既知の間欠事象があります。原因は未解決です。このとき操作は安全側で止まり（fail closed）、結果が確かめられない場合は「結果不明」として扱います
+- 長い文書識別情報を含む実行記録は、読み戻せないことがあります
+- 既存の線付き文字は編集対象外です
+- Desktop拡張には署名がありません。インストール画面で提供元と版を確認してください
+- npmでは必ず `@beta` を付けてください。タグなしのインストールは `latest` を使い、この版になるとは限りません
+
+<!-- windows-probe-kit:section:start -->
+#### Windows検証キット
+
+- タグ: `v0.1.0-beta.5`
+- キットのSHA-256（`--expect-sha256`）: `421f2fe2943a177f52d9c83376b239207c449429f16b4538cdf0ff2b68b31573`
+- 手順書: [`windows-probe/README.md`](https://github.com/mhimt-lab/illustrator-studio-mcp/blob/v0.1.0-beta.5/windows-probe/README.md)
+<!-- windows-probe-kit:section:end -->
+
+[導入](docs/install.md)・[互換性](docs/compatibility.md)・[復旧](docs/runbook.md)・[LICENSE](LICENSE)を確認してください。
+
 ## [0.1.0-beta.4] - 2026-09-23
 
 **日本語** | [English](https://github.com/mhimt-lab/illustrator-studio-mcp/blob/main/CHANGELOG.en.md)

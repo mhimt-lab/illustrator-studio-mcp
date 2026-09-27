@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { rmdir, unlink } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { z } from 'zod';
 import { createStagingDirectory } from './document-export.js';
 import { DocumentMismatchError, IndeterminateExecutionError } from './domain.js';
+import { HOST_VERSION_POLICY_JSX } from './host-version-policy.js';
 import { documentContextSchema } from './mutation-result-schema-core.js';
-import { ensurePrivateDirectory } from './private-state.js';
+import { ensurePrivateDirectory, ensurePrivateStateRoot, isWindowsPrivateState } from './private-state.js';
 import { decodePng, inspectSupportedPng, readStableImage, VISUAL_DIFF_MAX_FILE_BYTES } from './visual-diff.js';
-export const PREVIEW_APP_VERSION = '30.8.1';
 export const PREVIEW_RESOLUTION_PPI = 72;
 export const PREVIEW_MAX_SIDE_PT = 2048;
 export const PREVIEW_HOST_TIMEOUT_MS = 60_000;
@@ -77,7 +78,7 @@ export class PreviewFailedError extends Error {
 const SAVED_REFUSAL_MESSAGE = 'The document is saved (saved=true). Capturing a preview changes saved to false on a saved ' +
     'document, after which every mutation that requires the saved file is refused. Preview is supported only on ' +
     'a document with unsaved changes or a new unsaved document; nothing was captured.';
-export const PREVIEW_CAPTURE_SCRIPT = `
+export const PREVIEW_CAPTURE_SCRIPT = `${HOST_VERSION_POLICY_JSX}
 var MUTATION_SIDE_EFFECT_ATTEMPTED = false;
 function previewReject(code, message, actual) {
   throw new Error("MCP_ERROR:" + stringifyJson({ code: code, message: message, actual: actual === undefined ? null : actual }));
@@ -92,8 +93,9 @@ function previewState(doc) {
 }
 var previewContext = requireDocumentForRead(params.expectedDocumentKey);
 var previewDocument = app.activeDocument;
-if (String(app.version) !== params.expectedAppVersion) {
-  previewReject("PREVIEW_UNSUPPORTED_HOST_VERSION", "Preview is measured only on Illustrator " + params.expectedAppVersion + ".", String(app.version));
+if (!hostVersionAdmitted("capture_preview", String(app.version))) {
+  var previewVersion = hostVersionEvaluate("capture_preview", String(app.version));
+  previewReject("PREVIEW_UNSUPPORTED_HOST_VERSION", "Preview is measured on Illustrator " + previewVersion.measured + " and its patch versions (" + previewVersion.status + ").", String(app.version));
 }
 if (previewContext.saved !== false) previewReject("PREVIEW_DOCUMENT_SAVED", params.savedRefusalMessage);
 var previewClip = [params.bounds[0], params.bounds[1], params.bounds[2], params.bounds[3]];
@@ -181,6 +183,8 @@ export async function capturePreview(deps, input) {
     }
     let staging;
     try {
+        if (isWindowsPrivateState())
+            await ensurePrivateStateRoot(dirname(deps.previewRoot));
         await ensurePrivateDirectory(deps.previewRoot, 'preview staging root');
         staging = await createStagingDirectory(deps.previewRoot, randomUUID(), PREVIEW_FILE_NAME, PREVIEW_STAGING_PREFIX);
     }
@@ -195,7 +199,6 @@ export async function capturePreview(deps, input) {
             script: PREVIEW_CAPTURE_SCRIPT,
             params: {
                 expectedDocumentKey: input.expectedDocumentKey,
-                expectedAppVersion: PREVIEW_APP_VERSION,
                 bounds,
                 resolution: PREVIEW_RESOLUTION_PPI,
                 outputPath: stagedPath,

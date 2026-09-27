@@ -4,6 +4,7 @@ import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
+import { FIT_ALIGN_NAMES, PLACE_FIT_MAX_PT, PLACE_FIT_SCRIPT, checkEffectivePpi, fitComposition, fitPlacedSize, placedEffectivePpi, placedSizeInRange, } from '../image-fit.js';
 import { documentContextSchema, layerPathSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 export const PLACE_IMAGE_OPERATION = 'place_image';
@@ -15,8 +16,9 @@ export const PLACE_IMAGE_MAX_COORDINATE_PT = 16_383;
 export const PLACE_IMAGE_PRECISION_DIGITS = 6;
 export const PLACE_IMAGE_MAX_PATH_LENGTH = 4_096;
 export const PLACE_IMAGE_MEASURED_FORMATS = ['tiff', 'jpeg', 'png', 'psd'];
-const CANONICAL_VERSION = 1;
-const RESULT_SCHEMA_VERSION = 1;
+const CANONICAL_VERSION = 3;
+const RESULT_SCHEMA_VERSION = 3;
+export const PLACE_IMAGE_MAX_MINIMUM_PPI = 100_000;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
@@ -30,6 +32,15 @@ const anchorSchema = z.strictObject({ x: canonicalNumberSchema, y: canonicalNumb
 const formatSchema = z.enum(PLACE_IMAGE_MEASURED_FORMATS);
 const dimensionsSchema = z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() });
 const ppiSchema = z.strictObject({ x: z.number().finite().positive(), y: z.number().finite().positive() });
+const lengthSchema = z.number().finite().positive().max(PLACE_FIT_MAX_PT);
+export const placeImageSizeSchema = z.union([
+    z.strictObject({ fit: z.literal('width'), width: lengthSchema }),
+    z.strictObject({ fit: z.literal('height'), height: lengthSchema }),
+    z.strictObject({ fit: z.enum(['contain', 'cover', 'stretch']), width: lengthSchema, height: lengthSchema }),
+]);
+const fitPointSchema = z.strictObject({ x: z.number().finite().min(0).max(1), y: z.number().finite().min(0).max(1) });
+const fitAlignmentSchema = z.union([z.enum(FIT_ALIGN_NAMES), fitPointSchema]);
+const minimumPpiSchema = z.number().finite().positive().max(PLACE_IMAGE_MAX_MINIMUM_PPI);
 export const sourceBlockerSchema = z.enum([
     'source_file_missing', 'source_file_unavailable', 'source_hash_mismatch', 'source_format_unmeasured',
 ]);
@@ -58,15 +69,26 @@ const commonRequest = {
     source: sourceSchema,
     anchor: anchorSchema,
     name: z.string().max(255).optional(),
+    size: placeImageSizeSchema.optional(),
+    minimumEffectivePpi: minimumPpiSchema.optional(),
+    focalPoint: fitPointSchema.optional(),
+    alignTo: fitAlignmentSchema.optional(),
 };
+function checkComposition(request, context) {
+    if ([request.focalPoint, request.alignTo, request.focal_point, request.align_to].some(value => value !== undefined) &&
+        request.size?.fit !== 'contain' && request.size?.fit !== 'cover') {
+        context.addIssue({ code: 'custom', message: 'focal_point and align_to require size.fit contain or cover.' });
+    }
+}
 const unadmittedInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonRequest, apply: z.literal(false) }),
     z.strictObject({ ...commonRequest, apply: z.literal(true), commandId: canonicalCommandIdSchema }),
-]);
+]).superRefine(checkComposition);
 const internalInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonRequest, admission: placeImageAdmissionSchema.optional(), apply: z.literal(false) }),
     z.strictObject({ ...commonRequest, admission: placeImageAdmissionSchema.optional(), apply: z.literal(true), commandId: canonicalCommandIdSchema }),
 ]).superRefine((request, context) => {
+    checkComposition(request, context);
     if (request.admission?.status === 'admitted' && request.admission.sha256 !== request.source.sha256) {
         context.addIssue({ code: 'custom', message: 'An admitted source must carry the requested SHA-256.' });
     }
@@ -78,11 +100,15 @@ const commonPublic = {
     source: sourceSchema,
     anchor: anchorSchema,
     name: z.string().max(255).optional(),
+    size: placeImageSizeSchema.optional(),
+    minimum_effective_ppi: minimumPpiSchema.optional(),
+    focal_point: fitPointSchema.optional(),
+    align_to: fitAlignmentSchema.optional(),
 };
 export const placeImagePublicInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonPublic, apply: z.literal(false).default(false) }),
     z.strictObject({ ...commonPublic, apply: z.literal(true), command_id: applyCommandIdSchema }),
-]);
+]).superRefine(checkComposition);
 const inputSchema = z.strictObject({ ...commonPublic, apply: z.boolean().default(false), command_id: applyCommandIdSchema.optional() });
 const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(placeImagePublicInputSchema, { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
@@ -92,6 +118,10 @@ function normalizePublicInput(input) {
         expectedDocumentKey: value.expected_document_key, expectedLayerPath: value.expected_layer_path,
         artboardIndex: value.artboard_index, source: value.source, anchor: value.anchor,
         ...(value.name === undefined ? {} : { name: value.name }),
+        ...(value.size === undefined ? {} : { size: value.size }),
+        ...(value.focal_point === undefined ? {} : { focalPoint: value.focal_point }),
+        ...(value.align_to === undefined ? {} : { alignTo: value.align_to }),
+        ...(value.minimum_effective_ppi === undefined ? {} : { minimumEffectivePpi: value.minimum_effective_ppi }),
     };
     return value.apply ? { ...common, apply: true, commandId: value.command_id } : { ...common, apply: false };
 }
@@ -154,8 +184,8 @@ function round(value) {
     const rounded = Number(value.toFixed(PLACE_IMAGE_PRECISION_DIGITS));
     return Object.is(rounded, -0) ? 0 : rounded;
 }
-export function derivePlacePosition(artboardBounds, anchor) {
-    return [round(artboardBounds[0] + anchor.x), round(artboardBounds[1] - anchor.y)];
+export function derivePlacePosition(artboardBounds, anchor, offset = [0, 0]) {
+    return [round(artboardBounds[0] + anchor.x + offset[0]), round(artboardBounds[1] - anchor.y - offset[1])];
 }
 const layerStateSchema = z.strictObject({
     path: layerPathSchema,
@@ -167,7 +197,21 @@ const layerStateSchema = z.strictObject({
         .min(1).max(PLACE_IMAGE_MAX_LAYER_DEPTH),
 });
 const hostBlockerSchema = z.enum(['document_mutation_not_allowed', 'layer_hidden', 'layer_locked', 'layer_item_capacity_exceeded', 'source_file_changed']);
-const blockerSchema = z.enum([...hostBlockerSchema.options, ...sourceBlockerSchema.options]);
+const sizeBlockerSchema = z.enum(['source_pixels_unavailable', 'placed_size_out_of_range']);
+const blockerSchema = z.enum([...hostBlockerSchema.options, ...sourceBlockerSchema.options, ...sizeBlockerSchema.options]);
+const plannedSizeSchema = z.strictObject({
+    width: z.number().finite().positive(),
+    height: z.number().finite().positive(),
+    offset: z.tuple([z.number().finite(), z.number().finite()]),
+});
+const effectivePpiSchema = z.strictObject({ x: z.number().finite().positive(), y: z.number().finite().positive(), basis: z.enum(['requested_size', 'native_ppi']) });
+const effectivePpiCheckSchema = z.strictObject({
+    minimumEffectivePpi: minimumPpiSchema,
+    status: z.enum(['meets', 'below', 'unknown']),
+    failingAxes: z.array(z.enum(['x', 'y'])).max(2),
+});
+const FIT_TOLERANCE = 1e-6;
+const nearly = (left, right) => Math.abs(left - right) <= FIT_TOLERANCE;
 const boundsSchema = z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]);
 const positionSchema = z.tuple([z.number().finite(), z.number().finite()]);
 const matrixSchema = z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]);
@@ -182,6 +226,15 @@ const planSchema = z.strictObject({
     admission: placeImageAdmissionSchema,
     anchor: anchorSchema,
     position: positionSchema,
+    sizeRequest: placeImageSizeSchema.nullable(),
+    size: plannedSizeSchema.nullable(),
+    focalPoint: fitPointSchema.nullable(),
+    alignTo: fitAlignmentSchema.nullable(),
+    requestedPosition: positionSchema,
+    effectivePosition: positionSchema,
+    clamp: positionSchema,
+    effectivePpi: effectivePpiSchema.nullable(),
+    effectivePpiCheck: effectivePpiCheckSchema.nullable(),
     name: z.string().max(255).nullable(),
     layer: layerStateSchema,
     applyBlockedReasonCodes: z.array(blockerSchema),
@@ -190,9 +243,48 @@ const planSchema = z.strictObject({
     if (plan.applyAllowed !== (plan.applyBlockedReasonCodes.length === 0)) {
         context.addIssue({ code: 'custom', message: 'Image placement applyAllowed must require no blockers.' });
     }
-    const derived = derivePlacePosition(plan.artboardBounds, plan.anchor);
-    if (plan.position[0] !== derived[0] || plan.position[1] !== derived[1]) {
-        context.addIssue({ code: 'custom', message: 'Image placement plan position must equal the position derived from the anchor exactly.' });
+    const pixels = plan.admission.status === 'admitted' ? plan.admission.pixels : null;
+    if ((plan.size !== null) !== (plan.sizeRequest !== null && pixels !== null)) {
+        context.addIssue({ code: 'custom', message: 'Image placement size must be planned exactly when a size is requested and the source pixels are known.' });
+    }
+    if (plan.size !== null) {
+        const expected = pixels === null || plan.sizeRequest === null ? null : fitPlacedSize(pixels, plan.sizeRequest);
+        if (expected && plan.sizeRequest && ['contain', 'cover'].includes(plan.sizeRequest.fit) && (plan.focalPoint !== null || plan.alignTo !== null)) {
+            expected.offset = fitComposition(expected, plan.sizeRequest, plan.focalPoint ?? undefined, plan.alignTo ?? undefined).effectiveOffset;
+        }
+        if (expected === null || !nearly(expected.width, plan.size.width) || !nearly(expected.height, plan.size.height) ||
+            !nearly(expected.offset[0], plan.size.offset[0]) || !nearly(expected.offset[1], plan.size.offset[1])) {
+            context.addIssue({ code: 'custom', message: 'Image placement size must be derived from the source pixels and the requested fit.' });
+        }
+    }
+    checkComposition({ size: plan.sizeRequest ?? undefined, focalPoint: plan.focalPoint ?? undefined, alignTo: plan.alignTo ?? undefined }, context);
+    const originalSize = pixels && plan.sizeRequest ? fitPlacedSize(pixels, plan.sizeRequest) : null;
+    const composition = originalSize && plan.sizeRequest && ['contain', 'cover'].includes(plan.sizeRequest.fit)
+        ? (plan.focalPoint === null && plan.alignTo === null
+            ? { requestedOffset: originalSize.offset, effectiveOffset: originalSize.offset, clamp: [0, 0] }
+            : fitComposition(originalSize, plan.sizeRequest, plan.focalPoint ?? undefined, plan.alignTo ?? undefined)) : null;
+    const requested = derivePlacePosition(plan.artboardBounds, plan.anchor, composition?.requestedOffset ?? [0, 0]);
+    if (!requested.every((v, i) => nearly(v, plan.requestedPosition[i])) ||
+        !plan.position.every((v, i) => nearly(v, plan.effectivePosition[i])) ||
+        !(composition?.clamp ?? [0, 0]).every((v, i) => nearly(v, plan.clamp[i]))) {
+        context.addIssue({ code: 'custom', message: 'Composition requested/effective position and clamp must match the fit.' });
+    }
+    const derived = derivePlacePosition(plan.artboardBounds, plan.anchor, plan.size?.offset ?? [0, 0]);
+    if (!nearly(plan.position[0], derived[0]) || !nearly(plan.position[1], derived[1])) {
+        context.addIssue({ code: 'custom', message: 'Image placement plan position must equal the position derived from the anchor and fit.' });
+    }
+    const ppi = plan.admission.status !== 'admitted' ? null
+        : plan.sizeRequest !== null ? (plan.size === null || pixels === null ? null : { ...placedEffectivePpi(pixels, plan.size), basis: 'requested_size' })
+            : plan.admission.nativePpi === null ? null : { ...plan.admission.nativePpi, basis: 'native_ppi' };
+    if ((ppi === null) !== (plan.effectivePpi === null) ||
+        (ppi !== null && (ppi.basis !== plan.effectivePpi.basis || !nearly(ppi.x, plan.effectivePpi.x) || !nearly(ppi.y, plan.effectivePpi.y)))) {
+        context.addIssue({ code: 'custom', message: 'Image placement effective PPI must come from the source pixels and placed size.' });
+    }
+    if (plan.effectivePpiCheck !== null) {
+        const check = checkEffectivePpi(plan.effectivePpi, plan.effectivePpiCheck.minimumEffectivePpi);
+        if (check.status !== plan.effectivePpiCheck.status || check.failingAxes.join() !== plan.effectivePpiCheck.failingAxes.join()) {
+            context.addIssue({ code: 'custom', message: 'Image placement effective PPI check must compare both axes with the requested minimum.' });
+        }
     }
     if (plan.admission.status === 'admitted' && plan.admission.sha256 !== plan.source.sha256) {
         context.addIssue({ code: 'custom', message: 'Image placement admission must carry the requested SHA-256.' });
@@ -289,6 +381,11 @@ function nodeDerivedBlockers(result, planned) {
         blockers.add('layer_item_capacity_exceeded');
     if (result.plan.admission.status === 'blocked')
         blockers.add(result.plan.admission.reason);
+    if (result.plan.sizeRequest !== null && result.plan.admission.status === 'admitted' && result.plan.admission.pixels === null) {
+        blockers.add('source_pixels_unavailable');
+    }
+    if (result.plan.size !== null && !placedSizeInRange(result.plan.size))
+        blockers.add('placed_size_out_of_range');
     return blockers;
 }
 export const placeImageResultSchema = z.union([
@@ -325,8 +422,10 @@ export const placeImageResultSchema = z.union([
         if (Math.abs(result.created.position[0] - result.plan.position[0]) > PLACE_IMAGE_TOLERANCE_PT ||
             Math.abs(result.created.position[1] - result.plan.position[1]) > PLACE_IMAGE_TOLERANCE_PT ||
             (admission.status === 'admitted' && result.created.filePath !== admission.resolvedPath) ||
-            (result.plan.name !== null && result.created.name !== result.plan.name)) {
-            context.addIssue({ code: 'custom', message: 'A placed image must match the planned position, source path, and name.' });
+            (result.plan.name !== null && result.created.name !== result.plan.name) ||
+            (result.plan.size !== null && (Math.abs(result.created.width - result.plan.size.width) > PLACE_IMAGE_TOLERANCE_PT ||
+                Math.abs(result.created.height - result.plan.size.height) > PLACE_IMAGE_TOLERANCE_PT))) {
+            context.addIssue({ code: 'custom', message: 'A placed image must match the planned position, size, source path, and name.' });
         }
     }
     else if (result.transaction.state === 'verified') {
@@ -425,6 +524,7 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
     await assertOperationSafetyAdapterConformance({ registration: PLACE_IMAGE_SAFETY, plan, result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
 export const PLACE_IMAGE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
+${PLACE_FIT_SCRIPT}
 var PLACE_IMAGE_MAX_DIRECT_ITEMS = ${PLACE_IMAGE_MAX_DIRECT_ITEMS};
 var PLACE_IMAGE_MAX_LAYER_DEPTH = ${PLACE_IMAGE_MAX_LAYER_DEPTH};
 var PLACE_IMAGE_TOLERANCE_PT = ${PLACE_IMAGE_TOLERANCE_PT};
@@ -458,6 +558,53 @@ function placeValidateRequest() {
   if (params.name !== undefined && (typeof params.name !== "string" || params.name.length > 255)) {
     throw mutationError("preflight_failed", "Image name must be a string of at most 255 characters.");
   }
+  var size = params.size;
+  if (size !== undefined) {
+    var fits = { width: ["width"], height: ["height"], contain: ["width", "height"], cover: ["width", "height"], stretch: ["width", "height"] };
+    var keys = size && typeof size.fit === "string" && fits.hasOwnProperty(size.fit) ? fits[size.fit] : null;
+    if (keys === null) throw mutationError("preflight_failed", "Image size fit must be width, height, contain, cover, or stretch.");
+    for (var k = 0; k < keys.length; k++) {
+      var length = mutationFiniteNumber(size[keys[k]], "size." + keys[k]);
+      if (!(length > 0) || length > PLACE_FIT_MAX_PT) throw mutationError("preflight_failed", "Image size must be positive and at most " + PLACE_FIT_MAX_PT + " pt.");
+    }
+  }
+  if (params.focalPoint !== undefined || params.alignTo !== undefined) {
+    if (!size || (size.fit !== "contain" && size.fit !== "cover")) throw mutationError("preflight_failed", "Composition requires contain or cover.");
+    var points = [params.focalPoint || {x:0.5,y:0.5}, placeFitAlignment(params.alignTo)];
+    for (var p=0;p<points.length;p++) {
+      var px=mutationFiniteNumber(points[p].x,"composition.x"), py=mutationFiniteNumber(points[p].y,"composition.y");
+      if (px<0 || px>1 || py<0 || py>1) throw mutationError("preflight_failed", "Composition coordinates must be in 0..1.");
+    }
+  }
+  if (params.minimumEffectivePpi !== undefined && !(mutationFiniteNumber(params.minimumEffectivePpi, "minimumEffectivePpi") > 0)) {
+    throw mutationError("preflight_failed", "The minimum effective PPI must be positive.");
+  }
+}
+
+/** Planned size (null without a request or source pixels), effective PPI, and the caller's PPI check. */
+function placeSizing() {
+  var admission = params.admission, pixels = admission.status === "admitted" ? admission.pixels : null;
+  var size = params.size !== undefined && pixels !== null && pixels !== undefined ? placeFitSize(pixels, params.size) : null;
+  var composition = null;
+  if (size !== null && (params.size.fit === "contain" || params.size.fit === "cover")) {
+    if (params.focalPoint === undefined && params.alignTo === undefined) composition = {requestedOffset:size.offset,effectiveOffset:size.offset,clamp:[0,0]};
+    else composition = placeFitComposition(size, params.size, params.focalPoint, params.alignTo);
+    size.offset = composition.effectiveOffset;
+  }
+  var ppi = null;
+  if (admission.status === "admitted") {
+    if (size !== null) { ppi = placeFitPpi(pixels, size); ppi.basis = "requested_size"; }
+    else if (params.size === undefined && admission.nativePpi) ppi = { x: admission.nativePpi.x, y: admission.nativePpi.y, basis: "native_ppi" };
+  }
+  var check = null;
+  if (params.minimumEffectivePpi !== undefined) {
+    var compared = placeFitCheck(ppi, params.minimumEffectivePpi);
+    check = { minimumEffectivePpi: params.minimumEffectivePpi, status: compared.status, failingAxes: compared.failingAxes };
+  }
+  var blockers = [];
+  if (params.size !== undefined && admission.status === "admitted" && (pixels === null || pixels === undefined)) blockers.push("source_pixels_unavailable");
+  if (size !== null && !placeFitInRange(size)) blockers.push("placed_size_out_of_range");
+  return { size: size, composition: composition, ppi: ppi, check: check, blockers: blockers };
 }
 
 function placeResolveLayer(document, path) {
@@ -569,7 +716,9 @@ function placeResolve(forApply) {
   var ancestry = placeLayerAncestry(layer);
   var order = placeLayerOrder(layer);
   var rect = placeArtboardRect(document, params.artboardIndex);
-  var position = [placeRound(rect[0] + params.anchor.x), placeRound(rect[1] - params.anchor.y)];
+  var sizing = placeSizing();
+  var offset = sizing.size === null ? [0, 0] : sizing.size.offset;
+  var position = [placeRound(rect[0] + params.anchor.x + offset[0]), placeRound(rect[1] - params.anchor.y - offset[1])];
   var blockers = [];
   if (!context.mutationAllowed) blockers.push("document_mutation_not_allowed");
   var ancestorHidden = false, ancestorLocked = false;
@@ -582,10 +731,11 @@ function placeResolve(forApply) {
   if (order.length >= PLACE_IMAGE_MAX_DIRECT_ITEMS) blockers.push("layer_item_capacity_exceeded");
   var sourceBlockers = placeSourceBlockers(params.admission);
   for (var s = 0; s < sourceBlockers.length; s++) blockers.push(sourceBlockers[s]);
+  for (var z = 0; z < sizing.blockers.length; z++) blockers.push(sizing.blockers[z]);
   if (forApply && blockers.length > 0) {
     throw new Error("MCP_ERROR:" + stringifyJson({ code: "PLACE_IMAGE_APPLY_BLOCKED", reasonCodes: blockers, layerPath: params.expectedLayerPath }));
   }
-  return { context: context, document: document, layer: layer, ancestry: ancestry, order: order, rect: rect, position: position, blockers: blockers };
+  return { context: context, document: document, layer: layer, ancestry: ancestry, order: order, rect: rect, position: position, sizing: sizing, blockers: blockers };
 }
 
 function placePlan(preflight) {
@@ -594,6 +744,13 @@ function placePlan(preflight) {
     artboardIndex: params.artboardIndex, artboardBounds: preflight.rect,
     source: { path: params.source.path, sha256: params.source.sha256 }, admission: params.admission,
     anchor: { x: params.anchor.x, y: params.anchor.y }, position: preflight.position,
+    focalPoint: params.focalPoint === undefined ? null : params.focalPoint,
+    alignTo: params.alignTo === undefined ? null : params.alignTo,
+    requestedPosition: [placeRound(preflight.rect[0]+params.anchor.x+(preflight.sizing.composition ? preflight.sizing.composition.requestedOffset[0] : 0)),
+      placeRound(preflight.rect[1]-params.anchor.y-(preflight.sizing.composition ? preflight.sizing.composition.requestedOffset[1] : 0))],
+    effectivePosition: preflight.position, clamp: preflight.sizing.composition ? preflight.sizing.composition.clamp : [0,0],
+    sizeRequest: params.size === undefined ? null : params.size, size: preflight.sizing.size,
+    effectivePpi: preflight.sizing.ppi, effectivePpiCheck: preflight.sizing.check,
     name: params.name === undefined ? null : params.name,
     layer: { path: params.expectedLayerPath, name: preflight.layer.name, visible: preflight.layer.visible, locked: preflight.layer.locked,
       itemUuids: preflight.order, ancestry: preflight.ancestry },
@@ -631,6 +788,8 @@ function placeApply(preflight, plan, state) {
     // pre-file UUID above stays valid only for the empty item a failed assignment leaves behind.
     if (typeof item.uuid !== "string" || item.uuid.length === 0) throw mutationError("apply_failed", "Illustrator did not return a valid native UUID after linking the file.");
     state.operationState.createdUuid = String(item.uuid);
+    // Measured (30.8.2): width then height sets the exact size and keeps the linked item's native UUID.
+    if (plan.size !== null) { item.width = plan.size.width; item.height = plan.size.height; }
     item.position = [plan.position[0], plan.position[1]];
     if (params.name !== undefined) item.name = params.name;
     return item;
@@ -659,6 +818,9 @@ function placeVerify(preflight, plan, state) {
     throw mutationError("verify_mismatch", "The placed image position does not match the plan.");
   }
   if (params.name !== undefined && item.name !== params.name) throw mutationError("verify_mismatch", "The placed image name does not match the plan.");
+  if (plan.size !== null && (Math.abs(read.width - plan.size.width) > PLACE_IMAGE_TOLERANCE_PT || Math.abs(read.height - plan.size.height) > PLACE_IMAGE_TOLERANCE_PT)) {
+    throw mutationError("verify_mismatch", "The placed image size does not match the plan.");
+  }
   return { uuid: createdUuid, type: "PlacedItem", name: item.name || "", filePath: read.filePath, position: read.position,
     geometricBounds: read.geometricBounds, width: read.width, height: read.height, matrix: read.matrix, layerItemUuids: order };
 }
@@ -736,7 +898,7 @@ function normalizedRequest(input) {
 export const placeImageToolContract = {
     name: 'illustrator_place_image',
     title: 'Plan or Place Linked Image',
-    description: `Plan or place one external raster file (TIFF, JPEG, PNG, or PSD; absolute path plus its SHA-256) as a linked PlacedItem on an explicit layer path at an artboard-top-left anchor in points. The file is admitted in Node before any Illustrator call (existence, exact SHA-256, measured format); a missing, changed, or unmeasured source blocks the plan. Apply creates once, verifies the native UUID, layer order, linked path, and position, and rolls back only its own created item with absence proven. Relink and embed are not part of this tool.`,
+    description: `Plan or place one external raster file (TIFF, JPEG, PNG, or PSD; absolute path plus its SHA-256) as a linked PlacedItem on an explicit layer path at an artboard-top-left anchor in points. The file is admitted in Node before any Illustrator call (existence, exact SHA-256, measured format); a missing, changed, or unmeasured source blocks the plan. Optional size: width or height (aspect kept), contain or cover in a width x height box at the anchor (centered by default; cover overflows without clipping), or stretch (non-uniform, only by name). For contain/cover, focal_point selects a normalized source point and align_to selects center, a thirds intersection, or normalized box coordinates; the plan returns requested/effective positions and the right/down clamp, which keeps the whole image inside (contain) or the box covered (cover). The plan returns the size, the X and Y effective PPI, and, with minimum_effective_ppi, which axes fall below it (a warning, not a blocker; no built-in threshold). Apply creates once, verifies the native UUID, layer order, linked path, position, and size, and rolls back only its own created item with absence proven. Relink and embed are not part of this tool.`,
     inputSchema,
     publicInputSchema: placeImagePublicInputSchema,
     outputSchema: placeImageResponseSchema,

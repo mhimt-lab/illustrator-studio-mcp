@@ -2,7 +2,7 @@
 
 [日本語](install.md) | **English**
 
-**Public Beta 0.1.0-beta.4.** Requires macOS, stable Illustrator, and Node.js 20+ (the Claude Desktop extension needs no Node.js). The server needs no API key; your AI app's terms and fees are separate. Keep Illustrator in the foreground and the screen unlocked. Check [client-specific verification](compatibility.en.md).
+**Public Beta 0.1.0-beta.5.** Requires macOS, stable Illustrator, and Node.js 20+ (the Claude Desktop extension needs no Node.js). The server needs no API key; your AI app's terms and fees are separate. Keep Illustrator in the foreground and the screen unlocked. Check [client-specific verification](compatibility.en.md).
 
 ## Install from npm
 
@@ -12,7 +12,7 @@ illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
 
-The version should be `0.1.0-beta.4`. It is not Stable. Always include `@beta`: a plain `npm install illustrator-studio-mcp` uses the `latest` tag, which may not be this version. Use `@0.1.0-beta.4` instead to pin the version.
+The version should be `0.1.0-beta.5`. It is not Stable. Always include `@beta`: a plain `npm install illustrator-studio-mcp` uses the `latest` tag, which may not be this version. Use `@0.1.0-beta.5` instead to pin the version.
 
 To launch without a global install:
 
@@ -24,11 +24,11 @@ This starts a stdio server waiting for an AI app, not an interactive terminal UI
 
 ## Install the release file
 
-Download the tgz and `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.4) into the same directory, then run there. `SHA256SUMS` also lists the Desktop extension (`.mcpb`); `--ignore-missing` skips files you did not download.
+Download the tgz and `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.5) into the same directory, then run there. `SHA256SUMS` also lists the Desktop extension (`.mcpb`); `--ignore-missing` skips files you did not download.
 
 ```bash
 shasum -a 256 -c SHA256SUMS --ignore-missing
-npm install -g ./illustrator-studio-mcp-0.1.0-beta.4.tgz
+npm install -g ./illustrator-studio-mcp-0.1.0-beta.5.tgz
 illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
@@ -61,8 +61,8 @@ Restart and check `/mcp`.
 
 The Desktop extension runs on the Node.js built into Claude Desktop. It needs neither the npm install nor configuration file edits.
 
-1. [Download illustrator-studio-mcp-0.1.0-beta.4.mcpb](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.4/illustrator-studio-mcp-0.1.0-beta.4.mcpb). To check the file, download `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.4) into the same directory and run `shasum -a 256 -c SHA256SUMS --ignore-missing` there. If the hash does not match, stop and do not install.
-2. Double-click the `.mcpb` file to open it in Claude Desktop. In the install dialog, confirm the author **mhimt**, version **0.1.0-beta.4**, and license **BUSL-1.1**, then choose Install. The extension is not signed.
+1. [Download illustrator-studio-mcp-0.1.0-beta.5.mcpb](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.5/illustrator-studio-mcp-0.1.0-beta.5.mcpb). To check the file, download `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.5) into the same directory and run `shasum -a 256 -c SHA256SUMS --ignore-missing` there. If the hash does not match, stop and do not install.
+2. Double-click the `.mcpb` file to open it in Claude Desktop. In the install dialog, confirm the author **mhimt**, version **0.1.0-beta.5**, and license **BUSL-1.1**, then choose Install. The extension is not signed.
 3. For stable Illustrator, keep the default "Illustrator application" setting `id:com.adobe.illustrator` and save (use `id:com.adobe.illustratorBeta` for Illustrator Beta).
 4. Confirm the extension is enabled, then start a new chat with a read-only request ([Start with a read](#start-with-a-read)).
 
@@ -128,10 +128,10 @@ Use this MCP in **Work** in the ChatGPT desktop app, with the run location (the 
 
 #### Add the plugin (main method)
 
-You can add it entirely from the ChatGPT app. You need Node.js 20 or newer (install it with the installer from the [official website](https://nodejs.org/). The plugin launches `illustrator-studio-mcp@0.1.0-beta.4` with `npx`).
+You can add it entirely from the ChatGPT app. You need Node.js 20 or newer (install it with the installer from the [official website](https://nodejs.org/). The plugin launches `illustrator-studio-mcp@0.1.0-beta.5` with `npx`).
 
 1. In the ChatGPT sidebar, open Plugins, then choose Add (top right) → Add a marketplace (the same menu is also under Settings → Plugins → Add).
-2. In "Add plugin marketplace", enter `mhimt-lab/illustrator-studio-mcp` as the Source and `v0.1.0-beta.4` as the Git ref, then click Add marketplace. The Git ref pins the version; we recommend adding it with the version pinned.
+2. In "Add plugin marketplace", enter `mhimt-lab/illustrator-studio-mcp` as the Source and `v0.1.0-beta.5` as the Git ref, then click Add marketplace. The Git ref pins the version; we recommend adding it with the version pinned.
 3. On the same screen, search for "Illustrator" and click the "+" next to **Illustrator Studio MCP**. It is done when "Illustrator Studio MCP plugin installed" appears.
 4. Choose Work at the top, check that the computer icon at the lower right of the message box is set to On your computer, then start with a read in a new chat ([Start with a read](#start-with-a-read)).
 
@@ -146,11 +146,11 @@ Adding it from the app writes the same settings as adding it with the commands b
 With Codex CLI, you can also add it with these two commands in Terminal:
 
 ```bash
-codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.4
+codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.5
 codex plugin add illustrator-studio-mcp@illustrator-studio-mcp
 ```
 
-The `--ref v0.1.0-beta.4` in the first line pins the version. After adding it, quit ChatGPT completely and start it again. Under Settings → Plugins, check that **Illustrator Studio MCP** is enabled and that `illustrator-studio-plugin` is listed under "From plugins" on the MCP tab.
+The `--ref v0.1.0-beta.5` in the first line pins the version. After adding it, quit ChatGPT completely and start it again. Under Settings → Plugins, check that **Illustrator Studio MCP** is enabled and that `illustrator-studio-plugin` is listed under "From plugins" on the MCP tab.
 
 To remove it with commands, uninstall it under Plugins, then run `codex plugin marketplace remove illustrator-studio-mcp`. In our checks, updating the plugin changed no other settings, and removing it deleted only the entries for this plugin and its marketplace (manually registered MCP servers, other plugins, and execution records remained).
 

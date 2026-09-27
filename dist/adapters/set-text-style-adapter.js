@@ -10,7 +10,7 @@ import { validateClusterRange } from './point-text-cluster.js';
 import { textLookupFailureError } from './text-lookup-error.js';
 export const SET_TEXT_STYLE_OPERATION = 'set_text_style';
 export const SET_TEXT_STYLE_VALIDATOR = { kind: SET_TEXT_STYLE_OPERATION, version: 1 };
-const CANONICAL_VERSION = 3;
+const CANONICAL_VERSION = 4;
 const RESULT_SCHEMA_VERSION = 3;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
@@ -287,6 +287,7 @@ const commonInternal = {
     start: z.number().int().safe().nonnegative(),
     end: z.number().int().safe().nonnegative(),
     style: requestedStyleRequestSchema,
+    fontVerified: z.boolean().optional(),
 };
 const internalInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonInternal, apply: z.literal(false) }),
@@ -348,6 +349,16 @@ function normalizePublicInput(input) {
         ? { ...common, expectedBefore: value.expected_before, confirmedAfter: value.confirmed_after,
             apply: true, commandId: value.command_id }
         : { ...common, apply: false };
+}
+async function admit(input, services) {
+    const { fontVerified: _ignored, ...request } = input;
+    const style = request.style;
+    if (typeof style?.fontPostScriptName !== 'string')
+        return request;
+    const name = style.fontPostScriptName;
+    const verification = services.fontVerifier === undefined ? {}
+        : await services.fontVerifier.verify([name], services.applicationBundleId ?? null);
+    return { ...request, fontVerified: verification[name] != null };
 }
 export function checkTextStyleRequest(before, start, end) {
     return validateClusterRange(before.contents, start, end);
@@ -542,6 +553,12 @@ function styleFont() {
   catch (fontError) { font = null; }
   if (font === null || font === undefined) {
     throw mutationError("preflight_failed", "The requested font is not installed.");
+  }
+  // #440: Illustrator also resolves a font missing on this machine while a document using it is open.
+  if (params.fontVerified !== true) {
+    throw mutationError("preflight_failed", "The requested font resolves in Illustrator but neither the OS nor "
+      + "Illustrator's font lists show it (a font missing on this machine, or one Creative Cloud activates only for "
+      + "Adobe applications, which cannot be confirmed yet); it is not written.");
   }
   return font;
 }
@@ -793,6 +810,7 @@ export function createSetTextStyleAdapter() {
         version: 1, operation: SET_TEXT_STYLE_OPERATION, validator: SET_TEXT_STYLE_VALIDATOR,
         safety: SET_TEXT_STYLE_SAFETY, safetyRegistrationIdentity: SET_TEXT_STYLE_SAFETY_IDENTITY,
         adapterIdentity: SET_TEXT_STYLE_ADAPTER_IDENTITY, tool: setTextStyleToolContract,
+        admit,
         canonical: { version: CANONICAL_VERSION, normalize: normalizedRequest,
             safetyDigest: (input) => normalizedRequest(input).digest },
         resultSchema: setTextStyleResultSchema, resultSchemaVersion: RESULT_SCHEMA_VERSION,

@@ -1,3 +1,5 @@
+import { hostVersionConsentSchema } from '../host-version-consent.js';
+import { hostVersionPublicFields, hostVersionInternalFields, normalizeHostVersionConsent } from '../host-version-consent.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
@@ -7,6 +9,9 @@ import { documentContextSchema } from '../mutation-result-schema-core.js';
 import { canonicalDigest, operationSafetyPolicyToMcpAnnotations } from '../operation-safety-policy-core.js';
 import { SUPPORTED_PATH_ITEM_MAX_PATH_POINTS, SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS } from './supported-path-item-host-script.js';
 import { artboardSafetyAsserter, artboardSafetyRegistration, artboardTransactionSchema, classifyArtboardTerminal } from './artboard-update-safety.js';
+import { RASTER_MAX_SIDE_PX, RASTER_MAX_TOTAL_PX } from '../raster-export.js';
+import { HOST_VERSION_POLICY_JSX, hostVersionAdmitted } from '../host-version-policy.js';
+import { describeHostVersionScope } from '../host-version-admission.js';
 export const UPDATE_ARTBOARD_OPERATION = 'update_artboard';
 export const UPDATE_ARTBOARD_VALIDATOR = { kind: UPDATE_ARTBOARD_OPERATION, version: 1 };
 export const ARTBOARD_MAX_COUNT = 256;
@@ -46,7 +51,8 @@ export function artboardOriginIsImplicit(s) {
     return s.boards.every((b) => b.rulerOrigin[0] === 0 && b.rulerOrigin[1] === 0) && same(s.rulerOrigin, implicitOrigin(s.boards[s.active].rect));
 }
 export function artboardOriginBlocked(before, index, change) {
-    return ('add' in change || ('active' in change && index !== before.active)) && !artboardOriginIsImplicit(before);
+    const movesOrigin = 'add' in change || ('active' in change && index !== before.active) || ('rect' in change && index === before.active);
+    return movesOrigin && !artboardOriginIsImplicit(before);
 }
 export function deriveArtboardAfter(before, index, change) {
     if ('add' in change) {
@@ -61,33 +67,55 @@ export function deriveArtboardAfter(before, index, change) {
     if ('active' in change)
         return index === before.active ? before : { ...before, active: index, rulerOrigin: implicitOrigin(before.boards[index].rect) };
     if ('rect' in change && index === before.active)
-        throw new Error('Updating the active artboard rect is unsupported.');
+        return { ...before, boards: before.boards.map((b, i) => i === index ? { ...b, rect: change.rect } : b), rulerOrigin: implicitOrigin(change.rect) };
     return { ...before, boards: before.boards.map((b, i) => i === index ? { ...b, ...change } : b) };
 }
-const common = { expectedDocumentKey: keySchema, artboardIndex: z.number().int().min(0).max(ARTBOARD_MAX_COUNT - 1), change: artboardChangeSchema };
+const pixelSide = z.number().int().min(1).max(RASTER_MAX_SIDE_PX);
+export const artboardPixelSchema = z.strictObject({ width: pixelSide, height: pixelSide, scale: z.number().int().min(1).max(2) })
+    .superRefine((v, ctx) => { if (v.width * v.height > RASTER_MAX_TOTAL_PX)
+    ctx.addIssue({ code: 'custom', message: `pixel must not exceed ${RASTER_MAX_TOTAL_PX} pixels in total.` }); });
+const pixelChangeRule = (v, ctx) => {
+    if (v.pixel !== undefined && !('rect' in v.change) && !('add' in v.change))
+        ctx.addIssue({ code: 'custom', path: ['pixel'], message: 'pixel is allowed only with a rect or add change.' });
+};
+const size = z.strictObject({ width: z.number().int(), height: z.number().int() });
+const pixelPlanSchema = z.strictObject({ requested: size, scale: z.number().int().min(1).max(2), edgesPx: z.array(z.number().int()).length(4),
+    expected: size, sizeDelta: size, fractionalEdges: z.array(z.number()).max(0) });
+export function deriveArtboardPixel(after, index, pixel) {
+    const r = after.boards[index].rect, s = pixel.scale;
+    const expected = { width: (r[2] - r[0]) * s, height: (r[1] - r[3]) * s };
+    return { requested: { width: pixel.width, height: pixel.height }, scale: s, edgesPx: [r[0] * s, r[1] * s, r[2] * s, r[3] * s], expected,
+        sizeDelta: { width: expected.width - pixel.width, height: expected.height - pixel.height }, fractionalEdges: [] };
+}
+const common = { ...hostVersionInternalFields, expectedDocumentKey: keySchema, artboardIndex: z.number().int().min(0).max(ARTBOARD_MAX_COUNT - 1), change: artboardChangeSchema, pixel: artboardPixelSchema.optional() };
 const internalSchema = z.discriminatedUnion('apply', [
-    z.strictObject({ ...common, apply: z.literal(false) }),
-    z.strictObject({ ...common, apply: z.literal(true), expectedBefore: artboardSnapshotSchema, confirmedAfter: artboardSnapshotSchema, commandId: canonicalCommandIdSchema }),
+    z.strictObject({ ...common, apply: z.literal(false) }).superRefine(pixelChangeRule),
+    z.strictObject({ ...common, apply: z.literal(true), expectedBefore: artboardSnapshotSchema, confirmedAfter: artboardSnapshotSchema, commandId: canonicalCommandIdSchema }).superRefine(pixelChangeRule),
 ]);
-const publicCommon = { expected_document_key: keySchema, artboard_index: common.artboardIndex, change: artboardChangeSchema };
+const publicCommon = { ...hostVersionPublicFields, expected_document_key: keySchema, artboard_index: common.artboardIndex, change: artboardChangeSchema, pixel: common.pixel };
 export const updateArtboardPublicInputSchema = z.discriminatedUnion('apply', [
-    z.strictObject({ ...publicCommon, apply: z.literal(false).default(false) }),
-    z.strictObject({ ...publicCommon, apply: z.literal(true), expected_before: artboardSnapshotSchema, confirmed_after: artboardSnapshotSchema, command_id: applyCommandIdSchema }),
+    z.strictObject({ ...publicCommon, apply: z.literal(false).default(false) }).superRefine(pixelChangeRule),
+    z.strictObject({ ...publicCommon, apply: z.literal(true), expected_before: artboardSnapshotSchema, confirmed_after: artboardSnapshotSchema, command_id: applyCommandIdSchema }).superRefine(pixelChangeRule),
 ]);
 const inputSchema = z.strictObject({ ...publicCommon, apply: z.boolean().default(false), expected_before: artboardSnapshotSchema.optional(), confirmed_after: artboardSnapshotSchema.optional(), command_id: applyCommandIdSchema.optional() });
 const { $schema: _schemaDialect, ...publishedSchema } = z.toJSONSchema(updateArtboardPublicInputSchema, { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedSchema });
 function normalizePublicInput(input) {
     const v = updateArtboardPublicInputSchema.parse(input);
-    const base = { expectedDocumentKey: v.expected_document_key, artboardIndex: v.artboard_index, change: v.change };
+    const base = { ...normalizeHostVersionConsent(v), expectedDocumentKey: v.expected_document_key, artboardIndex: v.artboard_index, change: v.change, ...(v.pixel === undefined ? {} : { pixel: v.pixel }) };
     return v.apply ? { ...base, apply: true, expectedBefore: v.expected_before, confirmedAfter: v.confirmed_after, commandId: v.command_id } : { ...base, apply: false };
 }
-const blockerSchema = z.enum(['saved_rgb_profile_required', 'unmeasured_app_version', 'unmeasured_ruler_origin']);
+const blockerSchema = z.enum(['saved_rgb_profile_required', 'host_version_unmeasured', 'unmeasured_ruler_origin', 'pixel_size_mismatch']);
 const planSchema = z.strictObject({
-    operation: z.literal(UPDATE_ARTBOARD_OPERATION), profile: z.literal('integer_pt_v1'), documentKey: keySchema, documentBefore: documentContextSchema,
-    artboardIndex: common.artboardIndex, change: artboardChangeSchema, before: artboardSnapshotSchema, after: artboardSnapshotSchema,
+    hostVersionConsent: hostVersionConsentSchema,
+    operation: z.literal(UPDATE_ARTBOARD_OPERATION), profile: z.enum(['integer_pt_v1', 'web_rgb_pixel_v1']), documentKey: keySchema, documentBefore: documentContextSchema,
+    artboardIndex: common.artboardIndex, change: artboardChangeSchema, before: artboardSnapshotSchema, after: artboardSnapshotSchema, pixel: pixelPlanSchema.optional(),
     changesState: z.boolean(), applyBlockedReasonCodes: z.array(blockerSchema), confirmationStatus: z.enum(['required', 'confirmed']), applyAllowed: z.boolean(),
 }).superRefine((p, ctx) => {
+    if ((p.profile === 'web_rgb_pixel_v1') !== (p.pixel !== undefined) || (p.pixel !== undefined && (!('rect' in p.change || 'add' in p.change)
+        || !same(deriveArtboardPixel(p.after, p.artboardIndex, { width: p.pixel.requested.width, height: p.pixel.requested.height, scale: p.pixel.scale }), p.pixel)))) {
+        ctx.addIssue({ code: 'custom', message: 'A Web pixel plan must be derived from the target board of the planned after.' });
+    }
     if (p.documentKey !== p.documentBefore.key || p.documentBefore.artboardCount !== p.before.boards.length || p.documentBefore.activeArtboardIndex !== p.before.active || !same(p.documentBefore.activeArtboardBounds, p.before.boards[p.before.active]?.rect))
         ctx.addIssue({ code: 'custom', message: 'Plan must bind the native document context to its before collection.' });
     try {
@@ -109,7 +137,7 @@ export const updateArtboardResultSchema = z.union([
     const baseline = r.plan.documentBefore;
     if (r.document.path !== baseline.path || r.document.fileRevision !== baseline.fileRevision || r.document.name !== baseline.name || r.document.appVersion !== baseline.appVersion || r.document.colorSpace !== baseline.colorSpace)
         ctx.addIssue({ code: 'custom', message: 'Result document must preserve the admitted file identity and profile.' });
-    if (!planned && (baseline.mutationProfile !== 'saved_file' || !baseline.saved || baseline.colorSpace !== 'RGB' || baseline.appVersion !== '30.8.1'))
+    if (!planned && (baseline.mutationProfile !== 'saved_file' || !baseline.saved || baseline.colorSpace !== 'RGB' || !hostVersionAdmitted('update_artboard', baseline.appVersion, r.plan.hostVersionConsent)))
         ctx.addIssue({ code: 'custom', message: 'Applied artboard result requires the measured saved RGB profile.' });
     if (r.applied && (r.document.artboardCount !== r.postcondition.boards.length || r.document.activeArtboardIndex !== r.postcondition.active || !same(r.document.activeArtboardBounds, r.postcondition.boards[r.postcondition.active]?.rect)))
         ctx.addIssue({ code: 'custom', message: 'Result document context must agree with the native postcondition.' });
@@ -119,10 +147,12 @@ export const updateArtboardResultSchema = z.union([
         const blockers = [];
         if (r.document.mutationProfile !== 'saved_file' || r.document.colorSpace !== 'RGB' || !r.document.saved)
             blockers.push('saved_rgb_profile_required');
-        if (r.document.appVersion !== '30.8.1')
-            blockers.push('unmeasured_app_version');
-        if (artboardOriginBlocked(r.plan.before, r.plan.artboardIndex, r.plan.change))
+        if (!hostVersionAdmitted('update_artboard', r.document.appVersion, r.plan.hostVersionConsent))
+            blockers.push('host_version_unmeasured');
+        if (artboardOriginBlocked(r.plan.before, r.plan.artboardIndex, r.plan.change) || (r.plan.pixel !== undefined && !same(r.plan.after.boards[r.plan.artboardIndex]?.rulerOrigin, [0, 0])))
             blockers.push('unmeasured_ruler_origin');
+        if (r.plan.pixel !== undefined && (r.plan.pixel.sizeDelta.width !== 0 || r.plan.pixel.sizeDelta.height !== 0))
+            blockers.push('pixel_size_mismatch');
         if (!same(blockers, r.plan.applyBlockedReasonCodes) || r.document.key !== r.plan.documentKey)
             ctx.addIssue({ code: 'custom', message: 'Plan must expose exact profile blockers and document binding.' });
     }
@@ -138,11 +168,11 @@ const assertSafety = artboardSafetyAsserter(UPDATE_ARTBOARD_SAFETY, (value) => {
     const r = updateArtboardResultSchema.parse(value);
     return { operationId: UPDATE_ARTBOARD_OPERATION, documentKey: r.plan.documentKey,
         identityToken: `artboard-update-v1:${canonicalDigest({ index: r.plan.artboardIndex, before: r.plan.before })}`,
-        beforeState: { path: r.plan.documentBefore.path, fileRevision: r.plan.documentBefore.fileRevision, snapshot: r.plan.before }, afterState: r.plan.after, changeSet: { index: r.plan.artboardIndex, change: r.plan.change, profile: r.plan.profile },
+        beforeState: { path: r.plan.documentBefore.path, fileRevision: r.plan.documentBefore.fileRevision, snapshot: r.plan.before }, afterState: r.plan.after, changeSet: { index: r.plan.artboardIndex, change: r.plan.change, profile: r.plan.profile, ...(r.plan.pixel === undefined ? {} : { pixel: r.plan.pixel }) },
         blocked: r.plan.applyBlockedReasonCodes.length > 0, confirmationStatus: r.plan.confirmationStatus, applyAllowed: r.plan.applyAllowed,
         transactionState: r.transaction.state, applied: r.applied };
 });
-export const UPDATE_ARTBOARD_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
+export const UPDATE_ARTBOARD_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}${HOST_VERSION_POLICY_JSX}
 function abFail(message) { throw mutationError("preflight_failed", message); }
 function abSame(a, b) {
   if (a === b) return true;
@@ -239,29 +269,53 @@ function abDerive(before) {
   if (change.name !== undefined) boards[index].name = abName(change.name);
   else if (change.rect !== undefined) {
     var rect = abPositiveRect(change.rect);
-    if (index === before.active) abFail("Updating the active artboard rect is unsupported.");
     boards[index].rect = rect;
+    if (index === before.active) after.rulerOrigin = abImplicitOrigin(rect);
   } else abFail("Change must contain exactly one name, rect, active or add.");
   return after;
 }
+function abPixel(after) {
+  var px = params.pixel;
+  if (px === undefined) return null;
+  if (!px || typeof px !== "object" || px instanceof Array || abKeys(px) !== 3 || (px.scale !== 1 && px.scale !== 2)) abFail("pixel requires width, height and scale 1 or 2.");
+  if (params.change.rect === undefined && params.change.add === undefined) abFail("pixel is allowed only with a rect or add change.");
+  var sides = [px.width, px.height];
+  for (var i = 0; i < 2; i++) if (typeof sides[i] !== "number" || sides[i] % 1 !== 0 || sides[i] < 1 || sides[i] > ${RASTER_MAX_SIDE_PX}) abFail("pixel width and height must be positive integers within the measured size.");
+  if (px.width * px.height > ${RASTER_MAX_TOTAL_PX}) abFail("pixel exceeds the measured total size.");
+  // Integer edges at scale 1 or 2 (the illustrator_export contract): width=(r-l)*s, height=(t-b)*s, tolerance 0.
+  var r = after.boards[params.artboardIndex].rect, s = px.scale, w = (r[2] - r[0]) * s, h = (r[1] - r[3]) * s;
+  return { requested: { width: px.width, height: px.height }, scale: s, edgesPx: [r[0] * s, r[1] * s, r[2] * s, r[3] * s],
+    expected: { width: w, height: h }, sizeDelta: { width: w - px.width, height: h - px.height }, fractionalEdges: [] };
+}
 function abResolve(forApply) {
   var context = forApply ? requireDocument(params.expectedDocumentKey) : requireDocumentForRead(params.expectedDocumentKey);
-  var doc = app.activeDocument, before = abSnapshot(doc), after = abDerive(before), blockers = [];
+  var doc = app.activeDocument, before = abSnapshot(doc), after = abDerive(before), pixel = abPixel(after), blockers = [];
   if (context.mutationProfile !== "saved_file" || context.colorSpace !== "RGB" || !context.saved) blockers.push("saved_rgb_profile_required");
-  if (context.appVersion !== "30.8.1") blockers.push("unmeasured_app_version");
-  // The predicted origin of add and a real active switch is measured only from the implicit origin state.
-  if ((abIsAdd() || (abIsActive() && params.artboardIndex !== before.active)) && !abOriginImplicit(before)) blockers.push("unmeasured_ruler_origin");
+  if (!hostVersionAdmitted("update_artboard", String(context.appVersion))) blockers.push("host_version_unmeasured");
+  // The predicted origin of add, a real active switch and an active-board rect is measured only from the implicit origin state.
+  var abActiveRect = params.change.rect !== undefined && params.artboardIndex === before.active;
+  var abBoardOrigin = pixel !== null ? after.boards[params.artboardIndex].rulerOrigin : [0, 0];
+  // The pixel size is measured only for a board whose own ruler origin is [0,0].
+  if (((abIsAdd() || (abIsActive() && params.artboardIndex !== before.active) || abActiveRect) && !abOriginImplicit(before)) || abBoardOrigin[0] !== 0 || abBoardOrigin[1] !== 0) blockers.push("unmeasured_ruler_origin");
+  if (pixel !== null && (pixel.sizeDelta.width !== 0 || pixel.sizeDelta.height !== 0)) blockers.push("pixel_size_mismatch");
   if (forApply) {
     if (!abSame(before, params.expectedBefore)) abFail("expected_before does not match the complete artboard and artwork state.");
     if (!abSame(after, params.confirmedAfter)) abFail("confirmed_after does not match the derived plan.");
     if (blockers.length > 0) abFail("Artboard profile is unsupported.");
   }
   var target = params.artboardIndex < doc.artboards.length ? doc.artboards[params.artboardIndex] : null;
-  return { context: context, document: doc, target: target, added: null, before: before, after: after, blockers: blockers };
+  return { context: context, document: doc, target: target, added: null, before: before, after: after, pixel: pixel, blockers: blockers };
 }
-function abPlan(p) { return { operation: "update_artboard", profile: "integer_pt_v1", documentKey: p.context.key, documentBefore: p.context, artboardIndex: params.artboardIndex,
-  change: params.change, before: p.before, after: p.after, changesState: !abSame(p.before, p.after), applyBlockedReasonCodes: p.blockers,
-  confirmationStatus: params.apply === true ? "confirmed" : "required", applyAllowed: params.apply === true && p.blockers.length === 0 }; }
+function abPlan(p) {
+  var plan = { operation: "update_artboard", profile: p.pixel !== null ? "web_rgb_pixel_v1" : "integer_pt_v1", documentKey: p.context.key, documentBefore: p.context, artboardIndex: params.artboardIndex,
+    change: params.change, before: p.before, after: p.after };
+  if (p.pixel !== null) plan.pixel = p.pixel;
+  plan.changesState = !abSame(p.before, p.after); plan.applyBlockedReasonCodes = p.blockers;
+  plan.confirmationStatus = params.apply === true ? "confirmed" : "required"; plan.applyAllowed = params.apply === true && p.blockers.length === 0;
+  var consent = hostVersionConsent(params);
+  if (consent !== null) plan.hostVersionConsent = consent;
+  return plan;
+}
 function abRevalidate(p) {
   try {
     var current = abResolve(true);
@@ -350,7 +404,7 @@ function normalizedRequest(input) {
 }
 export const updateArtboardToolContract = {
     name: 'illustrator_update_artboard', title: 'Plan or Update Artboards',
-    description: 'Plan then apply one artboard change: rename, integer-point rect of an inactive board, make a board active ({active:true}), or append a named integer-point board ({add:{name,rect}}, artboard_index = current board count). Apply echoes the complete plan.before as expected_before and plan.after as confirmed_after. plan.after predicts active and the document ruler origin: add makes the new board active, and add or an active switch sets the origin to [-left,-bottom] of the active board; this is admitted only when every board origin is [0,0] and the document origin already follows that rule, otherwise the plan is blocked with unmeasured_ruler_origin. There is no way to remove an added artboard with this server; deletion is a destructive operation left to a separate design. Duplicate names are allowed; the full ordered collection, active index, ruler origins and native artwork geometry establish identity. Requires a saved RGB document, Illustrator 30.8.1 and unlocked foreground for apply. Only direct ordinary paths (128 items, 256 total points) and up to 256 integer artboards are admitted; fractional origins, edit sessions, active-board rect updates and Web pixel profiles are unsupported. Plans never change origins or artwork. Any unproven postcondition/recovery remains indeterminate. Use the returned document key after apply: rename, rect and add leave the document unsaved, so save before the next change; an active switch keeps a saved document saved and its key unchanged (measured on 30.8.1).',
+    description: 'Plan then apply one artboard change: rename, integer-point rect of a board, make a board active ({active:true}), or append a named integer-point board ({add:{name,rect}}, artboard_index = current board count). Apply echoes the complete plan.before as expected_before and plan.after as confirmed_after. plan.after predicts active and the document ruler origin: add makes the new board active, and add, an active switch or a rect of the active board sets the origin to [-left,-bottom] of the active board; this is admitted only when every board origin is [0,0] and the document origin already follows that rule, otherwise the plan is blocked with unmeasured_ruler_origin. There is no way to remove an added artboard with this server; deletion is a destructive operation left to a separate design. Duplicate names are allowed; the full ordered collection, active index, ruler origins and native artwork geometry establish identity. Requires a saved RGB document, Illustrator ' + describeHostVersionScope('update_artboard') + ' and unlocked foreground for apply. Only direct ordinary paths (128 items, 256 total points) and up to 256 integer artboards are admitted; fractional edges or origins and edit sessions are unsupported. Optional pixel (rect or add only) checks the Web size illustrator_export writes for the board in plan.after, (right-left)·scale × (top-bottom)·scale: a mismatch blocks with pixel_size_mismatch and sizeDelta = expected − requested; nothing is snapped; a board with its own ruler origin blocks with unmeasured_ruler_origin. Plans never change origins or artwork. Any unproven postcondition/recovery remains indeterminate. Use the returned document key after apply: rename, rect and add leave the document unsaved, so save before the next change; an active switch keeps a saved document saved and its key unchanged (measured on 30.8.1).',
     inputSchema, publicInputSchema: updateArtboardPublicInputSchema, outputSchema: responseSchema,
     annotations: operationSafetyPolicyToMcpAnnotations(UPDATE_ARTBOARD_SAFETY.policy), normalizePublicInput,
 };
@@ -361,6 +415,7 @@ export function createUpdateArtboardAdapter() {
         tool: updateArtboardToolContract, canonical: { version: 1, normalize: normalizedRequest, safetyDigest: (input) => normalizedRequest(input).digest },
         resultSchema: updateArtboardResultSchema, resultSchemaVersion: 1, terminalClassifierVersion: 1, safetyConformanceVersion: 1, errorMappingVersion: 1,
         hostScriptDigest: UPDATE_ARTBOARD_HOST_SCRIPT_DIGEST, mutationHostApplicationMode: 'foreground',
+        hostVersionOperation: () => 'update_artboard',
         buildCommand(input) {
             const n = normalizedRequest(input), { commandId: _commandId, ...params } = n.request;
             if (n.intent === 'plan')

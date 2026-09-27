@@ -149,7 +149,9 @@ export class ExportSessionFormatError extends Error {
     constructor(exportId, reason) {
         super(reason === 'raster_vector_export_session'
             ? `Export session ${exportId} is a raster/vector export (version 2) lease that this operation does not handle; it stays unresolved.`
-            : `Export session ${exportId} is not a readable export record (${reason}); it stays unresolved and no host call was made.`);
+            : reason === 'save_as_session'
+                ? `${exportId} is an illustrator_save_document_as session; run illustrator_reconcile_save_as with save_as_id=${exportId}. No host call was made.`
+                : `Export session ${exportId} is not a readable export record (${reason}); it stays unresolved and no host call was made.`);
         this.exportId = exportId;
         this.reason = reason;
         this.name = 'ExportSessionFormatError';
@@ -166,6 +168,8 @@ export function classifyExportEntry(text, expected, schemas) {
     if (value === null || typeof value !== 'object' || Array.isArray(value))
         return { format: 'invalid', reason: 'not_an_object' };
     const entry = value;
+    if (entry.version === 3 && entry.kind === 'save_as_session')
+        return { format: 'invalid', reason: 'save_as_session' };
     if (entry.version === RASTER_EXPORT_RECORD_VERSION) {
         if (entry.kind !== RASTER_EXPORT_KIND)
             return { format: 'invalid', reason: 'unknown_kind' };

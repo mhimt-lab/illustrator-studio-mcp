@@ -1,30 +1,34 @@
-import { randomUUID } from 'node:crypto';
-import { constants as fsConstants } from 'node:fs';
-import { lstat, open, realpath, rmdir, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, open, readdir, realpath, rmdir, unlink } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { CursorSigner } from './cursor.js';
 import { documentKeyMatches } from './document-key.js';
 import { OperationSafetyRegistry } from './operation-safety-policy-core.js';
 import { DeleteBackupError, verifyDeleteBackup } from './delete-shared.js';
 import { DELETE_INSPECT_SCRIPT, DELETE_REVERT_SCRIPT, reconcileDeleteResultSchema, } from './delete-recovery.js';
 import { canonicalSha256 } from './mutation-canonical.js';
-import { DocumentMismatchError, IndeterminateExecutionError, InvalidCursorError, ObjectNotFoundError, ProvenPreApplyFailureError, StaleCursorError, } from './domain.js';
+import { DocumentMismatchError, hostReferenceInvalidDetail, hostReferenceInvalidReason, IndeterminateExecutionError, InvalidCursorError, ObjectNotFoundError, ProvenPreApplyFailureError, StaleCursorError, } from './domain.js';
 import { defaultMutationOperationRegistry } from './default-mutation-operation-adapters.js';
 import { LIST_TEXT_STYLES_SCRIPT } from './text-style-resources.js';
 import { FIND_FONTS_SCRIPT, fontLookupInputSchema, fontLookupResultSchema } from './font-lookup.js';
+import { SystemFontVerifier } from './font-verification.js';
 import { areaColumnsErrorMessage, GET_AREA_TEXT_OPTIONS_SCRIPT, getAreaTextOptionsResultSchema, } from './area-text-options.js';
 import { GET_PATH_POINTS_SCRIPT, getPathPointsResultSchema, pathEditErrorMessage } from './path-points.js';
+import { AUDIT_JAPANESE_TYPOGRAPHY_SCRIPT, judgeJapaneseTypography, jpAuditErrorMessage, jpAuditHostDataSchema, } from './jp-typography-audit.js';
 import { executeM6P0AppearancePreviewRecipe, m6P0RecipeResultSchema, } from './m6-p0-recipe.js';
 import { defaultStateRoot } from './command-store.js';
-import { BACKUP_CLOSE_RESTORE_TEST_SCRIPT, BACKUP_INVENTORY_SCRIPT, BACKUP_MAX_PAGE_ITEMS, BACKUP_OPEN_PRE_ATTEMPT_CODES, BACKUP_OPEN_RESTORE_TEST_SCRIPT, BACKUP_RECONCILE_CLOSE_SCRIPT, backupFileName, BackupCopyError, BackupPreconditionError, BackupRecordError, BackupSessionGoneError, BackupSessionUnresolvedError, compareRestoredStructure, copyErrorCreatedDestination, copyFileExclusive, deepDifferences, DocumentBackupStore, inspectSourceFile, newBackupId, removeRestoreTestFile, resolveBackupRoot, restoreTestFileName, sameFileIdentity, serializeFileIdentity, verifyTrackedFile, withBackupRootScope, BACKUP_REQUIRES_SAVED_FILE_MESSAGE, } from './document-backup.js';
+import { BACKUP_CLOSE_RESTORE_TEST_SCRIPT, BACKUP_INVENTORY_SCRIPT, BACKUP_MAX_PAGE_ITEMS, BACKUP_OPEN_PRE_ATTEMPT_CODES, BACKUP_OPEN_RESTORE_TEST_SCRIPT, BACKUP_RECONCILE_CLOSE_SCRIPT, backupFileName, BackupCopyError, BackupPreconditionError, BackupRecordError, BackupSessionGoneError, BackupSessionUnresolvedError, compareRestoredStructure, EMPTY_COMPOUND_DROPPED_ON_SAVE, explainRestoredStructure, copyErrorCreatedDestination, copyFileExclusive, deepDifferences, DocumentBackupStore, inspectSourceFile, newBackupId, removeRestoreTestFile, resolveBackupRoot, restoreTestFileName, sameFileOrSameBytes, serializeFileIdentity, verifyTrackedFile, withBackupRootScope, BACKUP_REQUIRES_SAVED_FILE_MESSAGE, } from './document-backup.js';
 import { assertOutputAbsent, closeRefusalReason, createStagingDirectory, DocumentExportStore, EXPORT_CLOSE_REFUSED_CODE, EXPORT_CLOSE_WORK_COPY_SCRIPT, EXPORT_HOST_TIMEOUT_MS, EXPORT_INVENTORY_SCRIPT, EXPORT_OPEN_PRE_ATTEMPT_CODES, EXPORT_OPEN_WORK_COPY_SCRIPT, hostRecordIdentityOf, EXPORT_OUTLINE_SCRIPT, EXPORT_READ_SOURCE_SCRIPT, EXPORT_RECONCILE_CLOSE_SCRIPT, EXPORT_SAVE_FAILED_CODE, EXPORT_SAVE_OUTPUT_SCRIPT, EXPORT_SAVE_PRE_ATTEMPT_CODES, ExportPreconditionError, ExportSessionGoneError, ExportSessionUnresolvedError, newExportId, OutputPublishError, OutputVerificationError, parseExportHostError, publishOutput, scanPdfObjects, validateOutputPath, verifyOutputFile, verifyOutputUnchanged, withOutputParentScope, workCopyFileName, EXPORT_REQUIRES_SAVED_FILE_MESSAGE, } from './document-export.js';
 import { LeaseGuard, UnresolvedLeaseError } from './lease-guard.js';
+import { PDF_EXPORT_SAVE_PRE_ATTEMPT_CODES, PDF_EXPORT_SAVE_SCRIPT, pdfFacts, pdfSaveParams, planPdfExport, presetReport, verifyPdfStructure, } from './pdf-export.js';
+import { SaveAsLeaseChangedError, SaveAsLeaseNotRecordedError, SaveAsLeaseRegistry, SaveAsSessionStore, UF_HIDDEN, newSaveAsId, syncDirectoryOf, syncFile } from './save-as-session.js';
+import { isMissingPath } from './private-state.js';
+import { classifySaveAs, collectSaveAsFacts, outputHiddenOf, outputIsDataless } from './save-as-reconcile.js';
 import { RasterExportOperation, RasterExportReconciler, rasterQuarantinePaths, } from './raster-export.js';
 import { EditSessionStore } from './edit-session.js';
 import { EditSessionCoordinator } from './edit-session-coordinator.js';
 import { EDIT_SESSION_FOREGROUND_HINT, EDIT_SESSION_OPEN_SCRIPT, editSessionRefusal, editSessionSnapshotSchema, listEditSessionsResult, summarizeEditSession, } from './edit-session-tools.js';
 import { EDIT_SESSION_MAX_ITEMS, EDIT_SESSION_SCAN_DEADLINE_MS } from './edit-session.js';
-import { assertCanonicalDocumentPath, CLOSE_DOCUMENT_SCRIPT, fileRevisionSize, LIFECYCLE_HOST_TIMEOUT_MS, LIFECYCLE_READ_SCRIPT, LifecyclePreconditionError, linkStagedToOutput, OPEN_DOCUMENT_SCRIPT, OutputLinkError, readFileFacts, removeStagedFile, SAVE_AS_STAGING_PREFIX, SAVE_AS_SWITCH_SCRIPT, sameIdentity, SAVE_DOCUMENT_AS_SCRIPT, SAVE_DOCUMENT_SCRIPT, serializeFileFacts, validateOpenPath, withApplication, } from './document-lifecycle.js';
+import { assertCanonicalDocumentPath, CLOSE_DOCUMENT_SCRIPT, fileRevisionSize, LIFECYCLE_HOST_TIMEOUT_MS, LIFECYCLE_READ_SCRIPT, LifecyclePreconditionError, linkStagedToOutput, OPEN_DOCUMENT_SCRIPT, OutputLinkError, readFileFacts, removeStagedFile, SAVE_AS_STAGING_PREFIX, SAVE_AS_SWITCH_SCRIPT, SAVE_AS_INVENTORY_SCRIPT, sameContentIdentity, SAVE_DOCUMENT_AS_SCRIPT, SAVE_DOCUMENT_SCRIPT, serializeFileFacts, validateOpenPath, withApplication, } from './document-lifecycle.js';
 import { CREATE_DOCUMENT_HOST_TIMEOUT_MS, CREATE_DOCUMENT_SCRIPT, } from './document-create.js';
 import { M6P0RecipeAuthorityStore } from './m6-p0-recipe-store.js';
 import { listRecipes, planRecipe, runRecipe, saveRecipe, } from './recipe.js';
@@ -38,17 +42,27 @@ import { checkTextConsistency, computeContrastPairs, contrastAutoDetectUnsupport
 import { assertConsistentColorRead, buildReplacementPlanEntries, colorReplacementSnapshotDigest, findColorUsages, validateColorMatch, } from './color-replacement.js';
 import { OsascriptHostProfileProbe } from './host-profile.js';
 import { capturePreview } from './document-preview.js';
-import { classifyRasters, IMAGE_OPTIMIZE_APP_VERSION, IMAGE_OPTIMIZE_BASELINE_CODES, IMAGE_OPTIMIZE_BASELINE_SCRIPT, IMAGE_OPTIMIZE_GEOMETRY_TOLERANCE_PT, IMAGE_OPTIMIZE_CLOSE_WORK_COPY_SCRIPT, assertRenderBaseName, IMAGE_OPTIMIZE_HOST_TIMEOUT_MS, IMAGE_OPTIMIZE_ICC_NOTE, IMAGE_OPTIMIZE_MAX_SCANNED_IMAGES, IMAGE_OPTIMIZE_MAX_TARGETS, IMAGE_OPTIMIZE_QUALITY_CONTRACT, IMAGE_OPTIMIZE_RASTERIZE_SCRIPT, IMAGE_OPTIMIZE_READ_SOURCE_SCRIPT, IMAGE_OPTIMIZE_RENDER_MAX_PIXELS, IMAGE_OPTIMIZE_SAVE_FAILED_CODE, IMAGE_OPTIMIZE_SAVE_PRE_ATTEMPT_CODES, IMAGE_OPTIMIZE_SAVE_SCRIPT, imageOptimizeSaveOptions, renderGeometry, renderQualityProblem, verifyTargetResult, workCopyDifferences, } from './image-optimize.js';
+import { classifyRasters, IMAGE_OPTIMIZE_BASELINE_CODES, IMAGE_OPTIMIZE_BASELINE_SCRIPT, IMAGE_OPTIMIZE_GEOMETRY_TOLERANCE_PT, IMAGE_OPTIMIZE_CLOSE_WORK_COPY_SCRIPT, assertRenderBaseName, IMAGE_OPTIMIZE_HOST_TIMEOUT_MS, IMAGE_OPTIMIZE_ICC_NOTE, IMAGE_OPTIMIZE_MAX_SCANNED_IMAGES, IMAGE_OPTIMIZE_MAX_TARGETS, IMAGE_OPTIMIZE_QUALITY_CONTRACT, IMAGE_OPTIMIZE_RASTERIZE_SCRIPT, IMAGE_OPTIMIZE_READ_SOURCE_SCRIPT, IMAGE_OPTIMIZE_VERSION_GUARD, IMAGE_OPTIMIZE_RENDER_MAX_PIXELS, IMAGE_OPTIMIZE_SAVE_FAILED_CODE, IMAGE_OPTIMIZE_SAVE_PRE_ATTEMPT_CODES, IMAGE_OPTIMIZE_SAVE_SCRIPT, imageOptimizeSaveOptions, renderGeometry, renderQualityProblem, verifyTargetResult, workCopyDifferences, } from './image-optimize.js';
 import { comparePngImages } from './visual-diff.js';
-import { STABLE_ILLUSTRATOR_BUNDLE_ID } from './illustrator-application.js';
+import { HOST_VERSION_PATTERN, HOST_VERSION_POLICY_JSX, evaluateHostVersion, hostVersionAdmitted } from './host-version-policy.js';
+import { admitHostVersionPlan, HostVersionChannelRefusedError } from './host-version-admission.js';
+import { directoryFlags } from './platform-primitives.js';
 const GET_CONTEXT_SCRIPT = `var result = getDocumentContext();`;
-const MEASURED_LINE_HEIGHT_APP_VERSION = '30.8.1';
 function isMeasuredLineHeightProfile(observation, appVersion) {
-    return appVersion === MEASURED_LINE_HEIGHT_APP_VERSION && observation.profile === 'foreground' &&
-        observation.lockState === 'unlocked' && observation.expectedBundleId === STABLE_ILLUSTRATOR_BUNDLE_ID &&
-        observation.frontmostBundleId === STABLE_ILLUSTRATOR_BUNDLE_ID;
+    return hostVersionAdmitted('line_height_read', appVersion) && observation.profile === 'foreground' &&
+        observation.lockState === 'unlocked' && observation.expectedBundleId !== null &&
+        observation.frontmostBundleId === observation.expectedBundleId;
 }
 const OBJECT_READ_HELPERS = `
+// An invalid reference while reading one item fails the whole read with its route and index; it is never skipped.
+function readPageItemAt(route, index, read) {
+  try { return read(); }
+  catch (readError) {
+    if (!isHostReferenceInvalidError(readError)) throw readError;
+    throw new Error(hostReferenceInvalidMessage({ route: route, index: index, hostError: hostErrorEvidence(readError) }));
+  }
+}
+
 function getLayerPath(doc, targetLayer) {
   var path = [];
   var current = targetLayer;
@@ -771,15 +785,19 @@ var matchedCount = 0;
 var previousUuid = null;
 var snapshotDigestState = createSnapshotDigest();
 for (var itemIndex = 0; itemIndex < doc.pageItems.length; itemIndex++) {
-  var item = doc.pageItems[itemIndex];
-  var layerPath = getLayerPath(doc, item.layer);
-  var bounds = item.geometricBounds;
-  if (params.filters.type !== null && item.typename !== params.filters.type) continue;
-  if (params.filters.layerPath !== null && !sameNumberArray(layerPath, params.filters.layerPath)) continue;
-  if (!boundsMatch(bounds, params.filters.bounds, params.filters.boundsMode)) continue;
-  var summary = summarizePageItem(item, layerPath, bounds);
+  var matched = readPageItemAt("document.pageItems", itemIndex, function () {
+    var item = doc.pageItems[itemIndex];
+    var layerPath = getLayerPath(doc, item.layer);
+    var bounds = item.geometricBounds;
+    if (params.filters.type !== null && item.typename !== params.filters.type) return null;
+    if (params.filters.layerPath !== null && !sameNumberArray(layerPath, params.filters.layerPath)) return null;
+    if (!boundsMatch(bounds, params.filters.bounds, params.filters.boundsMode)) return null;
+    return { summary: summarizePageItem(item, layerPath, bounds), uuid: String(item.uuid) };
+  });
+  if (matched === null) continue;
+  var summary = matched.summary;
   updateSnapshotDigest(snapshotDigestState, stringifyJson(summary));
-  if (matchedCount === params.offset - 1) previousUuid = String(item.uuid);
+  if (matchedCount === params.offset - 1) previousUuid = matched.uuid;
   if (matchedCount >= params.offset && pageItems.length < params.limit) {
     pageItems.push(summary);
   }
@@ -798,26 +816,27 @@ export const GET_OBJECT_SCRIPT = `${OBJECT_READ_HELPERS}${OBJECT_DETAIL_HELPERS}
 var context = requireDocumentForRead(params.expectedDocumentKey);
 var doc = app.activeDocument;
 var found = null;
-for (var itemIndex = 0; itemIndex < doc.pageItems.length; itemIndex++) {
-  var item = doc.pageItems[itemIndex];
-  if (String(item.uuid) === params.uuid) {
+for (var itemIndex = 0; itemIndex < doc.pageItems.length && found === null; itemIndex++) {
+  found = readPageItemAt("document.pageItems", itemIndex, function () {
+    var item = doc.pageItems[itemIndex];
+    if (String(item.uuid) !== params.uuid) return null;
     var layerPath = getLayerPath(doc, item.layer);
     var bounds = item.geometricBounds;
     var visibleBounds = item.visibleBounds;
-    found = summarizePageItem(item, layerPath, bounds);
-    found.visibleBounds = [visibleBounds[0], visibleBounds[1], visibleBounds[2], visibleBounds[3]];
-    found.locked = detailBoolean(item.locked, "locked");
-    found.hidden = detailBoolean(item.hidden, "hidden");
-    found.editable = detailBoolean(item.editable, "editable");
-    found.appearance = readObjectAppearance(item);
-    found.details = readObjectTypeDetails(item);
-    break;
-  }
+    var detail = summarizePageItem(item, layerPath, bounds);
+    detail.visibleBounds = [visibleBounds[0], visibleBounds[1], visibleBounds[2], visibleBounds[3]];
+    detail.locked = detailBoolean(item.locked, "locked");
+    detail.hidden = detailBoolean(item.hidden, "hidden");
+    detail.editable = detailBoolean(item.editable, "editable");
+    detail.appearance = readObjectAppearance(item);
+    detail.details = readObjectTypeDetails(item);
+    return detail;
+  });
 }
 if (found === null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: params.uuid }));
 var result = { document: context, item: found };
 `;
-export const READ_LINE_HEIGHT_SCRIPT = `${OBJECT_READ_HELPERS}
+export const READ_LINE_HEIGHT_SCRIPT = `${OBJECT_READ_HELPERS}${HOST_VERSION_POLICY_JSX}
 function lineHeightNumber(value, propertyName) {
   var number = Number(value);
   if (typeof value !== "number" || isNaN(number) || !isFinite(number)) {
@@ -900,7 +919,7 @@ for (var targetIndex = 0; targetIndex < params.uuids.length; targetIndex++) {
   }
   if (frame === null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: targetUuid }));
   var frameRead;
-  if (String(app.version) === params.expectedAppVersion) frameRead = readMeasuredFrameLineHeight(frame);
+  if (hostVersionAdmitted("line_height_read", String(app.version))) frameRead = readMeasuredFrameLineHeight(frame);
   else frameRead = lineHeightUnavailable("unsupported_host_version");
   frameReads.push({ uuid: targetUuid, read: frameRead });
 }
@@ -1920,13 +1939,17 @@ function structureArtboards(doc, artboardCount) {
 function structureIndexByUuid(doc, totalPageItems) {
   var indexByUuid = {};
   for (var uuidIndex = 0; uuidIndex < totalPageItems; uuidIndex++) {
-    var uuidValue = doc.pageItems[uuidIndex].uuid;
+    var uuidValue = readPageItemAt("document.pageItems", uuidIndex, function () { return doc.pageItems[uuidIndex].uuid; });
     if (uuidValue !== undefined && uuidValue !== null) indexByUuid["u" + String(uuidValue)] = uuidIndex;
   }
   return indexByUuid;
 }
 
 function structureItemRecord(doc, itemIndex) {
+  return readPageItemAt("document.pageItems", itemIndex, function () { return structureItemRecordAt(doc, itemIndex); });
+}
+
+function structureItemRecordAt(doc, itemIndex) {
   var item = doc.pageItems[itemIndex];
   var layerPath = getLayerPath(doc, item.layer);
   var record = summarizePageItem(item, layerPath, structureBounds(item.geometricBounds, "geometricBounds"));
@@ -1939,7 +1962,59 @@ function structureItemRecord(doc, itemIndex) {
   record.text = item.typename === "TextFrame"
     ? structureAvailability(function () { return structureText(item); }, "text_unavailable")
     : null;
+  var areaText = structureAreaTextLayout(item);
+  if (areaText !== null) record.areaText = areaText;
   return record;
+}
+
+/**
+ * An area TextFrame with more than one column: the restore comparison also compares its frame matrix, the text path's
+ * closed flag and points, the area options, the content, the paragraph alignment and the character style runs, on top
+ * of every field it compares for any item (visibleBounds included). Measured on 30.8.2: writing the area options does
+ * not mark the document changed, so a saved document can hold columns its file does not; this is what shows it. An
+ * area frame's textPath.geometricBounds is undefined (error 21), so the text path is read part by part and each part
+ * is kept as available or unavailable with the reason. Any other item, or a frame whose other reads fail, gets nothing.
+ */
+function structureAreaTextLayout(item) {
+  if (item.typename !== "TextFrame") return null;
+  try {
+    if (String(item.kind) !== "TextType.AREATEXT" || !(Number(item.columnCount) > 1)) return null;
+    var matrix = item.matrix;
+    var details = readTextDetails(item);
+    return {
+      matrix: [detailNumber(matrix.mValueA, "matrix.a"), detailNumber(matrix.mValueB, "matrix.b"), detailNumber(matrix.mValueC, "matrix.c"),
+        detailNumber(matrix.mValueD, "matrix.d"), detailNumber(matrix.mValueTX, "matrix.tx"), detailNumber(matrix.mValueTY, "matrix.ty")],
+      textPath: {
+        closed: structureAvailability(function () { return detailBoolean(item.textPath.closed, "textPath.closed"); }, "text_path_unavailable"),
+        points: structureAvailability(function () { return structureTextPathPoints(item.textPath); }, "text_path_unavailable")
+      },
+      options: {
+        columnCount: detailNumber(item.columnCount, "columnCount"), columnGutter: detailNumber(item.columnGutter, "columnGutter"),
+        rowCount: detailNumber(item.rowCount, "rowCount"), rowGutter: detailNumber(item.rowGutter, "rowGutter"),
+        flowLinksHorizontally: detailBoolean(item.flowLinksHorizontally, "flowLinksHorizontally")
+      },
+      content: details.content,
+      paragraphs: details.paragraphs,
+      styleRuns: details.styleRuns
+    };
+  } catch (_layoutError) {
+    return null;
+  }
+}
+
+function structureTextPathPoints(path) {
+  var points = [];
+  for (var pointIndex = 0; pointIndex < path.pathPoints.length; pointIndex++) {
+    var point = path.pathPoints[pointIndex];
+    points.push({ anchor: structurePair(point.anchor, "anchor"), leftDirection: structurePair(point.leftDirection, "leftDirection"),
+      rightDirection: structurePair(point.rightDirection, "rightDirection") });
+  }
+  return points;
+}
+
+function structurePair(value, propertyName) {
+  if (!value || value.length !== 2) throw new Error(propertyName + " is unavailable.");
+  return [detailNumber(value[0], propertyName + "[0]"), detailNumber(value[1], propertyName + "[1]")];
 }
 
 /** Exactly the projection comparableItem() compares: no native UUID, parent named by document position. */
@@ -1950,6 +2025,13 @@ function structureComparableRecord(record, indexByUuid) {
     parent = {
       status: "available",
       value: { kind: "page_item", type: parent.value.type, documentIndex: mapped === undefined ? null : mapped }
+    };
+  }
+  if (record.areaText !== undefined) {
+    return {
+      type: record.type, name: record.name, layer: record.layer, bounds: record.bounds,
+      visibleBounds: record.visibleBounds, documentIndex: record.documentIndex, parent: parent,
+      locked: record.locked, hidden: record.hidden, appearance: record.appearance, text: record.text, areaText: record.areaText
     };
   }
   return {
@@ -2205,7 +2287,7 @@ function exportSessionPaths(session) {
     return [session.workCopyPath, session.stagedPath, session.outputPath];
 }
 async function syncDirectory(path) {
-    const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
+    const handle = await open(path, directoryFlags());
     try {
         await handle.sync();
     }
@@ -2243,7 +2325,11 @@ function preApplyRefusalError(error, adapter) {
     const detail = (error.hostMessage === null ? null : parseMcpError({ message: error.hostMessage })) ??
         parseMcpError({ message: error.audit.message });
     let reason = null;
-    if (detail?.code === 'DOCUMENT_MISMATCH') {
+    const hostReference = error.hostMessage === null ? null : hostReferenceInvalidDetail(error.hostMessage);
+    if (hostReference !== null) {
+        reason = hostReferenceInvalidReason(hostReference);
+    }
+    else if (detail?.code === 'DOCUMENT_MISMATCH') {
         reason = new DocumentMismatchError(detail.expected ?? '', detail.actual ?? '').message;
     }
     else if (adapter !== null && typeof detail?.code === 'string') {
@@ -2568,12 +2654,14 @@ export class IllustratorOperationsCore {
     exportStore;
     hostProfileProbe;
     recipeExecutionAuthorityStore;
+    fontVerifier;
     #operationSafetyRegistry = new OperationSafetyRegistry();
     #structureSnapshots = new StructureSnapshotStore();
     #structureDiffs = new StructureDiffStore();
     #leaseGuard;
+    #saveAs;
     #editSessions;
-    constructor(bridge, cursorSigner = new CursorSigner(), mutationAdapters = defaultMutationOperationRegistry(), recipeAuthorityStore = new M6P0RecipeAuthorityStore(defaultStateRoot()), imageFileInspector = new SipsImageFileInspector(), backupStore = new DocumentBackupStore(defaultStateRoot()), recipeStore = new RecipeStore(defaultStateRoot()), exportStore = new DocumentExportStore(defaultStateRoot()), hostProfileProbe = new OsascriptHostProfileProbe(), recipeExecutionAuthorityStore = new RecipeExecutionAuthorityStore(defaultStateRoot()), editSessionStore = null) {
+    constructor(bridge, cursorSigner = new CursorSigner(), mutationAdapters = defaultMutationOperationRegistry(), recipeAuthorityStore = new M6P0RecipeAuthorityStore(defaultStateRoot()), imageFileInspector = new SipsImageFileInspector(), backupStore = new DocumentBackupStore(defaultStateRoot()), recipeStore = new RecipeStore(defaultStateRoot()), exportStore = new DocumentExportStore(defaultStateRoot()), hostProfileProbe = new OsascriptHostProfileProbe(), recipeExecutionAuthorityStore = new RecipeExecutionAuthorityStore(defaultStateRoot()), editSessionStore = null, saveAsRegistry = null, fontVerifier = new SystemFontVerifier()) {
         this.bridge = bridge;
         this.cursorSigner = cursorSigner;
         this.mutationAdapters = mutationAdapters;
@@ -2584,10 +2672,12 @@ export class IllustratorOperationsCore {
         this.exportStore = exportStore;
         this.hostProfileProbe = hostProfileProbe;
         this.recipeExecutionAuthorityStore = recipeExecutionAuthorityStore;
+        this.fontVerifier = fontVerifier;
         if (!this.mutationAdapters.isSealed()) {
             throw new Error('Illustrator operations require a sealed mutation adapter registry.');
         }
-        this.#leaseGuard = new LeaseGuard(this.backupStore, this.exportStore);
+        this.#saveAs = saveAsRegistry ?? new SaveAsLeaseRegistry(new SaveAsSessionStore(this.exportStore.stateRootPath));
+        this.#leaseGuard = new LeaseGuard(this.backupStore, this.exportStore, this.#saveAs);
         this.#editSessions = new EditSessionCoordinator(editSessionStore ?? new EditSessionStore(defaultStateRoot(), this.#leaseGuard));
         this.bridge.setMutationTerminalObserver?.(this.#editSessions);
         for (const adapter of this.mutationAdapters.list())
@@ -2654,7 +2744,15 @@ export class IllustratorOperationsCore {
         let stage = 'read_document';
         let document = null;
         const files = { stagedPath: null, outputPath: null };
-        const indeterminate = (message, commandId = null) => ({ outcome: 'indeterminate', stage, message, commandId, document, path: files.outputPath ?? files.stagedPath, files: { ...files } });
+        let pendingId = null;
+        const pending = () => (pendingId === null ? {} : {
+            saveAsId: pendingId, nextCall: { tool: 'illustrator_reconcile_save_as', arguments: { save_as_id: pendingId } },
+        });
+        let lastMessage = '';
+        const indeterminate = (message, commandId = null) => {
+            lastMessage = message;
+            return { outcome: 'indeterminate', stage, message, commandId, document, path: files.outputPath ?? files.stagedPath, files: { ...files }, ...pending() };
+        };
         const rejected = (reason, message) => ({ outcome: 'rejected', reason, message, document });
         const describe = (error) => (error instanceof Error ? error.message : String(error));
         const preflight = await this.readLifecycleDocument(input.expectedDocumentKey);
@@ -2667,11 +2765,11 @@ export class IllustratorOperationsCore {
             return rejected('document_not_admitted', document.mutationBlockedReason ?? 'The document path could not be read; save-as is refused.');
         stage = 'validate_path';
         let previousRealPath = null;
-        let previousIdentity = null;
+        let previousFacts = null;
         if (document.fileRevision !== null) {
             try {
                 previousRealPath = await realpath(document.path);
-                previousIdentity = (await readFileFacts(previousRealPath)).identity;
+                previousFacts = await readFileFacts(previousRealPath);
             }
             catch (error) {
                 return rejected('document_not_admitted', `The current document file could not be inspected: ${describe(error)}`);
@@ -2687,170 +2785,519 @@ export class IllustratorOperationsCore {
             throw error;
         }
         const outputPath = output.path;
-        return await withOutputParentScope(output.parent, async (parentScope) => {
-            let staging;
-            try {
-                staging = await createStagingDirectory(output.parent, randomUUID(), outputPath, SAVE_AS_STAGING_PREFIX);
+        const owner = await this.#saveAs.owner();
+        if (owner === null) {
+            return rejected('owner_identity_unavailable', 'The boot session or start time of this MCP server process could not be read, so the save-as could not be recorded durably; nothing was saved.');
+        }
+        const store = this.#saveAs.store;
+        const saveAsId = newSaveAsId();
+        const stagingDirectory = join(output.parent, `${SAVE_AS_STAGING_PREFIX}${saveAsId}`);
+        const stagedPath = join(stagingDirectory, basename(outputPath));
+        let lease = null;
+        let leaseLost = false;
+        const assertOwnLease = async () => {
+            const [session, stopped, abandoned] = await Promise.all([
+                store.read(saveAsId, 'session'), store.read(saveAsId, 'stopped'), store.read(saveAsId, 'abandoned'),
+            ]);
+            if (lease === null || session.state !== 'valid' || session.digest !== lease.digest || session.dev !== lease.dev ||
+                session.ino !== lease.ino || stopped.state !== 'absent' || abandoned.state !== 'absent') {
+                leaseLost = true;
+                throw new SaveAsLeaseChangedError(saveAsId);
             }
-            catch (error) {
-                if (error instanceof ExportPreconditionError)
-                    return rejected(error.reason === 'output_exists' ? 'output_exists' : 'output_path_invalid', error.message);
-                return indeterminate(describe(error));
-            }
-            const stagedPath = staging.stagedPath;
-            const removeEmptyStaging = async () => { await rmdir(staging.directory).catch(() => undefined); };
-            stage = 'save_as';
-            let data;
+        };
+        const releaseUnstarted = async (parentScope) => {
             try {
-                const result = await this.bridge.execute({
-                    kind: 'read',
-                    script: SAVE_DOCUMENT_AS_SCRIPT,
-                    params: { expectedDocumentKey: input.expectedDocumentKey, outputPath: stagedPath },
-                    timeoutMs: LIFECYCLE_HOST_TIMEOUT_MS,
-                    hostGate: {
-                        beforeHost: async () => {
-                            await this.#leaseGuard.assertNoUnresolvedSession();
-                            await parentScope.assertStable();
-                            await assertOutputAbsent(outputPath);
-                            await assertOutputAbsent(stagedPath);
-                        },
-                    },
+                const entries = await readdir(stagingDirectory).catch((error) => {
+                    if (isMissingPath(error))
+                        return [];
+                    throw error;
                 });
-                data = result.data;
+                if (entries.length > 0)
+                    return false;
+                await rmdir(stagingDirectory).catch((error) => { if (!isMissingPath(error))
+                    throw error; });
+                await parentScope.sync();
+                await store.remove(saveAsId, 'session');
+                pendingId = null;
+                return true;
             }
-            catch (error) {
-                if (error instanceof IndeterminateExecutionError) {
-                    files.stagedPath = stagedPath;
-                    return indeterminate(error.message, error.commandId);
-                }
-                if (error instanceof ExportPreconditionError) {
-                    await removeEmptyStaging();
-                    return rejected('output_exists', error.message);
-                }
-                const detail = parseMcpError(error);
-                if (detail?.code === 'DOCUMENT_MISMATCH' || detail?.code === 'DOCUMENT_KEY_AMBIGUOUS') {
-                    await removeEmptyStaging();
-                    return rejected('document_key_mismatch', lifecycleMismatchMessage(detail));
-                }
-                if (detail?.code === 'OUTPUT_EXISTS') {
-                    await removeEmptyStaging();
-                    return rejected('output_exists', `The staging path already exists on the host: ${stagedPath}.`);
-                }
-                if (detail?.code === 'LIFECYCLE_PATH_UNAVAILABLE' || detail?.code === 'LIFECYCLE_INVALID_INPUT') {
-                    await removeEmptyStaging();
-                    return rejected('document_not_admitted', lifecycleDetailMessage(detail));
-                }
-                throw error;
+            catch (_error) {
+                return false;
             }
-            if (data.outcome === 'save_failed') {
-                document = data.document;
-                if (!data.outputExists) {
-                    await removeEmptyStaging();
-                    return { outcome: 'failed', reason: 'save_failed', message: data.message, document, files: { ...files } };
-                }
-                files.stagedPath = stagedPath;
-                return indeterminate(`saveAs threw but the staged file exists: ${data.message}`);
-            }
-            files.stagedPath = stagedPath;
-            if (data.outcome === 'verify_mismatch') {
-                document = data.document;
-                return indeterminate(data.message);
-            }
-            document = data.document;
-            const savedContext = data.document;
-            stage = 'verify_output';
-            let staged;
-            try {
-                staged = await readFileFacts(stagedPath);
-            }
-            catch (error) {
-                return indeterminate(`The staged file could not be verified: ${describe(error)}`);
-            }
-            const revisionSize = fileRevisionSize(savedContext.fileRevision);
-            if (revisionSize === null || revisionSize !== staged.bytes) {
-                return indeterminate(`The host file revision (${String(savedContext.fileRevision)}) does not match the staged file size (${staged.bytes}).`);
-            }
-            let previousFilePreserved = null;
-            if (previousRealPath !== null && previousIdentity !== null) {
+        };
+        this.#saveAs.active.add(saveAsId);
+        try {
+            return await withOutputParentScope(output.parent, async (parentScope) => {
+                stage = 'save_as';
+                let data;
                 try {
-                    previousFilePreserved = sameIdentity(previousIdentity, (await readFileFacts(previousRealPath)).identity);
+                    const result = await this.bridge.execute({
+                        kind: 'read',
+                        script: SAVE_DOCUMENT_AS_SCRIPT,
+                        params: { expectedDocumentKey: input.expectedDocumentKey, outputPath: stagedPath },
+                        timeoutMs: LIFECYCLE_HOST_TIMEOUT_MS,
+                        hostGate: {
+                            beforeHost: async () => {
+                                await this.#leaseGuard.assertNoUnresolvedSession();
+                                await parentScope.assertStable();
+                                await assertOutputAbsent(outputPath);
+                                const parent = await lstat(output.parent, { bigint: true });
+                                const session = {
+                                    version: 3, kind: 'save_as_session', saveAsId, documentKey: document.key, sourcePath: document.path,
+                                    outputPath, stagingDirectory, stagedPath, parent: { dev: parent.dev.toString(), ino: parent.ino.toString() },
+                                    owner, createdAt: new Date().toISOString(),
+                                };
+                                pendingId = saveAsId;
+                                try {
+                                    await store.create('session', session);
+                                }
+                                catch (error) {
+                                    const leaseExists = await lstat(store.path(saveAsId, 'session')).then(() => true, (lstatError) => !isMissingPath(lstatError));
+                                    if (!leaseExists) {
+                                        pendingId = null;
+                                        throw new SaveAsLeaseNotRecordedError(saveAsId, error);
+                                    }
+                                    throw error;
+                                }
+                                const created = await store.read(saveAsId, 'session');
+                                if (created.state !== 'valid')
+                                    throw new Error('The save-as session could not be read back after it was published.');
+                                lease = { digest: created.digest, dev: created.dev, ino: created.ino };
+                                await createStagingDirectory(output.parent, saveAsId, outputPath, SAVE_AS_STAGING_PREFIX);
+                                await parentScope.sync();
+                            },
+                        },
+                    });
+                    data = result.data;
                 }
                 catch (error) {
-                    return indeterminate(`The previous document file could not be re-inspected: ${describe(error)}`);
+                    if (error instanceof IndeterminateExecutionError) {
+                        files.stagedPath = stagedPath;
+                        return indeterminate(error.message, error.commandId);
+                    }
+                    if (error instanceof SaveAsLeaseNotRecordedError)
+                        return { outcome: 'failed', reason: 'save_failed', message: error.message, document, files: { ...files } };
+                    const detail = parseMcpError(error);
+                    const preHost = error instanceof ExportPreconditionError ||
+                        ['DOCUMENT_MISMATCH', 'DOCUMENT_KEY_AMBIGUOUS', 'OUTPUT_EXISTS', 'LIFECYCLE_PATH_UNAVAILABLE', 'LIFECYCLE_INVALID_INPUT'].includes(detail?.code ?? '');
+                    if (pendingId === null) {
+                        if (error instanceof ExportPreconditionError)
+                            return rejected(error.reason === 'output_exists' ? 'output_exists' : 'output_path_invalid', error.message);
+                        throw error;
+                    }
+                    if (!preHost || !(await releaseUnstarted(parentScope))) {
+                        return indeterminate(`The save-as stopped before the host saved anything, but its session could not be released: ${describe(error)}`);
+                    }
+                    if (error instanceof ExportPreconditionError)
+                        return rejected(error.reason === 'output_exists' ? 'output_exists' : 'output_path_invalid', error.message);
+                    if (detail?.code === 'DOCUMENT_MISMATCH' || detail?.code === 'DOCUMENT_KEY_AMBIGUOUS')
+                        return rejected('document_key_mismatch', lifecycleMismatchMessage(detail));
+                    if (detail?.code === 'OUTPUT_EXISTS')
+                        return rejected('output_exists', `The staging path already exists on the host: ${stagedPath}.`);
+                    return rejected('document_not_admitted', lifecycleDetailMessage(detail ?? {}));
                 }
-                if (!previousFilePreserved)
-                    return indeterminate('The previous document file changed during save-as.');
-            }
-            stage = 'publish_output';
-            let publishedIdentity;
-            try {
-                publishedIdentity = await linkStagedToOutput(stagedPath, outputPath, staged, parentScope);
-            }
-            catch (error) {
-                if (error instanceof OutputLinkError)
-                    return { outcome: 'failed', reason: error.reason, message: error.message, document, files: { ...files } };
-                return indeterminate(`The staged file could not be published: ${describe(error)}`);
-            }
-            files.outputPath = outputPath;
-            stage = 'switch_reference';
-            let switched;
-            try {
-                const result = await this.bridge.execute({
-                    kind: 'read',
-                    script: SAVE_AS_SWITCH_SCRIPT,
-                    params: { expectedDocumentKey: savedContext.key, stagedPath, outputPath },
-                    timeoutMs: LIFECYCLE_HOST_TIMEOUT_MS,
-                    hostGate: {
-                        beforeHost: async () => {
-                            await this.#leaseGuard.assertNoUnresolvedSession();
-                            await parentScope.assertStable();
-                            const current = await readFileFacts(outputPath);
-                            if (!sameIdentity(current.identity, publishedIdentity) || current.sha256 !== staged.sha256) {
-                                throw new LifecyclePreconditionError('file_unavailable', 'The published output changed before the document could be switched to it.');
-                            }
+                if (data.outcome === 'save_failed') {
+                    document = data.document;
+                    const stagedGone = await lstat(stagedPath).then(() => false, (error) => isMissingPath(error));
+                    if (!data.outputExists && stagedGone && await releaseUnstarted(parentScope)) {
+                        return { outcome: 'failed', reason: 'save_failed', message: data.message, document, files: { ...files } };
+                    }
+                    files.stagedPath = stagedPath;
+                    return indeterminate(`saveAs threw but the staged file exists or its session could not be released: ${data.message}`);
+                }
+                files.stagedPath = stagedPath;
+                if (data.outcome === 'verify_mismatch') {
+                    document = data.document;
+                    return indeterminate(data.message);
+                }
+                document = data.document;
+                const savedContext = data.document;
+                stage = 'verify_output';
+                let staged;
+                try {
+                    staged = await readFileFacts(stagedPath);
+                }
+                catch (error) {
+                    return indeterminate(`The staged file could not be verified: ${describe(error)}`);
+                }
+                const revisionSize = fileRevisionSize(savedContext.fileRevision);
+                if (revisionSize === null || revisionSize !== staged.bytes) {
+                    return indeterminate(`The host file revision (${String(savedContext.fileRevision)}) does not match the staged file size (${staged.bytes}).`);
+                }
+                let previousFilePreserved = null;
+                if (previousRealPath !== null && previousFacts !== null) {
+                    try {
+                        const current = await readFileFacts(previousRealPath);
+                        previousFilePreserved = sameContentIdentity(previousFacts.identity, current.identity) && current.sha256 === previousFacts.sha256;
+                    }
+                    catch (error) {
+                        return indeterminate(`The previous document file could not be re-inspected: ${describe(error)}`);
+                    }
+                    if (!previousFilePreserved)
+                        return indeterminate('The previous document file changed during save-as.');
+                }
+                stage = 'publish_output';
+                let publishedIdentity;
+                try {
+                    await syncFile(stagedPath);
+                    await syncDirectoryOf(stagingDirectory);
+                    const stagingIdentity = await lstat(stagingDirectory, { bigint: true });
+                    await assertOwnLease();
+                    const publish = {
+                        version: 3, kind: 'save_as_publish', saveAsId, stagedPath, outputPath,
+                        stagingDirectory: { dev: stagingIdentity.dev.toString(), ino: stagingIdentity.ino.toString() },
+                        staged: {
+                            dev: staged.identity.dev.toString(), ino: staged.identity.ino.toString(), bytes: staged.bytes,
+                            mtimeNs: staged.identity.mtimeNs.toString(), sha256: staged.sha256,
                         },
-                    },
-                });
-                switched = result.data;
-            }
-            catch (error) {
-                if (error instanceof IndeterminateExecutionError)
-                    return indeterminate(error.message, error.commandId);
-                if (error instanceof LifecyclePreconditionError)
-                    return indeterminate(error.message);
-                const detail = parseMcpError(error);
-                if (detail?.code !== undefined)
-                    return indeterminate(`The document could not be switched to the published output (${lifecycleDetailMessage(detail)}). It is still open and points at the staged file.`);
-                throw error;
-            }
-            if (switched.outcome !== 'switched') {
-                if (switched.outcome === 'verify_mismatch')
-                    document = switched.document;
-                return indeterminate(`${switched.message} (${switched.outcome}; the output is published at ${outputPath}).`);
-            }
-            document = switched.document;
-            stage = 'cleanup_staging';
-            const removed = await removeStagedFile(stagedPath, publishedIdentity, parentScope);
-            if (removed)
+                        savedDocumentKey: savedContext.key, createdAt: new Date().toISOString(),
+                    };
+                    await store.create('publish', publish);
+                    await assertOwnLease();
+                    publishedIdentity = await linkStagedToOutput(stagedPath, outputPath, staged, parentScope);
+                }
+                catch (error) {
+                    if (error instanceof OutputLinkError) {
+                        lastMessage = error.message;
+                        return { outcome: 'failed', reason: error.reason, message: error.message, document, files: { ...files }, ...pending() };
+                    }
+                    return indeterminate(`The staged file could not be published: ${describe(error)}`);
+                }
+                files.outputPath = outputPath;
+                stage = 'switch_reference';
+                let switched;
+                try {
+                    const result = await this.bridge.execute({
+                        kind: 'read',
+                        script: SAVE_AS_SWITCH_SCRIPT,
+                        params: { expectedDocumentKey: savedContext.key, stagedPath, outputPath },
+                        timeoutMs: LIFECYCLE_HOST_TIMEOUT_MS,
+                        hostGate: {
+                            beforeHost: async () => {
+                                await this.#leaseGuard.assertNoUnresolvedSession({ exceptSaveAsId: saveAsId });
+                                await assertOwnLease();
+                                await parentScope.assertStable();
+                                const current = await readFileFacts(outputPath);
+                                if (!sameContentIdentity(current.identity, publishedIdentity) || current.sha256 !== staged.sha256) {
+                                    throw new LifecyclePreconditionError('file_unavailable', 'The published output changed before the document could be switched to it.');
+                                }
+                            },
+                        },
+                    });
+                    switched = result.data;
+                }
+                catch (error) {
+                    if (error instanceof IndeterminateExecutionError)
+                        return indeterminate(error.message, error.commandId);
+                    if (error instanceof LifecyclePreconditionError || error instanceof SaveAsLeaseChangedError)
+                        return indeterminate(error.message);
+                    const detail = parseMcpError(error);
+                    if (detail?.code !== undefined)
+                        return indeterminate(`The document could not be switched to the published output (${lifecycleDetailMessage(detail)}). It is still open and points at the staged file.`);
+                    return indeterminate(`The document could not be switched to the published output: ${describe(error)}`);
+                }
+                if (switched.outcome !== 'switched') {
+                    if (switched.outcome === 'verify_mismatch')
+                        document = switched.document;
+                    return indeterminate(`${switched.message} (${switched.outcome}; the output is published at ${outputPath}).`);
+                }
+                document = switched.document;
+                stage = 'cleanup_staging';
+                try {
+                    await assertOwnLease();
+                }
+                catch (error) {
+                    return indeterminate(describe(error));
+                }
+                const removal = await removeStagedFile(stagedPath, publishedIdentity, parentScope);
+                if (removal !== 'removed')
+                    return indeterminate(`The staged name could not be removed (${removal}); the output is published at ${outputPath}.`);
                 files.stagedPath = null;
-            let finalFacts;
-            try {
-                finalFacts = await readFileFacts(outputPath);
+                let finalFacts;
+                try {
+                    finalFacts = await readFileFacts(outputPath);
+                }
+                catch (error) {
+                    return indeterminate(`The published output could not be re-read: ${describe(error)}`);
+                }
+                if (finalFacts.sha256 !== staged.sha256 || finalFacts.identity.ino !== publishedIdentity.ino)
+                    return indeterminate('The published output changed after the document was switched to it.');
+                try {
+                    await store.remove(saveAsId, 'session');
+                    pendingId = null;
+                }
+                catch (error) {
+                    return indeterminate(`The save-as session could not be released: ${describe(error)}`);
+                }
+                await store.remove(saveAsId, 'publish').catch(() => undefined);
+                const flags = await this.#saveAs.flags(outputPath);
+                return {
+                    outcome: 'saved',
+                    document: withApplication(switched.document, this.describeApplication(switched.document.appVersion)),
+                    previous: data.previous,
+                    output: serializeFileFacts(finalFacts),
+                    previousFilePreserved,
+                    staging: { directory: stagingDirectory, removed: true },
+                    outputHidden: flags === null ? null : (flags & UF_HIDDEN) !== 0,
+                };
+            });
+        }
+        finally {
+            this.#saveAs.active.delete(saveAsId);
+            if (pendingId !== null && !leaseLost && (await store.read(saveAsId, 'session').catch(() => ({ state: 'invalid' }))).state !== 'absent') {
+                await store.create('stopped', {
+                    version: 3, kind: 'save_as_stopped', saveAsId, stage, message: lastMessage.slice(0, 4_096), createdAt: new Date().toISOString(),
+                }).catch(() => undefined);
             }
-            catch (error) {
-                return indeterminate(`The published output could not be re-read: ${describe(error)}`);
-            }
-            if (finalFacts.sha256 !== staged.sha256 || finalFacts.identity.ino !== publishedIdentity.ino)
-                return indeterminate('The published output changed after the document was switched to it.');
-            return {
-                outcome: 'saved',
-                document: withApplication(switched.document, this.describeApplication(switched.document.appVersion)),
-                previous: data.previous,
-                output: serializeFileFacts(finalFacts),
-                previousFilePreserved,
-                staging: { directory: staging.directory, removed },
-            };
+        }
+    }
+    async reconcileSaveAs(input) {
+        const store = this.#saveAs.store;
+        const { saveAsId, action } = input;
+        const base = (status, message, session) => ({
+            saveAsId, status, action, message,
+            outputPath: session?.outputPath ?? null, stagedPath: session?.stagedPath ?? null, stagingDirectory: session?.stagingDirectory ?? null,
+            documents: null, outputHidden: null, owner: null, retained: null, nextCall: null,
         });
+        const next = (args) => ({ tool: 'illustrator_reconcile_save_as', arguments: { save_as_id: saveAsId, ...args } });
+        const read = await store.read(saveAsId, 'session');
+        if (read.state === 'absent')
+            return base('no_session', `No save-as session ${saveAsId} is unresolved.`, null);
+        if (read.state === 'foreign')
+            throw new Error(`${saveAsId} is an export session; use illustrator_reconcile_export.`);
+        if (read.state === 'invalid') {
+            if (!(await store.isSaveAsLease(saveAsId))) {
+                throw new Error(`${saveAsId}.session.json is not a readable save-as session (${read.reason}); use illustrator_reconcile_export.`);
+            }
+            if (action !== 'abandon' || input.confirmSaveAsId !== saveAsId) {
+                return { ...base('blocked', `The save-as session record is unreadable (${read.reason}). Only action=abandon with confirm_save_as_id equal to save_as_id releases it; stop every other MCP server first, because its owner cannot be checked.`, null), nextCall: next({ action: 'abandon', confirm_save_as_id: saveAsId }) };
+            }
+            await this.abandonSaveAsLease(saveAsId, [], null);
+            return { ...base('abandoned', 'The unreadable save-as session was released without touching any file. Check the output folder for a hidden .illustrator-studio-mcp-save-as- directory yourself.', null), retained: [] };
+        }
+        const session = read.record;
+        const state = await this.#saveAs.state(session);
+        if (state !== 'orphan') {
+            return {
+                ...base('in_progress', state === 'in_progress'
+                    ? `The save-as is still running in MCP server process ${session.owner.pid}; wait for it to finish. Nothing was changed.`
+                    : 'The owner of this save-as could not be checked (its process start time or boot session could not be read). Nothing was changed; stop the other MCP servers and inspect again.', session),
+                owner: { pid: session.owner.pid, processStartedAt: session.owner.processStartedAt },
+            };
+        }
+        const leaseUnchanged = async () => {
+            const current = await store.read(saveAsId, 'session');
+            if (current.state !== 'valid' || current.digest !== read.digest || await this.#saveAs.state(current.record) !== 'orphan') {
+                throw new SaveAsLeaseChangedError(saveAsId);
+            }
+        };
+        let documents;
+        try {
+            const inventory = await this.bridge.execute({
+                kind: 'read',
+                script: SAVE_AS_INVENTORY_SCRIPT,
+                params: { stagedPath: session.stagedPath, outputPath: session.outputPath },
+                hostGate: { beforeHost: leaseUnchanged },
+            });
+            documents = inventory.data.documents;
+        }
+        catch (error) {
+            if (error instanceof IndeterminateExecutionError) {
+                return base('command_locked', `Illustrator is held by command ${error.commandId}. Run illustrator_reconcile for it (a stopped read can be abandoned), then inspect this save-as again.`, session);
+            }
+            if (error instanceof SaveAsLeaseChangedError)
+                return base('retry', error.message, session);
+            throw error;
+        }
+        const publishRead = await store.read(saveAsId, 'publish');
+        const publish = publishRead.state === 'valid' ? publishRead.record : publishRead.state === 'absent' ? null : 'invalid';
+        const facts = await collectSaveAsFacts(session, this.#saveAs.flags);
+        let outputSha256 = null;
+        if (publish !== null && publish !== 'invalid' && facts.output.state === 'present' && !outputIsDataless(facts) &&
+            facts.output.dev.toString() === publish.staged.dev && facts.output.ino.toString() === publish.staged.ino) {
+            try {
+                const hashed = await readFileFacts(session.outputPath);
+                const observedIdentity = { ...hashed.identity, dev: facts.output.dev, ino: facts.output.ino, size: facts.output.size, mtimeNs: facts.output.mtimeNs };
+                if (!sameContentIdentity(hashed.identity, observedIdentity)) {
+                    return base('retry', 'The output changed while it was being read (a sync folder may still be updating it). Nothing was changed; inspect again.', session);
+                }
+                outputSha256 = hashed.sha256;
+            }
+            catch (_error) {
+                return base('retry', 'The output changed while it was being read (a sync folder may still be updating it). Nothing was changed; inspect again.', session);
+            }
+        }
+        const classification = classifySaveAs({ session, publish, facts, documents, outputSha256 });
+        const observed = (status, message) => ({ ...base(status, message, session), documents, outputHidden: outputHiddenOf(facts) });
+        const release = async () => {
+            await leaseUnchanged();
+            await store.remove(saveAsId, 'session');
+            await store.remove(saveAsId, 'publish').catch(() => undefined);
+            await store.remove(saveAsId, 'stopped').catch(() => undefined);
+        };
+        const released = async (message) => {
+            await release();
+            const outputHidden = facts.output.state === 'present' ? await this.waitOutputVisible(session.outputPath) : null;
+            const hint = outputHidden === true ? ' The output still carries the sync folder\'s hidden flag; it normally clears within a few seconds (check it in Finder).' : '';
+            return { ...observed('released', `${message}${hint}`), outputHidden };
+        };
+        try {
+            if (action === 'abandon') {
+                if (input.confirmSaveAsId !== saveAsId)
+                    throw new Error('action=abandon requires confirm_save_as_id equal to save_as_id.');
+                const retained = [];
+                if (facts.staging.state !== 'absent')
+                    retained.push(session.stagingDirectory);
+                if (facts.staged.state === 'present')
+                    retained.push(session.stagedPath);
+                if (facts.output.state === 'present' && publish !== null && publish !== 'invalid' &&
+                    facts.output.dev.toString() === publish.staged.dev && facts.output.ino.toString() === publish.staged.ino)
+                    retained.push(session.outputPath);
+                if (publishRead.state !== 'absent')
+                    retained.push(store.path(saveAsId, 'publish'));
+                const outputHidden = outputHiddenOf(facts);
+                await leaseUnchanged();
+                await this.abandonSaveAsLease(saveAsId, retained, outputHidden);
+                return {
+                    ...observed('abandoned', 'The save-as session was released and every file was left in place. Close a document that points at the staged file without saving it (saving could rewrite the published output through the shared inode), and save it again with illustrator_save_document_as if you need the output.'),
+                    retained, outputHidden,
+                };
+            }
+            switch (classification.status) {
+                case 'not_started': {
+                    await leaseUnchanged();
+                    if (facts.staging.state === 'directory') {
+                        await withOutputParentScope(dirname(session.outputPath), async (scope) => {
+                            await rmdir(session.stagingDirectory);
+                            await scope.sync();
+                        });
+                    }
+                    return await released('The save-as never saved anything; its empty staging directory and session were removed.');
+                }
+                case 'released':
+                    return await released('The save-as had already converged; its session was released.');
+                case 'published_staging_left': {
+                    if (action !== 'cleanup_staging') {
+                        return { ...observed('published_staging_left', `The output ${session.outputPath} is published; only the staging name is left. Run action=cleanup_staging.${documents.some((document) => document.path === session.outputPath) ? '' : ' Then open the output with illustrator_open_document.'}`), nextCall: next({ action: 'cleanup_staging' }) };
+                    }
+                    await leaseUnchanged();
+                    if (facts.staged.state === 'present' && facts.output.state === 'present') {
+                        const identity = { dev: facts.output.dev, ino: facts.output.ino, size: facts.output.size, mtimeNs: facts.output.mtimeNs, ctimeNs: 0n };
+                        const removal = await withOutputParentScope(dirname(session.outputPath), async (scope) => await removeStagedFile(session.stagedPath, identity, scope));
+                        if (removal !== 'removed')
+                            return observed('blocked', `The staging name could not be removed (${removal}); nothing else was changed.`);
+                    }
+                    else {
+                        await withOutputParentScope(dirname(session.outputPath), async (scope) => {
+                            await rmdir(session.stagingDirectory);
+                            await scope.sync();
+                        });
+                    }
+                    return await released(`The staging name was removed; ${session.outputPath} is the only name of the saved file.`);
+                }
+                case 'published_document_on_staging': {
+                    if (action !== 'switch_document') {
+                        return {
+                            ...observed('published_document_on_staging', `The output is published and the document still points at the staged file. Run action=switch_document with confirm_document_key set to ${classification.document.key}: it closes that document without saving and opens the output (nothing is written).`),
+                            nextCall: next({ action: 'switch_document', confirm_document_key: classification.document.key }),
+                        };
+                    }
+                    if (input.confirmDocumentKey !== classification.document.key)
+                        throw new Error('confirm_document_key must equal the key inspect reported for the document on the staged file.');
+                    if (facts.output.state !== 'present' || publish === null || publish === 'invalid')
+                        throw new Error('The published output is not available.');
+                    const hashedIdentity = { dev: facts.output.dev, ino: facts.output.ino, size: facts.output.size, mtimeNs: facts.output.mtimeNs };
+                    let switched;
+                    try {
+                        const result = await this.bridge.execute({
+                            kind: 'read',
+                            script: SAVE_AS_SWITCH_SCRIPT,
+                            params: { expectedDocumentKey: classification.document.key, stagedPath: session.stagedPath, outputPath: session.outputPath },
+                            timeoutMs: LIFECYCLE_HOST_TIMEOUT_MS,
+                            hostGate: {
+                                beforeHost: async () => {
+                                    await leaseUnchanged();
+                                    const parent = await lstat(dirname(session.outputPath), { bigint: true });
+                                    const staging = await lstat(session.stagingDirectory, { bigint: true }).catch((error) => {
+                                        if (isMissingPath(error))
+                                            throw new LifecyclePreconditionError('file_unavailable', 'The staging directory is gone; nothing was switched. Inspect again.');
+                                        throw error;
+                                    });
+                                    if (parent.dev.toString() !== session.parent.dev || parent.ino.toString() !== session.parent.ino ||
+                                        staging.dev.toString() !== publish.stagingDirectory.dev || staging.ino.toString() !== publish.stagingDirectory.ino) {
+                                        throw new LifecyclePreconditionError('file_unavailable', 'The output or staging directory was replaced; nothing was switched.');
+                                    }
+                                    const current = await lstat(session.outputPath, { bigint: true });
+                                    if (current.dev !== hashedIdentity.dev || current.ino !== hashedIdentity.ino || current.size !== hashedIdentity.size || current.mtimeNs !== hashedIdentity.mtimeNs) {
+                                        throw new LifecyclePreconditionError('file_unavailable', 'The output changed after it was verified; nothing was switched.');
+                                    }
+                                },
+                            },
+                        });
+                        switched = result.data;
+                    }
+                    catch (error) {
+                        if (error instanceof IndeterminateExecutionError) {
+                            return observed('command_locked', `The switch did not finish (${error.message}). Run illustrator_reconcile for ${error.commandId} (abandon it once it has stopped), then inspect this save-as again.`);
+                        }
+                        if (error instanceof LifecyclePreconditionError || error instanceof SaveAsLeaseChangedError)
+                            return observed('retry', error.message);
+                        const detail = parseMcpError(error);
+                        if (detail !== null)
+                            return observed('retry', `The document was not switched (${lifecycleDetailMessage(detail)}); inspect again.`);
+                        throw error;
+                    }
+                    if (switched.outcome !== 'switched')
+                        return observed('retry', `The switch ended as ${switched.outcome}: ${switched.message} Inspect again.`);
+                    const identity = { ...hashedIdentity, ctimeNs: 0n };
+                    const removal = await withOutputParentScope(dirname(session.outputPath), async (scope) => await removeStagedFile(session.stagedPath, identity, scope));
+                    if (removal !== 'removed')
+                        return observed('published_staging_left', `The document now points at the output, but the staging name could not be removed (${removal}). Inspect again.`);
+                    return await released(`The document now points at ${session.outputPath} and the staging name was removed.`);
+                }
+                case 'document_modified':
+                    return observed('document_modified', 'The document on the staged file has unsaved changes. In Illustrator, save it under another name (File > Save As) or close it discarding the changes, then inspect again. Do not save it in place: the staged file shares its inode with the published output. action=abandon is the last resort.');
+                case 'saved_not_published':
+                    return { ...observed('saved_not_published', `${classification.reason} The saved file is kept at ${session.stagedPath}; nothing is deleted. Release the session with action=abandon, then close that document without saving and save it again with illustrator_save_document_as.`), nextCall: next({ action: 'abandon', confirm_save_as_id: saveAsId }) };
+                case 'output_not_local':
+                    return observed('output_not_local', 'The output is not downloaded from its sync folder yet, so it is not read. Download it in Finder, then inspect again.');
+                case 'blocked':
+                    return { ...observed('blocked', `${classification.reason} Nothing is changed automatically; only action=abandon (which deletes nothing) releases the session.`), nextCall: next({ action: 'abandon', confirm_save_as_id: saveAsId }) };
+                default: {
+                    const unexpected = classification;
+                    throw new Error(`Unhandled save-as classification ${JSON.stringify(unexpected)}.`);
+                }
+            }
+        }
+        catch (error) {
+            if (error instanceof SaveAsLeaseChangedError)
+                return observed('retry', error.message);
+            throw error;
+        }
+    }
+    async abandonSaveAsLease(saveAsId, retained, outputHidden) {
+        const store = this.#saveAs.store;
+        if (!(await store.isSaveAsLease(saveAsId)))
+            throw new Error(`${saveAsId} is not a save-as session; use illustrator_reconcile_export.`);
+        const abandoned = await store.read(saveAsId, 'abandoned');
+        if (abandoned.state === 'invalid')
+            throw new Error(`The abandoned record of ${saveAsId} is unreadable; nothing was changed.`);
+        if (abandoned.state === 'absent') {
+            await store.create('abandoned', { version: 3, kind: 'save_as_abandoned', saveAsId, retained, outputHidden, createdAt: new Date().toISOString() });
+        }
+        await store.remove(saveAsId, 'session');
+    }
+    async waitOutputVisible(outputPath) {
+        for (let attempt = 0;; attempt += 1) {
+            const flags = await this.#saveAs.flags(outputPath);
+            if (flags === null)
+                return null;
+            if ((flags & UF_HIDDEN) === 0)
+                return false;
+            if (attempt >= 12)
+                return true;
+            await new Promise((resolve) => { setTimeout(resolve, 250); });
+        }
     }
     async saveDocument(input) {
         let stage = 'read_document';
@@ -2880,6 +3327,9 @@ export class IllustratorOperationsCore {
             if (error instanceof LifecyclePreconditionError)
                 return rejected(error.reason === 'source_file_unavailable' ? 'source_file_unavailable' : 'document_not_admitted', error.message);
             throw error;
+        }
+        if ((await lstat(document.path)).nlink !== 1) {
+            return rejected('document_not_admitted', 'This file shares its content with another name (a hard link, for example a staging file left by an interrupted illustrator_save_document_as). Saving in place could change the other file too; save it under a new name with illustrator_save_document_as instead.');
         }
         stage = 'verify_backup';
         let record;
@@ -2957,7 +3407,7 @@ export class IllustratorOperationsCore {
                     beforeHost: async () => {
                         await this.#leaseGuard.assertNoUnresolvedSession();
                         const current = await readFileFacts(sourceReal);
-                        if (!sameIdentity(current.identity, sourceFacts.identity) || current.sha256 !== sourceFacts.sha256) {
+                        if (!sameContentIdentity(current.identity, sourceFacts.identity) || current.sha256 !== sourceFacts.sha256) {
                             throw new LifecyclePreconditionError('backup_stale', 'The document file changed after the backup was verified; save is refused.');
                         }
                         const sessionNow = await this.#editSessions.store.findActiveForPath(sourceReal);
@@ -3016,7 +3466,7 @@ export class IllustratorOperationsCore {
             let unchanged = false;
             try {
                 const current = await readFileFacts(sourceReal);
-                unchanged = sameIdentity(current.identity, sourceFacts.identity) && current.sha256 === sourceFacts.sha256;
+                unchanged = sameContentIdentity(current.identity, sourceFacts.identity) && current.sha256 === sourceFacts.sha256;
             }
             catch {
                 unchanged = false;
@@ -3170,7 +3620,7 @@ export class IllustratorOperationsCore {
         if (fileBefore !== null && fileReal !== null) {
             try {
                 const after = await readFileFacts(fileReal);
-                filePreserved = sameIdentity(fileBefore.identity, after.identity) && after.sha256 === fileBefore.sha256;
+                filePreserved = sameContentIdentity(fileBefore.identity, after.identity) && after.sha256 === fileBefore.sha256;
             }
             catch (error) {
                 return indeterminate(`The closed document's file could not be re-inspected: ${error instanceof Error ? error.message : String(error)}`);
@@ -3244,7 +3694,12 @@ export class IllustratorOperationsCore {
         if (parsed.fonts.length !== names.length || parsed.fonts.some((entry, index) => entry.requested !== names[index])) {
             throw new Error('Font lookup did not answer exactly the requested names.');
         }
-        return parsed;
+        const resolved = parsed.fonts.filter((entry) => entry.status === 'installed').map((entry) => entry.requested);
+        const verification = resolved.length === 0 ? {}
+            : await this.fontVerifier.verify(resolved, this.bridge.applicationTarget?.()?.bundleId ?? null);
+        return fontLookupResultSchema.parse({ complete: true, fonts: parsed.fonts.map((entry) => entry.status === 'installed' && !verification[entry.requested]
+                ? { requested: entry.requested, status: 'unverified', font: entry.font, reason: 'not_found_outside_illustrator' }
+                : entry) });
     }
     async getPathPoints(input) {
         let data;
@@ -3283,6 +3738,36 @@ export class IllustratorOperationsCore {
             throw error;
         }
         return getAreaTextOptionsResultSchema.parse(data);
+    }
+    async auditTypography(input) {
+        if (input.targetUuids !== undefined && new Set(input.targetUuids).size !== input.targetUuids.length) {
+            throw new Error('target_uuids must not repeat a UUID.');
+        }
+        let data;
+        try {
+            const result = await this.bridge.execute({
+                kind: 'read', script: AUDIT_JAPANESE_TYPOGRAPHY_SCRIPT, hostGate: this.reportingReadGate(),
+                params: { expectedDocumentKey: input.expectedDocumentKey, targetUuids: input.targetUuids ?? null },
+            });
+            data = result.data;
+        }
+        catch (error) {
+            const detail = parseMcpError(error);
+            if (detail?.code === 'DOCUMENT_MISMATCH')
+                throw new DocumentMismatchError(detail.expected ?? '', detail.actual ?? '');
+            if (detail?.code === 'OBJECT_NOT_FOUND')
+                throw new ObjectNotFoundError(detail.uuid ?? '');
+            const message = jpAuditErrorMessage(detail);
+            if (message !== null)
+                throw new Error(message);
+            throw error;
+        }
+        return judgeJapaneseTypography(jpAuditHostDataSchema.parse(data), {
+            lineStartRelaxations: input.lineStartRelaxations,
+            halfwidthPunctuation: input.halfwidthPunctuation,
+            protectedTerms: [...new Set(input.protectedTerms)],
+            maxFindings: input.maxFindings,
+        });
     }
     async listObjects(input) {
         const filters = {
@@ -3371,10 +3856,10 @@ export class IllustratorOperationsCore {
             const result = await this.bridge.execute({
                 kind: 'read',
                 script: READ_LINE_HEIGHT_SCRIPT, hostGate: this.reportingReadGate(),
-                params: { ...input, expectedAppVersion: MEASURED_LINE_HEIGHT_APP_VERSION },
+                params: input,
             });
             if (!documentKeyMatches(input.expectedDocumentKey, result.data.document.key) ||
-                result.data.document.appVersion !== MEASURED_LINE_HEIGHT_APP_VERSION) {
+                !hostVersionAdmitted('line_height_read', result.data.document.appVersion)) {
                 throw new StaleCursorError('The active document changed during line-height inspection.');
             }
             const reads = new Map(result.data.frames.map((entry) => [entry.uuid, entry.read]));
@@ -3755,7 +4240,7 @@ export class IllustratorOperationsCore {
                 lineHeightReads.set(uuid, read);
         return createDesignTokens({ snapshot: first, swatches, textDetails, format: input.format,
             lineHeightForeground: lineHeightStableProfile, lineHeightReads,
-            lineHeightUnavailableReason: first.document.appVersion === MEASURED_LINE_HEIGHT_APP_VERSION
+            lineHeightUnavailableReason: hostVersionAdmitted('line_height_read', first.document.appVersion)
                 ? 'foreground_profile_required' : 'unsupported_host_version' });
     }
     async readColorReplacementState(expectedDocumentKey, match, includeTextDetails) {
@@ -3999,7 +4484,7 @@ export class IllustratorOperationsCore {
         let stage = 'read_source';
         let sessionId = null;
         const indeterminate = (message, commandId = null) => ({ outcome: 'indeterminate', stage, message, commandId, files, sessionId });
-        const failed = (reason, message, deltas = []) => ({ outcome: 'failed', reason, stage, message, files, deltas });
+        const failed = (reason, message, deltas = [], cause = null) => ({ outcome: 'failed', reason, stage, message, files, deltas, ...(cause === null ? {} : { cause }) });
         const asIndeterminate = (error) => {
             if (error instanceof IndeterminateExecutionError)
                 return indeterminate(error.message, error.commandId);
@@ -4218,7 +4703,7 @@ export class IllustratorOperationsCore {
                     return failed('source_changed', error.message);
                 throw error;
             }
-            if (sourceAfter.path !== sourceFile.path || !sameFileIdentity(sourceAfter.identity, sourceFile.identity)) {
+            if (sourceAfter.path !== sourceFile.path || !await sameFileOrSameBytes(sourceFile.path, sourceAfter.identity, sourceFile.identity, copied.sha256)) {
                 return failed('source_changed', 'The source file changed during the backup.');
             }
             if (readFailure !== null) {
@@ -4226,6 +4711,7 @@ export class IllustratorOperationsCore {
                 return failed('restore_test_read_failed', readFailure);
             }
             let deltas = [];
+            let cause = null;
             if (restoredRecords !== null) {
                 stage = 'compare_structure';
                 let sourceRecords;
@@ -4244,9 +4730,17 @@ export class IllustratorOperationsCore {
                     return failed('source_changed', `The source records could not be read for the comparison: ${error instanceof Error ? error.message : String(error)}`);
                 }
                 deltas = compareRestoredStructure(sourceRecords, restoredRecords);
+                if (deltas.length > 0)
+                    cause = explainRestoredStructure(sourceRecords, restoredRecords);
             }
             if (deltas.length > 0) {
                 stage = 'compare_structure';
+                if (cause !== null) {
+                    const detail = cause.code === EMPTY_COMPOUND_DROPPED_ON_SAVE
+                        ? 'empty compound paths (inverted bounds) that Illustrator does not write to the file'
+                        : 'multi-column area text frames whose columns the saved file does not hold (writing them did not mark the document changed)';
+                    return failed('restore_structure_mismatch', `The restored copy differs from the source only by ${cause.items.length} item(s): ${detail}.`, deltas, cause);
+                }
                 return failed('restore_structure_mismatch', `The restored copy differs from the source in ${deltas.length} field(s).`, deltas);
             }
             stage = 'write_record';
@@ -4571,48 +5065,14 @@ export class IllustratorOperationsCore {
         await this.exportStore.releaseSession(session.exportId);
     }
     async exportOutlined(input) {
-        const files = { workCopyPath: null, stagedPath: null, outputPath: null };
-        let stage = 'read_source';
-        let sessionId = null;
         let outlineSummary = null;
-        const indeterminate = (message, commandId = null) => ({ outcome: 'indeterminate', stage, message, commandId, files, sessionId });
-        const failed = (reason, message) => ({ outcome: 'failed', reason, stage, message, files, outline: outlineSummary });
         const rejected = (reason, message, document = null, availablePresets = null) => ({ outcome: 'rejected', reason, message, document, availablePresets });
-        const asIndeterminate = (error) => {
-            if (error instanceof IndeterminateExecutionError)
-                return indeterminate(error.message, error.commandId);
-            return indeterminate(error instanceof Error ? error.message : String(error));
-        };
-        const isLeaseError = (error) => error instanceof BackupSessionUnresolvedError || error instanceof ExportSessionUnresolvedError || error instanceof UnresolvedLeaseError;
-        let source;
-        try {
-            const result = await this.bridge.execute({
-                kind: 'read',
-                script: EXPORT_READ_SOURCE_SCRIPT,
-                params: { expectedDocumentKey: input.expectedDocumentKey },
-                hostGate: { beforeHost: async () => { await this.#leaseGuard.assertNoUnresolvedSession(); } },
-            });
-            source = result.data;
-        }
-        catch (error) {
-            if (isLeaseError(error))
-                throw error;
-            if (error instanceof IndeterminateExecutionError)
-                return asIndeterminate(error);
-            const detail = parseExportHostError(error);
-            if (detail?.code === 'DOCUMENT_MISMATCH') {
-                return rejected('document_key_mismatch', `The active document key does not match expected_document_key (${detail.actual === undefined ? 'unknown' : String(detail.actual)}).`);
-            }
-            throw error;
-        }
-        if (!documentKeyMatches(input.expectedDocumentKey, source.document.key)) {
-            return rejected('document_key_mismatch', 'Illustrator reported a different document key than expected.');
-        }
-        const document = source.document;
-        const admittedKey = document.key;
-        if (document.mutationProfile !== 'saved_file' || document.path === null || document.fileRevision === null) {
-            return rejected('document_not_admitted', document.mutationBlockedReason ?? EXPORT_REQUIRES_SAVED_FILE_MESSAGE, document);
-        }
+        const read = await this.readExportSource(input.expectedDocumentKey, true);
+        if (read.kind === 'indeterminate')
+            return { outcome: 'indeterminate', stage: 'read_source', message: read.message, commandId: read.commandId, files: { workCopyPath: null, stagedPath: null, outputPath: null }, sessionId: null };
+        if (read.kind === 'rejected')
+            return rejected(read.reason, read.message, read.document);
+        const { source, document } = read;
         if (source.artboards.length === 0)
             return rejected('document_not_admitted', 'The document has no artboards.', document);
         let pdfPreset = null;
@@ -4627,6 +5087,249 @@ export class IllustratorOperationsCore {
         else if (input.pdfPreset !== undefined) {
             return rejected('pdf_preset_unknown', 'pdf_preset applies to format "pdf" only; omit it for format "ai".', document, source.pdfPresets);
         }
+        let outlined = null;
+        const run = await this.runWorkCopyExport({
+            expectedDocumentKey: input.expectedDocumentKey,
+            format: input.format,
+            outputPath: input.outputPath,
+            source,
+            document,
+            prepare: async ({ workCopyPath, opened }) => {
+                let data;
+                try {
+                    const result = await this.bridge.execute({
+                        kind: 'read',
+                        script: EXPORT_OUTLINE_SCRIPT,
+                        params: { workCopyPath, workCopyKey: opened.opened.key },
+                        timeoutMs: EXPORT_HOST_TIMEOUT_MS,
+                    });
+                    data = result.data;
+                }
+                catch (error) {
+                    return { indeterminate: error };
+                }
+                outlined = data;
+                outlineSummary = { textFramesBefore: data.textFramesBefore, textFramesAfter: data.textFramesAfter, errors: data.errors };
+                let failure = null;
+                if (data.errors.length > 0) {
+                    failure = `${data.errors.length} text frame(s) could not be outlined (first: ${data.errors[0].message}).`;
+                }
+                else if (data.restoreErrors.length > 0) {
+                    const first = data.restoreErrors[0];
+                    failure = `${data.restoreErrors.length} layer restoration(s) failed (first: ${first.layer} ${first.attribute}: ${first.message}).`;
+                }
+                else if (data.textFramesAfter !== 0) {
+                    failure = `${data.textFramesAfter} text frame(s) remain after outlining.`;
+                }
+                else if (deepDifferences(source.artboards, data.artboards, '$.artboards').length > 0) {
+                    failure = 'The artboards changed during outlining.';
+                }
+                else if (deepDifferences(source.layers, data.layers, '$.layers').length > 0) {
+                    failure = 'The layer lock or visibility state was not restored after outlining.';
+                }
+                return { failure, workCopyKey: data.workCopy.key };
+            },
+            saveScript: EXPORT_SAVE_OUTPUT_SCRIPT,
+            savePreAttemptCodes: EXPORT_SAVE_PRE_ATTEMPT_CODES,
+            saveParams: ({ workCopyPath, workCopyKey, stagedPath, outputPath }) => ({ workCopyPath, workCopyKey, stagedPath, outputPath, format: input.format, pdfPreset }),
+            verify: async (stagedPath, stagingDirectory) => await verifyOutputFile(stagedPath, source.artboards.length, () => syncDirectory(stagingDirectory)),
+            finish: async ({ exportId, sourcePath, sourceFileRevision, verification, published, workCopyPath, workCopyRemoved, stagingDirectory, outputPath }) => {
+                const outline = outlined;
+                const record = {
+                    version: 1,
+                    exportId,
+                    documentKey: input.expectedDocumentKey,
+                    sourcePath,
+                    sourceName: document.name,
+                    sourceFileRevision,
+                    format: input.format,
+                    outputPath,
+                    bytes: verification.bytes,
+                    sha256: verification.sha256,
+                    outputIdentity: serializeFileIdentity(published.identity),
+                    pdfPreset,
+                    outline: {
+                        textFramesBefore: outline.textFramesBefore,
+                        textFramesAfter: outline.textFramesAfter,
+                        groupItemsAdded: outline.counts.groupItems - source.counts.groupItems,
+                        pageItemsBefore: source.counts.pageItems,
+                        pageItemsAfter: outline.counts.pageItems,
+                    },
+                    verification: {
+                        method: 'pdf_header_scan',
+                        header: verification.header,
+                        pageObjects: verification.pageObjects,
+                        artboardCount: source.artboards.length,
+                        fontObjects: verification.fontObjects,
+                    },
+                    workCopy: { path: workCopyPath, removed: workCopyRemoved },
+                    staging: { directory: stagingDirectory, removed: published.stagingRemoved },
+                    sourcePreserved: true,
+                    createdAt: new Date().toISOString(),
+                };
+                const recordPath = await this.exportStore.writeRecord(record);
+                return { record, recordPath };
+            },
+        });
+        const { outcome, files, sessionId } = run;
+        switch (outcome.kind) {
+            case 'published': return { outcome: 'verified', record: outcome.value.record, recordPath: outcome.value.recordPath, retention: 'manual' };
+            case 'rejected': return rejected(outcome.reason, outcome.message, document);
+            case 'failed': return { outcome: 'failed', reason: outcome.reason, stage: outcome.stage, message: outcome.message, files, outline: outlineSummary };
+            case 'indeterminate': return { outcome: 'indeterminate', stage: outcome.stage, message: outcome.message, commandId: outcome.commandId, files, sessionId };
+        }
+    }
+    async exportPdf(input) {
+        const started = performance.now();
+        const elapsed = () => Math.round(performance.now() - started);
+        const rejected = (reason, message, document = null, availablePresets = null) => ({ outcome: 'rejected', reason, message, document, availablePresets });
+        const read = await this.readExportSource(input.expectedDocumentKey, input.apply);
+        if (read.kind === 'indeterminate') {
+            return { outcome: 'indeterminate', stage: 'read_source', message: read.message, commandId: read.commandId, files: { workCopyPath: null, stagedPath: null, outputPath: null }, sessionId: null };
+        }
+        if (read.kind === 'rejected')
+            return rejected(read.reason, read.message, read.document);
+        const { source, document } = read;
+        if (source.artboards.length === 0)
+            return rejected('document_not_admitted', 'The document has no artboards.', document);
+        const plan = planPdfExport(input, document, source.artboards, source.pdfPresets);
+        if ('reason' in plan)
+            return rejected(plan.reason, plan.message, document, plan.reason === 'pdf_preset_unknown' ? source.pdfPresets : null);
+        const preset = presetReport(plan.preset);
+        if (!input.apply) {
+            try {
+                const sourceRealPath = await realpath(document.path);
+                await validateOutputPath(input.outputPath, 'pdf', sourceRealPath, this.exportStore.stateRootPath);
+            }
+            catch (error) {
+                if (error instanceof ExportPreconditionError)
+                    return rejected(error.reason, error.message, document);
+                return rejected('source_file_unavailable', `The source file could not be resolved: ${error instanceof Error ? error.message : String(error)}`, document);
+            }
+            return {
+                outcome: 'planned',
+                document,
+                plan: { preset, artboardRange: plan.artboardRange, pages: plan.pages, marks: plan.marks, bleed: plan.bleed, outputPath: plan.outputPath, planDigest: plan.planDigest },
+                nextCall: {
+                    expected_document_key: input.expectedDocumentKey,
+                    output_path: plan.outputPath,
+                    pdf_preset: plan.preset,
+                    artboards: plan.artboardRange,
+                    marks: { trim: plan.marks.trim, registration: plan.marks.registration, color_bars: plan.marks.colorBars, page_information: plan.marks.pageInformation, style: plan.marks.style },
+                    bleed: { ...plan.bleed },
+                    apply: true,
+                    expected_plan_digest: plan.planDigest,
+                },
+                hostCalls: 1,
+                durationMs: elapsed(),
+            };
+        }
+        if (input.expectedPlanDigest !== plan.planDigest) {
+            return rejected('plan_stale', input.expectedPlanDigest === undefined
+                ? 'apply requires expected_plan_digest from the plan (apply=false); call the plan first and apply with its nextCall.'
+                : 'The document, its file revision, its artboards or the requested options no longer match the plan; plan again.', document);
+        }
+        let structure = null;
+        const run = await this.runWorkCopyExport({
+            expectedDocumentKey: input.expectedDocumentKey,
+            format: 'pdf',
+            outputPath: input.outputPath,
+            source,
+            document,
+            saveScript: PDF_EXPORT_SAVE_SCRIPT,
+            savePreAttemptCodes: PDF_EXPORT_SAVE_PRE_ATTEMPT_CODES,
+            saveParams: ({ workCopyPath, workCopyKey, stagedPath, outputPath }) => ({ workCopyPath, workCopyKey, stagedPath, outputPath, ...pdfSaveParams(plan, source.artboards) }),
+            verify: async (stagedPath, stagingDirectory) => {
+                const verification = await verifyOutputFile(stagedPath, null, () => syncDirectory(stagingDirectory));
+                structure = await verifyPdfStructure(stagedPath, plan);
+                return verification;
+            },
+            finish: async (context) => context,
+        });
+        const { outcome, files, sessionId } = run;
+        const hostCalls = run.hostCalls + 1;
+        switch (outcome.kind) {
+            case 'rejected': return rejected(outcome.reason, outcome.message, document);
+            case 'failed':
+                if (outcome.reason === 'outline_incomplete')
+                    throw new Error('PDF export has no outline stage.');
+                return { outcome: 'failed', reason: outcome.reason, stage: outcome.stage, message: outcome.message, files };
+            case 'indeterminate': return { outcome: 'indeterminate', stage: outcome.stage, message: outcome.message, commandId: outcome.commandId, files, sessionId };
+            case 'published': {
+                const verified = structure;
+                if (verified === null)
+                    throw new Error('The PDF structure was not recorded before publication.');
+                const { verification, published, workCopyPath, workCopyRemoved, stagingDirectory, outputPath } = outcome.value;
+                return {
+                    outcome: 'verified',
+                    outputPath,
+                    bytes: verification.bytes,
+                    sha256: verification.sha256,
+                    preset,
+                    artboardRange: plan.artboardRange,
+                    marks: plan.marks,
+                    bleed: plan.bleed,
+                    pages: plan.pages.map((page, index) => ({
+                        ...page, mediaBox: verified.pages[index].mediaBox, trimBox: verified.pages[index].trimBox, bleedBox: verified.pages[index].bleedBox,
+                    })),
+                    pdf: pdfFacts(verified),
+                    workCopy: { path: workCopyPath, removed: workCopyRemoved },
+                    staging: { directory: stagingDirectory, removed: published.stagingRemoved },
+                    sourcePreserved: true,
+                    hostCalls,
+                    durationMs: elapsed(),
+                };
+            }
+        }
+    }
+    async readExportSource(expectedDocumentKey, leaseCheck) {
+        let source;
+        try {
+            const result = await this.bridge.execute({
+                kind: 'read',
+                script: EXPORT_READ_SOURCE_SCRIPT,
+                params: { expectedDocumentKey },
+                ...(leaseCheck ? { hostGate: { beforeHost: async () => { await this.#leaseGuard.assertNoUnresolvedSession(); } } } : {}),
+            });
+            source = result.data;
+        }
+        catch (error) {
+            if (error instanceof BackupSessionUnresolvedError || error instanceof ExportSessionUnresolvedError || error instanceof UnresolvedLeaseError)
+                throw error;
+            if (error instanceof IndeterminateExecutionError)
+                return { kind: 'indeterminate', message: error.message, commandId: error.commandId };
+            const detail = parseExportHostError(error);
+            if (detail?.code === 'DOCUMENT_MISMATCH') {
+                return { kind: 'rejected', reason: 'document_key_mismatch', message: `The active document key does not match expected_document_key (${detail.actual === undefined ? 'unknown' : String(detail.actual)}).`, document: null };
+            }
+            throw error;
+        }
+        if (!documentKeyMatches(expectedDocumentKey, source.document.key)) {
+            return { kind: 'rejected', reason: 'document_key_mismatch', message: 'Illustrator reported a different document key than expected.', document: null };
+        }
+        const document = source.document;
+        if (document.mutationProfile !== 'saved_file' || document.path === null || document.fileRevision === null) {
+            return { kind: 'rejected', reason: 'document_not_admitted', message: document.mutationBlockedReason ?? EXPORT_REQUIRES_SAVED_FILE_MESSAGE, document };
+        }
+        return { kind: 'read', source, document };
+    }
+    async runWorkCopyExport(spec) {
+        const files = { workCopyPath: null, stagedPath: null, outputPath: null };
+        let stage = 'read_source';
+        let sessionId = null;
+        let hostCalls = 0;
+        const done = (outcome) => ({ outcome, files, sessionId, hostCalls });
+        const indeterminate = (message, commandId = null) => done({ kind: 'indeterminate', stage, message, commandId });
+        const failed = (reason, message) => done({ kind: 'failed', reason, stage, message });
+        const rejected = (reason, message) => done({ kind: 'rejected', reason, message });
+        const asIndeterminate = (error) => {
+            if (error instanceof IndeterminateExecutionError)
+                return indeterminate(error.message, error.commandId);
+            return indeterminate(error instanceof Error ? error.message : String(error));
+        };
+        const isLeaseError = (error) => error instanceof BackupSessionUnresolvedError || error instanceof ExportSessionUnresolvedError || error instanceof UnresolvedLeaseError;
+        const { source, document } = spec;
+        const admittedKey = document.key;
         const sourcePath = document.path;
         const sourceFileRevision = document.fileRevision;
         let sourceFile;
@@ -4636,14 +5339,14 @@ export class IllustratorOperationsCore {
             sourceFile = await inspectSourceFile(sourcePath);
             await this.exportStore.ensure();
             exportRoot = await resolveBackupRoot(this.exportStore.recordDirectory);
-            output = await validateOutputPath(input.outputPath, input.format, sourceFile.path, this.exportStore.stateRootPath);
+            output = await validateOutputPath(spec.outputPath, spec.format, sourceFile.path, this.exportStore.stateRootPath);
         }
         catch (error) {
             if (error instanceof BackupPreconditionError) {
-                return rejected(error.reason === 'backup_root_unavailable' ? 'export_root_unavailable' : 'source_file_unavailable', error.message, document);
+                return rejected(error.reason === 'backup_root_unavailable' ? 'export_root_unavailable' : 'source_file_unavailable', error.message);
             }
             if (error instanceof ExportPreconditionError)
-                return rejected(error.reason, error.message, document);
+                return rejected(error.reason, error.message);
             throw error;
         }
         return await withBackupRootScope(exportRoot, async (rootScope) => await withOutputParentScope(output.parent, async (parentScope) => {
@@ -4669,7 +5372,7 @@ export class IllustratorOperationsCore {
             }
             catch (error) {
                 if (error instanceof ExportPreconditionError)
-                    return rejected(error.reason, error.message, document);
+                    return rejected(error.reason, error.message);
                 return asIndeterminate(error);
             }
             const stagedPath = staging.stagedPath;
@@ -4678,6 +5381,7 @@ export class IllustratorOperationsCore {
             let session = null;
             let opened;
             try {
+                hostCalls += 1;
                 const result = await this.bridge.execute({
                     kind: 'read',
                     script: EXPORT_OPEN_WORK_COPY_SCRIPT,
@@ -4694,9 +5398,9 @@ export class IllustratorOperationsCore {
                             const lease = {
                                 version: 1,
                                 exportId,
-                                documentKey: input.expectedDocumentKey,
+                                documentKey: spec.expectedDocumentKey,
                                 sourcePath: sourceFile.path,
-                                format: input.format,
+                                format: spec.format,
                                 workCopyPath,
                                 workCopyIdentity: serializeFileIdentity(copied.identity),
                                 stagingDirectory: staging.directory,
@@ -4736,7 +5440,7 @@ export class IllustratorOperationsCore {
                     if (error instanceof BackupCopyError)
                         return failed('file_replaced', error.message);
                     if (error instanceof ExportPreconditionError)
-                        return rejected(error.reason, error.message, document);
+                        return rejected(error.reason, error.message);
                     return asIndeterminate(error);
                 }
                 if (error instanceof IndeterminateExecutionError)
@@ -4761,48 +5465,28 @@ export class IllustratorOperationsCore {
                 opened.opened.key === admittedKey || opened.documentCountAfter !== opened.documentCountBefore + 1) {
                 return indeterminate('Illustrator reported an unexpected document inventory after opening the work copy.');
             }
-            stage = 'outline';
-            let outlined;
-            try {
-                const result = await this.bridge.execute({
-                    kind: 'read',
-                    script: EXPORT_OUTLINE_SCRIPT,
-                    params: { workCopyPath, workCopyKey: opened.opened.key },
-                    timeoutMs: EXPORT_HOST_TIMEOUT_MS,
-                });
-                outlined = result.data;
+            let prepareFailure = null;
+            let workCopyKey = opened.opened.key;
+            if (spec.prepare !== undefined) {
+                stage = 'outline';
+                hostCalls += 1;
+                const prepared = await spec.prepare({ workCopyPath, opened });
+                if ('indeterminate' in prepared)
+                    return asIndeterminate(prepared.indeterminate);
+                prepareFailure = prepared.failure;
+                workCopyKey = prepared.workCopyKey;
             }
-            catch (error) {
-                return asIndeterminate(error);
-            }
-            outlineSummary = { textFramesBefore: outlined.textFramesBefore, textFramesAfter: outlined.textFramesAfter, errors: outlined.errors };
-            let outlineFailure = null;
-            if (outlined.errors.length > 0) {
-                outlineFailure = `${outlined.errors.length} text frame(s) could not be outlined (first: ${outlined.errors[0].message}).`;
-            }
-            else if (outlined.restoreErrors.length > 0) {
-                const first = outlined.restoreErrors[0];
-                outlineFailure = `${outlined.restoreErrors.length} layer restoration(s) failed (first: ${first.layer} ${first.attribute}: ${first.message}).`;
-            }
-            else if (outlined.textFramesAfter !== 0) {
-                outlineFailure = `${outlined.textFramesAfter} text frame(s) remain after outlining.`;
-            }
-            else if (deepDifferences(source.artboards, outlined.artboards, '$.artboards').length > 0) {
-                outlineFailure = 'The artboards changed during outlining.';
-            }
-            else if (deepDifferences(source.layers, outlined.layers, '$.layers').length > 0) {
-                outlineFailure = 'The layer lock or visibility state was not restored after outlining.';
-            }
-            let closeTarget = { path: workCopyPath, key: outlined.workCopy.key };
+            let closeTarget = { path: workCopyPath, key: workCopyKey };
             let saved = null;
             let saveFailure = null;
-            if (outlineFailure === null) {
+            if (prepareFailure === null) {
                 stage = 'save_output';
                 try {
+                    hostCalls += 1;
                     const result = await this.bridge.execute({
                         kind: 'read',
-                        script: EXPORT_SAVE_OUTPUT_SCRIPT,
-                        params: { workCopyPath, workCopyKey: outlined.workCopy.key, stagedPath, outputPath: output.path, format: input.format, pdfPreset },
+                        script: spec.saveScript,
+                        params: spec.saveParams({ workCopyPath, workCopyKey, stagedPath, outputPath: output.path }),
                         timeoutMs: EXPORT_HOST_TIMEOUT_MS,
                         hostGate: {
                             beforeHost: async () => {
@@ -4826,7 +5510,7 @@ export class IllustratorOperationsCore {
                         if (detail?.code === 'EXPORT_WORK_COPY_NOT_UNIQUE' || detail?.code === 'EXPORT_WORK_COPY_IDENTITY_MISMATCH') {
                             return asIndeterminate(error);
                         }
-                        if (detail?.code !== undefined && EXPORT_SAVE_PRE_ATTEMPT_CODES.includes(detail.code)) {
+                        if (detail?.code !== undefined && spec.savePreAttemptCodes.includes(detail.code)) {
                             saveFailure = `The save was refused before any write (${detail.code}).`;
                         }
                         else if (detail?.code === EXPORT_SAVE_FAILED_CODE) {
@@ -4852,7 +5536,7 @@ export class IllustratorOperationsCore {
             if (saved !== null) {
                 stage = 'verify_output';
                 try {
-                    verification = await verifyOutputFile(stagedPath, source.artboards.length, () => syncDirectory(staging.directory));
+                    verification = await spec.verify(stagedPath, staging.directory);
                 }
                 catch (error) {
                     if (error instanceof OutputVerificationError)
@@ -4864,6 +5548,7 @@ export class IllustratorOperationsCore {
             stage = 'close_work_copy';
             let closed;
             try {
+                hostCalls += 1;
                 const result = await this.bridge.execute({
                     kind: 'read',
                     script: EXPORT_CLOSE_WORK_COPY_SCRIPT,
@@ -4905,12 +5590,12 @@ export class IllustratorOperationsCore {
                     return failed('source_changed', error.message);
                 throw error;
             }
-            if (sourceAfter.path !== sourceFile.path || !sameFileIdentity(sourceAfter.identity, sourceFile.identity)) {
+            if (sourceAfter.path !== sourceFile.path || !await sameFileOrSameBytes(sourceFile.path, sourceAfter.identity, sourceFile.identity, copied.sha256)) {
                 return failed('source_changed', 'The source file changed during the export.');
             }
-            if (outlineFailure !== null) {
+            if (prepareFailure !== null) {
                 stage = 'outline';
-                return failed('outline_incomplete', outlineFailure);
+                return failed('outline_incomplete', prepareFailure);
             }
             if (saveFailure !== null) {
                 stage = 'save_output';
@@ -4953,52 +5638,21 @@ export class IllustratorOperationsCore {
             const workCopyRemoved = await removeRestoreTestFile(workCopyPath, copied.identity, rootScope);
             if (workCopyRemoved)
                 files.workCopyPath = null;
-            const now = new Date().toISOString();
-            const record = {
-                version: 1,
-                exportId,
-                documentKey: input.expectedDocumentKey,
-                sourcePath: sourceFile.path,
-                sourceName: document.name,
-                sourceFileRevision,
-                format: input.format,
-                outputPath: output.path,
-                bytes: verification.bytes,
-                sha256: verification.sha256,
-                outputIdentity: serializeFileIdentity(published.identity),
-                pdfPreset,
-                outline: {
-                    textFramesBefore: outlined.textFramesBefore,
-                    textFramesAfter: outlined.textFramesAfter,
-                    groupItemsAdded: outlined.counts.groupItems - source.counts.groupItems,
-                    pageItemsBefore: source.counts.pageItems,
-                    pageItemsAfter: outlined.counts.pageItems,
-                },
-                verification: {
-                    method: 'pdf_header_scan',
-                    header: verification.header,
-                    pageObjects: verification.pageObjects,
-                    artboardCount: source.artboards.length,
-                    fontObjects: verification.fontObjects,
-                },
-                workCopy: { path: workCopyPath, removed: workCopyRemoved },
-                staging: { directory: staging.directory, removed: published.stagingRemoved },
-                sourcePreserved: true,
-                createdAt: now,
-            };
-            let recordPath;
             try {
                 await rootScope.assertStable();
                 await parentScope.assertStable();
                 await verifyOutputUnchanged(output.path, publishedVerification);
-                recordPath = await this.exportStore.writeRecord(record);
+                const value = await spec.finish({
+                    exportId, sourcePath: sourceFile.path, sourceFileRevision, verification, published,
+                    workCopyPath, workCopyRemoved, stagingDirectory: staging.directory, outputPath: output.path,
+                });
+                return done({ kind: 'published', value });
             }
             catch (error) {
                 if (error instanceof BackupCopyError)
                     return failed('file_replaced', error.message);
                 return asIndeterminate(error);
             }
-            return { outcome: 'verified', record, recordPath, retention: 'manual' };
         }));
     }
     async optimizeImages(input) {
@@ -5026,6 +5680,11 @@ export class IllustratorOperationsCore {
                 hostMs[label] = Math.round(performance.now() - started);
             }
         };
+        const channel = this.bridge.applicationTarget?.()?.channel ?? 'unknown';
+        if (input.acceptUnmeasuredHostVersion !== undefined &&
+            (!HOST_VERSION_PATTERN.test(input.acceptUnmeasuredHostVersion) || channel !== 'stable')) {
+            return rejected('host_version_unmeasured', 'Consent requires the exact major.minor.patch host version and a stable application target.');
+        }
         let source;
         try {
             const result = await timed('read', async () => await this.bridge.execute({
@@ -5058,8 +5717,10 @@ export class IllustratorOperationsCore {
         if (document.mutationProfile !== 'saved_file' || document.path === null || document.fileRevision === null) {
             return rejected('document_not_admitted', document.mutationBlockedReason ?? EXPORT_REQUIRES_SAVED_FILE_MESSAGE, document);
         }
-        if (document.appVersion !== IMAGE_OPTIMIZE_APP_VERSION) {
-            return rejected('app_version_unmeasured', `Image optimization is measured on Illustrator ${IMAGE_OPTIMIZE_APP_VERSION} only; this is ${document.appVersion}.`, document);
+        const hostVersion = evaluateHostVersion('optimize_images', document.appVersion);
+        const consent = { ...(input.acceptUnmeasuredHostVersion === undefined ? {} : { acceptUnmeasuredHostVersion: input.acceptUnmeasuredHostVersion }), hostVersionChannel: channel };
+        if (!hostVersionAdmitted('optimize_images', document.appVersion, consent) || (hostVersion.status === 'patch_unmeasured' && channel !== 'stable')) {
+            return rejected('host_version_unmeasured', `Image optimization is not admitted on ${document.appVersion} (${hostVersion.status}, ${channel}). Ask the user before passing the exact version in accept_unmeasured_host_version; blocked, unreadable and non-stable versions cannot be accepted.`, document);
         }
         if (document.colorSpace !== 'RGB') {
             return rejected('document_color_space_unsupported', 'Only RGB documents are measured: DEFAULTCOLORMODEL rasterizes to the document colour model.', document);
@@ -5196,8 +5857,8 @@ export class IllustratorOperationsCore {
             try {
                 const result = await timed('open', async () => await this.bridge.execute({
                     kind: 'read',
-                    script: EXPORT_OPEN_WORK_COPY_SCRIPT,
-                    params: { expectedDocumentKey: admittedKey, workCopyPath, stagedPath, outputPath: output.path, sessionPaths },
+                    script: IMAGE_OPTIMIZE_VERSION_GUARD + EXPORT_OPEN_WORK_COPY_SCRIPT,
+                    params: { ...consent, expectedDocumentKey: admittedKey, workCopyPath, stagedPath, outputPath: output.path, sessionPaths },
                     timeoutMs: EXPORT_HOST_TIMEOUT_MS,
                     hostGate: {
                         beforeHost: async ({ commandId }) => {
@@ -5285,7 +5946,7 @@ export class IllustratorOperationsCore {
                 const result = await timed('baseline', async () => await this.bridge.execute({
                     kind: 'read',
                     script: IMAGE_OPTIMIZE_BASELINE_SCRIPT,
-                    params: { workCopyPaths, workIdentity, maxScannedImages: IMAGE_OPTIMIZE_MAX_SCANNED_IMAGES, renderBeforeBase, renderScalePercent: render.scalePercent },
+                    params: { ...consent, workCopyPaths, workIdentity, maxScannedImages: IMAGE_OPTIMIZE_MAX_SCANNED_IMAGES, renderBeforeBase, renderScalePercent: render.scalePercent },
                     timeoutMs: IMAGE_OPTIMIZE_HOST_TIMEOUT_MS,
                     hostGate: { beforeHost: async () => { await rootScope.assertStable(); } },
                 }));
@@ -5322,7 +5983,7 @@ export class IllustratorOperationsCore {
                     const result = await timed('rasterize', async () => await this.bridge.execute({
                         kind: 'read',
                         script: IMAGE_OPTIMIZE_RASTERIZE_SCRIPT,
-                        params: { workCopyPaths, workIdentity, targets: workTargets, geometryTolerance: IMAGE_OPTIMIZE_GEOMETRY_TOLERANCE_PT, capPpi: input.capPpi, renderAfterBase, renderScalePercent: render.scalePercent },
+                        params: { ...consent, workCopyPaths, workIdentity, targets: workTargets, geometryTolerance: IMAGE_OPTIMIZE_GEOMETRY_TOLERANCE_PT, capPpi: input.capPpi, renderAfterBase, renderScalePercent: render.scalePercent },
                         timeoutMs: IMAGE_OPTIMIZE_HOST_TIMEOUT_MS,
                         hostGate: { beforeHost: async () => { await rootScope.assertStable(); } },
                     }));
@@ -5381,7 +6042,7 @@ export class IllustratorOperationsCore {
                     const result = await timed('save', async () => await this.bridge.execute({
                         kind: 'read',
                         script: IMAGE_OPTIMIZE_SAVE_SCRIPT,
-                        params: { workCopyPaths, workIdentity, stagedPath, outputPath: output.path, saveOptions },
+                        params: { ...consent, workCopyPaths, workIdentity, stagedPath, outputPath: output.path, saveOptions },
                         timeoutMs: IMAGE_OPTIMIZE_HOST_TIMEOUT_MS,
                         hostGate: {
                             beforeHost: async () => {
@@ -5480,7 +6141,7 @@ export class IllustratorOperationsCore {
                     return failed('source_changed', error.message);
                 throw error;
             }
-            if (sourceAfter.path !== sourceFile.path || !sameFileIdentity(sourceAfter.identity, sourceFile.identity)) {
+            if (sourceAfter.path !== sourceFile.path || !await sameFileOrSameBytes(sourceFile.path, sourceAfter.identity, sourceFile.identity, copied.sha256)) {
                 await removeRenders();
                 return failed('source_changed', 'The source file changed during the optimization.');
             }
@@ -5577,6 +6238,10 @@ export class IllustratorOperationsCore {
         return inventory.documents.length === 0 ? 'release_refused' : 'work_copy_open';
     }
     async reconcileExport(input) {
+        const saveAsLease = await this.#saveAs.store.read(input.exportId, 'session');
+        if (saveAsLease.state === 'valid' || (saveAsLease.state === 'invalid' && await this.#saveAs.store.isSaveAsLease(input.exportId))) {
+            throw new Error(`${input.exportId} is an illustrator_save_document_as session; run illustrator_reconcile_save_as with save_as_id=${input.exportId}.`);
+        }
         if (await this.isRasterExport(input.exportId)) {
             return await this.reconcileRasterExport({ exportId: input.exportId, action: input.action,
                 ...(input.confirmExportId === undefined ? {} : { confirmExportId: input.confirmExportId }) });
@@ -5860,17 +6525,49 @@ export class IllustratorOperationsCore {
         return result.data;
     }
     async executeAdapter(operation, input) {
+        return (await this.executeAdapterWithHostVersion(operation, input)).response;
+    }
+    async executeAdapterWithHostVersion(operation, input) {
         let selectedAdapter = null;
         try {
             const registered = this.mutationAdapters.resolveOperation(operation);
-            const services = { imageFileInspector: this.imageFileInspector, backupStore: this.backupStore };
+            const services = { imageFileInspector: this.imageFileInspector, backupStore: this.backupStore,
+                fontVerifier: this.fontVerifier, applicationBundleId: this.bridge.applicationTarget?.()?.bundleId ?? null };
+            const policyOperation = registered.hostVersionOperation?.({ plan: { resource: input.resource } }) ?? null;
+            if (policyOperation !== null) {
+                const channel = this.bridge.applicationTarget?.()?.channel ?? 'unknown';
+                const { hostVersionChannel: _channel, hostVersionBackup: _backup, ...request } = input;
+                input = request;
+                if (input.acceptUnmeasuredHostVersion !== undefined) {
+                    if (typeof input.acceptUnmeasuredHostVersion !== 'string' || !HOST_VERSION_PATTERN.test(input.acceptUnmeasuredHostVersion))
+                        throw new Error('HOST_VERSION_CONSENT_INVALID: Use the exact major.minor.patch host version.');
+                    if (channel !== 'stable')
+                        throw new Error('HOST_VERSION_CHANNEL_REFUSED: Consent is allowed only on the stable channel.');
+                    input = { ...input, hostVersionChannel: channel };
+                }
+                if (input.apply === true && input.acceptUnmeasuredHostVersion !== undefined && typeof input.backupId === 'string') {
+                    const record = await this.backupStore.readRecord(input.backupId);
+                    if (record === null)
+                        throw new Error('HOST_VERSION_BACKUP_REQUIRED: No verified backup record exists for backup_id.');
+                    const { backupId, sourcePath, sourceFileRevision, bytes, sha256 } = record;
+                    input = { ...input, hostVersionBackup: { backupId, sourcePath, sourceFileRevision, bytes, sha256 } };
+                }
+            }
             if (typeof registered.admit === 'function')
                 input = await registered.admit(input, services);
             const prepared = this.mutationAdapters.prepare(operation, input);
             const { adapter, canonicalRequestDigest } = prepared;
             const admitted = input;
-            const command = { ...prepared.command, hostGate: this.editSessionHostGate(prepared.command.kind === 'mutation', prepared.command.kind === 'mutation' && prepared.command.mutationHostApplicationMode === 'foreground', prepared.command.kind === 'mutation' && typeof adapter.beforeHost === 'function'
-                    ? async () => { await adapter.beforeHost(admitted, services); }
+            const command = { ...prepared.command, hostGate: this.editSessionHostGate(prepared.command.kind === 'mutation', prepared.command.kind === 'mutation' && prepared.command.mutationHostApplicationMode === 'foreground', prepared.command.kind === 'mutation'
+                    ? async () => {
+                        if (admitted.hostVersionBackup !== undefined) {
+                            const backup = await verifyDeleteBackup(this.backupStore, String(admitted.backupId));
+                            if (canonicalSha256(backup) !== canonicalSha256(admitted.hostVersionBackup))
+                                throw new Error('HOST_VERSION_BACKUP_STALE: Backup changed before dispatch.');
+                        }
+                        if (typeof adapter.beforeHost === 'function')
+                            await adapter.beforeHost(admitted, services);
+                    }
                     : undefined) };
             selectedAdapter = adapter;
             const applying = command.kind === 'mutation';
@@ -5907,6 +6604,11 @@ export class IllustratorOperationsCore {
                 })
                 : null;
             try {
+                if (applying && policyOperation !== null && admitted.acceptUnmeasuredHostVersion !== undefined) {
+                    const appVersion = outcome.document?.appVersion;
+                    if (!hostVersionAdmitted(policyOperation, appVersion, admitted))
+                        throw new Error('Host version evidence does not match the canonical consent.');
+                }
                 await adapter.assertSafetyConformance(outcome, canonicalRequestDigest, attestation, resolver);
             }
             catch (error) {
@@ -5914,10 +6616,10 @@ export class IllustratorOperationsCore {
                     throw error;
                 throw new PostHostConformanceError(result.commandId, terminalState, error);
             }
-            return response;
+            return { response, hostVersion: applying ? null : this.planHostVersion(adapter, outcome, admitted) };
         }
         catch (error) {
-            if (error instanceof PostHostConformanceError)
+            if (error instanceof PostHostConformanceError || error instanceof HostVersionChannelRefusedError)
                 throw error;
             if (error instanceof ProvenPreApplyFailureError) {
                 const refusal = editSessionRefusal(error.hostMessage);
@@ -5932,6 +6634,13 @@ export class IllustratorOperationsCore {
                 throw selectedAdapter.mapExecutionError(error, detail);
             throw error;
         }
+    }
+    planHostVersion(adapter, outcome, input) {
+        const policyOperation = adapter.hostVersionOperation?.(outcome) ?? null;
+        if (policyOperation === null)
+            return null;
+        const document = outcome.document;
+        return admitHostVersionPlan(policyOperation, document?.appVersion, this.bridge.applicationTarget?.()?.channel, input);
     }
     async saveRecipe(input) {
         return await saveRecipe(input, { store: this.recipeStore });

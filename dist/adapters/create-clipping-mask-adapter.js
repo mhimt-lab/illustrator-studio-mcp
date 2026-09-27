@@ -1,3 +1,5 @@
+import { CLIPPING_IMAGE_CONTENT_SCRIPT, clipCreateContentSchema, clipImageMaskSupported, isClipImage } from './clipping-image-content.js';
+import { hostVersionPublicFields, hostVersionInternalFields, normalizeHostVersionConsent } from '../host-version-consent.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
@@ -5,39 +7,40 @@ import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { boundsSchema, documentContextSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
-import { CLIPPING_MASK_HOST_SCRIPT, clipAuditMatches, clipBlockerSchema, clipCmykWithinMeasuredScope, clipContentSnapshotSchema, clipLayerStateSchema, clipParentOrderSchema, clipPathSnapshotSchema, expectedContentAfterCreate, sameCanonical, sameMaskAfterCreate, } from './clipping-mask-shared.js';
+import { CLIPPING_MASK_HOST_SCRIPT, clipAuditMatches, clipBlockerSchema, clipCmykWithinMeasuredScope, clipLayerStateSchema, clipParentOrderSchema, clipPathSnapshotSchema, expectedContentAfterCreate, sameCanonical, sameMaskAfterCreate, } from './clipping-mask-shared.js';
+import { describeHostVersionScope } from '../host-version-admission.js';
 export const CREATE_CLIPPING_MASK_OPERATION = 'create_clipping_mask';
 export const CREATE_CLIPPING_MASK_VALIDATOR = { kind: CREATE_CLIPPING_MASK_OPERATION, version: 1 };
-const CANONICAL_VERSION = 2;
-const RESULT_SCHEMA_VERSION = 2;
+const CANONICAL_VERSION = 3;
+const RESULT_SCHEMA_VERSION = 3;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 2;
 const uuidSchema = z.string().min(1).max(255);
 const documentKeySchema = z.string().min(1).max(16_384);
-const commonInternal = { expectedDocumentKey: documentKeySchema, maskUuid: uuidSchema, contentUuid: uuidSchema };
+const commonInternal = { ...hostVersionInternalFields, expectedDocumentKey: documentKeySchema, maskUuid: uuidSchema, contentUuid: uuidSchema };
 const internalInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonInternal, apply: z.literal(false) }),
     z.strictObject({
         ...commonInternal,
         expectedMaskBefore: clipPathSnapshotSchema,
-        expectedContentBefore: clipContentSnapshotSchema,
+        expectedContentBefore: clipCreateContentSchema,
         expectedParentOrder: clipParentOrderSchema,
         apply: z.literal(true),
         commandId: canonicalCommandIdSchema,
     }),
 ]);
-const commonPublic = {
+const commonPublic = { ...hostVersionPublicFields,
     expected_document_key: documentKeySchema,
     mask_uuid: uuidSchema.describe('Native PageItem.uuid of the PathItem that becomes the clipping path.'),
-    content_uuid: uuidSchema.describe('Native PageItem.uuid of the clipped item: a PathItem, or one clip group (nested clip). It must sit directly behind the mask on the same top-level layer.'),
+    content_uuid: uuidSchema.describe('Native PageItem.uuid of the clipped item: a PathItem, one supported clip group, or an upright image (RGB PNG link, CMYK TIFF link, or RGB/CMYK embedded raster). Images require a rectangular mask; image clip release/nesting are unsupported. It must sit directly behind the mask on the same top-level layer.'),
 };
 export const createClippingMaskPublicInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonPublic, apply: z.literal(false).default(false) }),
     z.strictObject({
         ...commonPublic,
         expected_mask_before: clipPathSnapshotSchema,
-        expected_content_before: clipContentSnapshotSchema,
+        expected_content_before: clipCreateContentSchema,
         expected_parent_order: clipParentOrderSchema,
         apply: z.literal(true),
         command_id: applyCommandIdSchema,
@@ -46,7 +49,7 @@ export const createClippingMaskPublicInputSchema = z.discriminatedUnion('apply',
 const inputSchema = z.strictObject({
     ...commonPublic,
     expected_mask_before: clipPathSnapshotSchema.optional(),
-    expected_content_before: clipContentSnapshotSchema.optional(),
+    expected_content_before: clipCreateContentSchema.optional(),
     expected_parent_order: clipParentOrderSchema.optional(),
     apply: z.boolean().default(false),
     command_id: applyCommandIdSchema.optional(),
@@ -55,7 +58,7 @@ const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(crea
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
 function normalizePublicInput(input) {
     const value = createClippingMaskPublicInputSchema.parse(input);
-    const common = { expectedDocumentKey: value.expected_document_key, maskUuid: value.mask_uuid, contentUuid: value.content_uuid };
+    const common = { ...normalizeHostVersionConsent(value), expectedDocumentKey: value.expected_document_key, maskUuid: value.mask_uuid, contentUuid: value.content_uuid };
     return value.apply ? {
         ...common,
         expectedMaskBefore: value.expected_mask_before,
@@ -79,7 +82,7 @@ const planSchema = z.strictObject({
     contentUuid: uuidSchema,
     layer: clipLayerStateSchema,
     maskBefore: clipPathSnapshotSchema,
-    contentBefore: clipContentSnapshotSchema,
+    contentBefore: clipCreateContentSchema,
     parentOrderBefore: clipParentOrderSchema,
     predicted: z.strictObject({
         parentOrderAfter: z.array(uuidSchema.nullable()).min(1),
@@ -94,6 +97,10 @@ const planSchema = z.strictObject({
     if (plan.maskBefore.uuid !== plan.maskUuid || plan.contentBefore.uuid !== plan.contentUuid || plan.maskUuid === plan.contentUuid ||
         plan.maskBefore.parentType !== 'Layer' || plan.contentBefore.parentType !== 'Layer' || plan.maskBefore.clipping) {
         context.addIssue({ code: 'custom', message: 'Clip plan must bind two distinct layer-direct targets and an unclipped mask.' });
+    }
+    if (isClipImage(plan.contentBefore) && (!clipImageMaskSupported(plan.maskBefore) ||
+        plan.contentBefore.selectionUuids.some(uuid => uuid === plan.maskUuid || uuid === plan.contentUuid))) {
+        context.addIssue({ code: 'custom', message: 'Image clips require an unselected image and rectangular mask.' });
     }
     let predictedOrder = null;
     try {
@@ -114,7 +121,7 @@ const failureSchema = z.discriminatedUnion('phase', [applyFailureSchema, verifyF
 const restoredEvidence = {
     groupUuid: uuidSchema,
     restoredMask: clipPathSnapshotSchema,
-    restoredContent: clipContentSnapshotSchema,
+    restoredContent: clipCreateContentSchema,
     restoredParentOrder: clipParentOrderSchema,
 };
 const transactionSchema = z.discriminatedUnion('state', [
@@ -144,7 +151,7 @@ const transactionSchema = z.discriminatedUnion('state', [
         rollback: z.strictObject({
             status: z.literal('indeterminate'), reasonCode: z.literal('rollback_indeterminate'), message: z.string().min(1).max(500),
             groupUuid: uuidSchema.nullable(), restoredMask: clipPathSnapshotSchema.nullable(),
-            restoredContent: clipContentSnapshotSchema.nullable(), restoredParentOrder: clipParentOrderSchema.nullable(),
+            restoredContent: clipCreateContentSchema.nullable(), restoredParentOrder: clipParentOrderSchema.nullable(),
         }),
         audit: mutationAuditSchema,
     }),
@@ -173,15 +180,15 @@ const createdGroupSchema = z.strictObject({
 const postconditionSchema = z.strictObject({
     group: createdGroupSchema,
     mask: clipPathSnapshotSchema,
-    content: clipContentSnapshotSchema,
+    content: clipCreateContentSchema,
     parentOrderAfter: clipParentOrderSchema,
 });
 export const createClippingMaskResultSchema = z.union([
     z.strictObject({ operation: z.literal(CREATE_CLIPPING_MASK_OPERATION), applied: z.literal(false), document: documentContextSchema, plan: planSchema, transaction: transactionSchema }),
     z.strictObject({ operation: z.literal(CREATE_CLIPPING_MASK_OPERATION), applied: z.literal(true), document: documentContextSchema, plan: planSchema, postcondition: postconditionSchema, transaction: transactionSchema }),
 ]).superRefine((result, context) => {
-    if (!clipCmykWithinMeasuredScope(result.document.colorSpace, result.plan.maskBefore, result.plan.contentBefore)) {
-        context.addIssue({ code: 'custom', message: 'CMYK clip paint is measured in a CMYK document with PathItem content only.' });
+    if (!clipCmykWithinMeasuredScope(result.document.colorSpace, result.plan.maskBefore, isClipImage(result.plan.contentBefore) ? result.plan.maskBefore : result.plan.contentBefore)) {
+        context.addIssue({ code: 'custom', message: 'CMYK clip paint requires a CMYK document and non-nested content.' });
     }
     if (result.transaction.state !== 'planned' && !result.plan.applyAllowed) {
         context.addIssue({ code: 'custom', message: 'A clip apply outcome requires an executable plan.' });
@@ -314,22 +321,28 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
     }, resolver);
 }
 export const CREATE_CLIPPING_MASK_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}${CLIPPING_MASK_HOST_SCRIPT}
+${CLIPPING_IMAGE_CONTENT_SCRIPT}
 function createClipResolve(forApply) {
   var context = forApply ? requireDocument(params.expectedDocumentKey) : requireDocumentForRead(params.expectedDocumentKey);
   var document = app.activeDocument;
   if (params.maskUuid === params.contentUuid) throw clipUnsupported("same_target", params.maskUuid);
   var mask = clipResolve(document, params.maskUuid, ["PathItem"]);
-  var content = clipResolve(document, params.contentUuid, ["PathItem", "GroupItem"]);
+  var content = clipImageFind(document, params.contentUuid);
+  if (content === null) content = clipResolve(document, params.contentUuid, ["PathItem", "GroupItem"]);
   var layer = mask.layer;
   if (!layer || String(layer.typename) !== "Layer" || mask.parent !== layer) throw clipUnsupported("parent_unmeasured", params.maskUuid);
   if (content.layer !== layer || content.parent !== layer) throw clipUnsupported("parent_unmeasured", params.contentUuid);
   var layerState = clipLayerState(document, layer, params.maskUuid);
-  // CMYK paint is measured for a PathItem content only (CMYK-CLIP-CREATE); a nested clip content stays RGB-only.
-  var admitCmyk = clipCmykScope(document, String(content.typename) === "PathItem");
+  // CMYK mask paint is measured with path and image content; a nested clip content stays RGB-only.
+  var admitCmyk = clipCmykScope(document, String(content.typename) !== "GroupItem");
   var maskBefore = clipPathSnapshot(document, mask, layer, admitCmyk);
   if (maskBefore.clipping) throw clipUnsupported("mask_already_clipping", params.maskUuid);
   var contentBefore;
-  if (String(content.typename) === "PathItem") {
+  if (String(content.typename) === "PlacedItem" || String(content.typename) === "RasterItem") {
+    if (!clipImageRectangle(maskBefore)) throw clipUnsupported("image_mask_unmeasured", params.maskUuid);
+    contentBefore = clipImageSnapshot(document, content, layer);
+    if (clipIndexOf(contentBefore.selectionUuids, params.maskUuid)>=0 || clipIndexOf(contentBefore.selectionUuids, params.contentUuid)>=0) throw clipUnsupported("selection_unmeasured",params.contentUuid);
+  } else if (String(content.typename) === "PathItem") {
     contentBefore = clipPathSnapshot(document, content, layer, admitCmyk);
     if (contentBefore.clipping) throw clipUnsupported("content_is_clipping_path", params.contentUuid);
   } else {
@@ -436,7 +449,7 @@ function createClipVerify(preflight, plan, state) {
   if (group === null || group !== state.operationState.createdGroup || group.parent !== preflight.layer) {
     throw mutationError("verify_mismatch", "Created clip group native identity does not match the plan.");
   }
-  var snapshot = clipGroupSnapshot(preflight.document, group, preflight.layer, true, preflight.admitCmyk);
+  var snapshot = createClipGroupSnapshot(preflight.document, group, preflight.layer, preflight);
   if (snapshot.mask.uuid !== params.maskUuid || snapshot.content.uuid !== params.contentUuid ||
       snapshot.childOrder[0] !== params.maskUuid || snapshot.childOrder[1] !== params.contentUuid ||
       !snapshot.clipped || snapshot.locked || snapshot.hidden) {
@@ -488,14 +501,12 @@ function createClipRestoreAppearance(mask, saved) {
 function createClipVerifyRestored(state) {
   var preflight = state.preflight;
   var mask = clipTyped(preflight.document, "PathItem", params.maskUuid);
-  var content = clipTyped(preflight.document, String(preflight.content.typename), params.contentUuid);
+  var content = clipIsImage(preflight.contentBefore) ? clipImageFind(preflight.document, params.contentUuid) : clipTyped(preflight.document, String(preflight.content.typename), params.contentUuid);
   if (mask !== preflight.mask || content !== preflight.content || mask.parent !== preflight.layer || content.parent !== preflight.layer) {
     return { status: "indeterminate", message: "Restored mask or content identity or parent is indeterminate." };
   }
   var restoredMask = clipPathSnapshot(preflight.document, mask, preflight.layer, preflight.admitCmyk);
-  var restoredContent = String(content.typename) === "PathItem"
-    ? clipPathSnapshot(preflight.document, content, preflight.layer, preflight.admitCmyk)
-    : clipGroupSnapshot(preflight.document, content, preflight.layer, false, false);
+  var restoredContent = createClipContentSnapshot(preflight.document, content, preflight.layer, preflight.admitCmyk);
   var restoredOrder = supportedPathOrder(preflight.layer);
   state.operationState.rollbackEvidence.restoredMask = restoredMask;
   state.operationState.rollbackEvidence.restoredContent = restoredContent;
@@ -526,6 +537,15 @@ function createClipRollback(state) {
   }
   if (group.locked || group.hidden || preflight.layer.locked || !preflight.layer.visible) {
     return { status: "failed", message: "Rollback refused because the captured clip group is not safely editable." };
+  }
+  if (clipIsImage(preflight.contentBefore)) {
+    try {
+      var currentImage = clipImageSnapshot(preflight.document, preflight.content, preflight.content.parent);
+      var expectedImage = {};
+      for (var evidenceKey in preflight.contentBefore) if (preflight.contentBefore.hasOwnProperty(evidenceKey)) expectedImage[evidenceKey] = preflight.contentBefore[evidenceKey];
+      expectedImage.parentType = currentImage.parentType;
+      if (!supportedPathSame(currentImage, expectedImage)) return {status:"indeterminate",message:"Image or selection changed; inverse refused."};
+    } catch (imageError) { return {status:"indeterminate",message:"Image recovery evidence is unreadable."}; }
   }
   var targets = [preflight.mask, preflight.content];
   var targetUuids = [params.maskUuid, params.contentUuid];
@@ -638,7 +658,7 @@ function normalizedRequest(input) {
 export const createClippingMaskToolContract = {
     name: 'illustrator_create_clipping_mask',
     title: 'Plan or Create Clipping Mask',
-    description: 'Plan or make one PathItem (mask_uuid) the clipping path of one content item (content_uuid): a PathItem, or one existing clip group for a nested clip. Measured profile only: both items directly on the same top-level layer of an RGB document, the mask directly in front of the content, RGB or no paint, Illustrator 30.8.1 in the foreground; PlacedItem, CompoundPathItem, text, sublayers, and other shapes are refused. The plan shows the resulting group [mask, content] at the mask\'s z-order slot and that Illustrator removes the mask\'s fill and stroke. Locked or hidden targets and layers are refused by this tool (Illustrator itself does not refuse them). Apply compares expected_mask_before, expected_content_before, and expected_parent_order, verifies the group, flags, mask effect, and parent order by native read-back, and on failure unclips, moves both items back, removes only the created group, and writes the mask\'s fill and stroke back.',
+    description: 'Plan or create a clipping group from adjacent mask/content UUIDs on the same top-level layer. Content may be a PathItem, one supported path clip group, or an upright uniformly scaled image: RGB PNG link in RGB, CMYK TIFF link in CMYK, or embedded RGB/CMYK raster matching its document. Images require an axis-aligned rectangular mask, normal opaque appearance and neither target selected; image release/nesting are unsupported. Other image profiles, CompoundPathItem, text, and sublayers are refused. Illustrator ' + describeHostVersionScope('clipping_mask') + ', foreground only. Plan binds mask paint, image link/matrix/bounds/selection and parent order. Apply echoes expected_mask_before, expected_content_before and expected_parent_order, verifies native structure and unchanged content, and uses the measured inverse when recovery evidence remains valid. Mask paint is cleared; group bounds are not the visible crop. Existing path clips allow RGB or CMYK paint in a CMYK document; nested CMYK remains unsupported.',
     inputSchema,
     publicInputSchema: createClippingMaskPublicInputSchema,
     outputSchema: createClippingMaskResponseSchema,
@@ -677,6 +697,7 @@ export function createCreateClippingMaskAdapter() {
         errorMappingVersion: ERROR_MAPPING_VERSION,
         hostScriptDigest: CREATE_CLIPPING_MASK_HOST_SCRIPT_DIGEST,
         mutationHostApplicationMode: 'foreground',
+        hostVersionOperation: () => 'clipping_mask',
         buildCommand(input) {
             const normalized = normalizedRequest(input);
             const { commandId: _commandId, ...params } = normalized.request;

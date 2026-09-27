@@ -5,6 +5,7 @@ import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, layerPathSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
+import { ANCESTOR_STATE_SCRIPT } from './ancestor-state-host-script.js';
 import { admitSource, placeImageAdmissionSchema } from './place-image-adapter.js';
 export const RELINK_IMAGE_OPERATION = 'relink_image';
 export const RELINK_IMAGE_VALIDATOR = { kind: RELINK_IMAGE_OPERATION, version: 1 };
@@ -12,8 +13,8 @@ export const RELINK_IMAGE_MAX_DIRECT_ITEMS = 128;
 export const RELINK_IMAGE_TOLERANCE_PT = 0.01;
 export const RELINK_IMAGE_PRECISION_DIGITS = 6;
 export const RELINK_IMAGE_MEASURED_FORMATS = ['tiff', 'jpeg', 'png'];
-const CANONICAL_VERSION = 1;
-const RESULT_SCHEMA_VERSION = 1;
+const CANONICAL_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 2;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
@@ -41,6 +42,8 @@ export const relinkImageSnapshotSchema = z.strictObject({
     hidden: z.boolean(),
     layerVisible: z.boolean(),
     layerLocked: z.boolean(),
+    ancestorLocked: z.boolean(),
+    ancestorHidden: z.boolean(),
 });
 export function relinkStateOf(snapshot) {
     const { uuid: _uuid, ...state } = snapshot;
@@ -52,6 +55,7 @@ export function relinkSnapshotsWithinTolerance(left, right) {
         left.layerIndex === right.layerIndex && canonicalDigest(left.siblingUuids) === canonicalDigest(right.siblingUuids) &&
         left.name === right.name && left.linkPath === right.linkPath &&
         left.locked === right.locked && left.hidden === right.hidden && left.layerVisible === right.layerVisible && left.layerLocked === right.layerLocked &&
+        left.ancestorLocked === right.ancestorLocked && left.ancestorHidden === right.ancestorHidden &&
         left.position.every((value, index) => near(value, right.position[index])) &&
         left.geometricBounds.every((value, index) => near(value, right.geometricBounds[index])) &&
         near(left.width, right.width) && near(left.height, right.height) &&
@@ -151,7 +155,7 @@ async function admitCurrentLink(path, services) {
         pixels: pixels.status === 'available' ? { width: pixels.value.width, height: pixels.value.height } : null };
 }
 const blockerSchema = z.enum([
-    'document_mutation_not_allowed', 'target_locked', 'target_hidden', 'layer_hidden', 'layer_locked',
+    'document_mutation_not_allowed', 'target_locked', 'target_hidden', 'layer_hidden', 'layer_locked', 'ancestor_hidden', 'ancestor_locked',
     'current_link_missing', 'current_link_unavailable', 'current_link_format_unmeasured',
     'source_file_missing', 'source_file_unavailable', 'source_hash_mismatch', 'source_format_unmeasured', 'source_file_changed',
     'source_pixel_dimensions_differ',
@@ -252,6 +256,10 @@ export const relinkImageResultSchema = z.union([
         derived.add('layer_hidden');
     if (result.plan.before.layerLocked)
         derived.add('layer_locked');
+    if (result.plan.before.ancestorHidden)
+        derived.add('ancestor_hidden');
+    if (result.plan.before.ancestorLocked)
+        derived.add('ancestor_locked');
     if (result.plan.sourceAdmission.status === 'blocked')
         derived.add(result.plan.sourceAdmission.reason);
     if (result.plan.currentAdmission?.status === 'blocked')
@@ -353,7 +361,7 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
         throw new Error('Relink terminal result requires attestation.');
     await assertOperationSafetyAdapterConformance({ registration: RELINK_IMAGE_SAFETY, plan, result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
-export const RELINK_IMAGE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
+export const RELINK_IMAGE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}${ANCESTOR_STATE_SCRIPT}
 var RELINK_IMAGE_MAX_DIRECT_ITEMS = ${RELINK_IMAGE_MAX_DIRECT_ITEMS};
 var RELINK_IMAGE_TOLERANCE_PT = ${RELINK_IMAGE_TOLERANCE_PT};
 var RELINK_IMAGE_PRECISION_DIGITS = ${RELINK_IMAGE_PRECISION_DIGITS};
@@ -405,6 +413,7 @@ function relinkSnapshot(document, target) {
   }
   var layerPath = relinkLayerPath(document, target.layer);
   if (layerPath === null) throw mutationError("preflight_failed", "Target layer path is unavailable.");
+  var ancestors = mutationAncestorState(target);
   var layerIndex = -1; var siblings = [];
   var pageItems = target.layer.pageItems;
   if (!pageItems || typeof pageItems.length !== "number" || pageItems.length > RELINK_IMAGE_MAX_DIRECT_ITEMS) throw mutationError("preflight_failed", "Target layer item count is unavailable or over the supported bound.");
@@ -424,7 +433,8 @@ function relinkSnapshot(document, target) {
     geometricBounds: [relinkRound(bounds[0]), relinkRound(bounds[1]), relinkRound(bounds[2]), relinkRound(bounds[3])],
     width: relinkRound(target.width), height: relinkRound(target.height),
     matrix: [relinkRound(matrix.mValueA), relinkRound(matrix.mValueB), relinkRound(matrix.mValueC), relinkRound(matrix.mValueD), relinkRound(matrix.mValueTX), relinkRound(matrix.mValueTY)],
-    locked: target.locked, hidden: target.hidden, layerVisible: target.layer.visible, layerLocked: target.layer.locked
+    locked: target.locked, hidden: target.hidden, layerVisible: target.layer.visible, layerLocked: target.layer.locked,
+    ancestorLocked: ancestors.ancestorLocked, ancestorHidden: ancestors.ancestorHidden
   };
 }
 
@@ -432,7 +442,8 @@ function relinkSnapshot(document, target) {
 function relinkStateMatches(left, right) {
   if (!left || !right || left.type !== right.type || !mutationSameSequence(left.layerPath, right.layerPath) || left.layerIndex !== right.layerIndex ||
       !mutationSameSequence(left.siblingUuids, right.siblingUuids) || left.name !== right.name || left.linkPath !== right.linkPath ||
-      left.locked !== right.locked || left.hidden !== right.hidden || left.layerVisible !== right.layerVisible || left.layerLocked !== right.layerLocked) return false;
+      left.locked !== right.locked || left.hidden !== right.hidden || left.layerVisible !== right.layerVisible || left.layerLocked !== right.layerLocked ||
+      left.ancestorLocked !== right.ancestorLocked || left.ancestorHidden !== right.ancestorHidden) return false;
   for (var p = 0; p < 2; p++) if (!relinkNear(left.position[p], right.position[p])) return false;
   for (var b = 0; b < 4; b++) if (!relinkNear(left.geometricBounds[b], right.geometricBounds[b])) return false;
   if (!relinkNear(left.width, right.width) || !relinkNear(left.height, right.height)) return false;
@@ -486,6 +497,8 @@ function relinkResolve(forApply) {
   if (before.hidden) blockers.push("target_hidden");
   if (!before.layerVisible) blockers.push("layer_hidden");
   if (before.layerLocked) blockers.push("layer_locked");
+  if (before.ancestorHidden) blockers.push("ancestor_hidden");
+  if (before.ancestorLocked) blockers.push("ancestor_locked");
   if (before.linkPath === null) blockers.push("current_link_missing");
   else if (!(new File(before.linkPath)).exists) blockers.push("current_link_missing");
   var sourceBlockers = relinkSourceBlockers(params.sourceAdmission);

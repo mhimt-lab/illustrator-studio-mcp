@@ -9,15 +9,17 @@ import { POINT_TEXT_APPLY_BLOCKERS, POINT_TEXT_BLOCKERS_SCRIPT, POINT_TEXT_CHARA
 import { REPLACE_POINT_TEXT_MODULE_SCRIPT, REPLACE_POINT_TEXT_OPERATION, replacePointTextPlanSchema, } from './replace-point-text-adapter.js';
 import { SET_TEXT_STYLE_MODULE_SCRIPT, SET_TEXT_STYLE_OPERATION, setTextStylePlanSchema, } from './set-text-style-adapter.js';
 import { pathAppearanceMutationSchema, pathAppearanceStateSchema, SET_PATH_APPEARANCE_MODULE_SCRIPT, SET_PATH_APPEARANCE_OPERATION, } from './set-path-appearance-adapter.js';
-import { snapshotsWithinTolerance, TRANSFORM_OBJECT_MODULE_SCRIPT, TRANSFORM_OBJECT_OPERATION, transformObjectPlanSchema, transformPathSnapshotSchema as transformObjectSnapshotSchema, translateTransformSchema, } from './transform-object-adapter.js';
+import { snapshotsWithinTolerance, TRANSFORM_OBJECT_MODULE_SCRIPT, TRANSFORM_OBJECT_OPERATION, transformObjectPlanSchema, transformPathOrTextSnapshotSchema as transformObjectSnapshotSchema, translateTransformSchema, } from './transform-object-adapter.js';
+import { TRANSFORM_TEXT_SCRIPT } from './transform-text-snapshot.js';
 export const MUTATE_BATCH_OPERATION = 'mutate_batch';
 export const MUTATE_BATCH_VALIDATOR = { kind: MUTATE_BATCH_OPERATION, version: 1 };
 export const MIXED_BATCH_MIN_STEPS = 2;
 export const MIXED_BATCH_MAX_STEPS = 16;
 export const MIXED_BATCH_MAX_TEXT_CODE_UNITS = 4_000;
 export const MIXED_BATCH_MAX_STYLE_CHARACTERS = 200;
-const CANONICAL_VERSION = 3;
-const RESULT_SCHEMA_VERSION = 3;
+export const MIXED_BATCH_MAX_TRANSFORM_TEXT_EVIDENCE_UNITS = 4_096;
+const CANONICAL_VERSION = 5;
+const RESULT_SCHEMA_VERSION = 5;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
@@ -78,9 +80,13 @@ function refineSteps(steps, context) {
     }
     let textUnits = 0;
     let styleCharacters = 0;
+    let transformTextBytes = 0;
     for (const step of steps) {
         if (step.operation === REPLACE_POINT_TEXT_OPERATION)
             textUnits += step.replacement.length;
+        if (step.operation === TRANSFORM_OBJECT_OPERATION && 'expectedBefore' in step) {
+            transformTextBytes += step.expectedBefore.textFrame?.attributes.length ?? 0;
+        }
         if (step.operation === SET_TEXT_STYLE_OPERATION) {
             if (step.start >= step.end) {
                 context.addIssue({ code: 'custom', message: 'A set_text_style step needs a non-empty range.' });
@@ -94,6 +100,9 @@ function refineSteps(steps, context) {
     }
     if (styleCharacters > MIXED_BATCH_MAX_STYLE_CHARACTERS) {
         context.addIssue({ code: 'custom', message: `Mixed batch set_text_style targets must total at most ${MIXED_BATCH_MAX_STYLE_CHARACTERS} characters.` });
+    }
+    if (transformTextBytes > MIXED_BATCH_MAX_TRANSFORM_TEXT_EVIDENCE_UNITS) {
+        context.addIssue({ code: 'custom', message: `Mixed batch text-frame translation evidence must total at most ${MIXED_BATCH_MAX_TRANSFORM_TEXT_EVIDENCE_UNITS} UTF-16 code units.` });
     }
 }
 const internalInputSchema = z.discriminatedUnion('apply', [
@@ -199,13 +208,14 @@ function normalizePublicInput(input) {
         ? { expectedDocumentKey: value.expected_document_key, steps, apply: true, commandId: value.command_id }
         : { expectedDocumentKey: value.expected_document_key, steps, apply: false };
 }
-const blockerSchema = z.enum(POINT_TEXT_APPLY_BLOCKERS);
+const MIXED_BLOCKERS = [...POINT_TEXT_APPLY_BLOCKERS, 'ancestor_hidden', 'ancestor_locked'];
+const blockerSchema = z.enum(MIXED_BLOCKERS);
 function unionBlockers(perStep) {
     const present = new Set();
     for (const blockers of perStep)
         for (const blocker of blockers)
             present.add(blocker);
-    return POINT_TEXT_APPLY_BLOCKERS.filter((blocker) => present.has(blocker));
+    return MIXED_BLOCKERS.filter((blocker) => present.has(blocker));
 }
 function transformBlockers(mutationAllowed, before) {
     const blockers = [];
@@ -221,6 +231,10 @@ function transformBlockers(mutationAllowed, before) {
         blockers.push('layer_hidden');
     if (before.layerLocked)
         blockers.push('layer_locked');
+    if (before.ancestorHidden)
+        blockers.push('ancestor_hidden');
+    if (before.ancestorLocked)
+        blockers.push('ancestor_locked');
     return blockers;
 }
 const planStepSchema = z.discriminatedUnion('operation', [
@@ -287,8 +301,10 @@ const planSchema = z.strictObject({
     const textBefore = plan.steps.reduce((sum, step) => sum + (step.operation === REPLACE_POINT_TEXT_OPERATION ? step.plan.before.contents.length : 0), 0);
     const textAfter = plan.steps.reduce((sum, step) => sum + (step.operation === REPLACE_POINT_TEXT_OPERATION ? step.plan.after.contents.length : 0), 0);
     const styleCharacters = plan.steps.reduce((sum, step) => sum + (step.operation === SET_TEXT_STYLE_OPERATION ? step.plan.before.characters.length : 0), 0);
+    const transformTextBytes = plan.steps.reduce((sum, step) => sum +
+        (step.operation === TRANSFORM_OBJECT_OPERATION ? step.plan.before.textFrame?.attributes.length ?? 0 : 0), 0);
     if (textBefore > MIXED_BATCH_MAX_TEXT_CODE_UNITS || textAfter > MIXED_BATCH_MAX_TEXT_CODE_UNITS ||
-        styleCharacters > MIXED_BATCH_MAX_STYLE_CHARACTERS) {
+        styleCharacters > MIXED_BATCH_MAX_STYLE_CHARACTERS || transformTextBytes > MIXED_BATCH_MAX_TRANSFORM_TEXT_EVIDENCE_UNITS) {
         context.addIssue({ code: 'custom', message: 'Mixed batch plan exceeds a measured operation budget.' });
     }
     if (!sameCanonical(plan.applyBlockedReasonCodes, unionBlockers(plan.steps.map(planStepBlockers)))) {
@@ -542,12 +558,14 @@ ${POINT_TEXT_CHARACTER_SCRIPT}
 ${REPLACE_POINT_TEXT_MODULE_SCRIPT}
 ${SET_TEXT_STYLE_MODULE_SCRIPT}
 ${TRANSFORM_OBJECT_MODULE_SCRIPT}
+${TRANSFORM_TEXT_SCRIPT}
 ${SET_PATH_APPEARANCE_MODULE_SCRIPT}
 var MIXED_BATCH_MIN_STEPS = ${MIXED_BATCH_MIN_STEPS};
 var MIXED_BATCH_MAX_STEPS = ${MIXED_BATCH_MAX_STEPS};
 var MIXED_BATCH_MAX_TEXT_CODE_UNITS = ${MIXED_BATCH_MAX_TEXT_CODE_UNITS};
 var MIXED_BATCH_MAX_STYLE_CHARACTERS = ${MIXED_BATCH_MAX_STYLE_CHARACTERS};
-var MIXED_BLOCKER_ORDER = ${JSON.stringify(POINT_TEXT_APPLY_BLOCKERS)};
+var MIXED_BATCH_MAX_TRANSFORM_TEXT_EVIDENCE_UNITS = ${MIXED_BATCH_MAX_TRANSFORM_TEXT_EVIDENCE_UNITS};
+var MIXED_BLOCKER_ORDER = ${JSON.stringify(MIXED_BLOCKERS)};
 
 /**
  * The operation modules read the implicit \`params\`. Each step gets a complete synthetic \`params\` in the
@@ -644,6 +662,7 @@ function mixedResolve(forApply) {
   var textBefore = 0;
   var textAfter = 0;
   var styleCharacters = 0;
+  var transformTextBytes = 0;
   for (var index = 0; index < requested.length; index++) {
     var request = requested[index];
     if (typeof request.targetUuid !== "string" || request.targetUuid.length === 0 || seen["u:" + request.targetUuid] === true) {
@@ -664,6 +683,7 @@ function mixedResolve(forApply) {
     } catch (stepError) { throw mixedStepError(step, stepError); }
     if (request.operation === "replace_point_text") { textBefore += plan.before.contents.length; textAfter += plan.after.contents.length; }
     if (request.operation === "set_text_style") styleCharacters += plan.before.characters.length;
+    if (request.operation === "transform_object" && plan.before.textFrame) transformTextBytes += plan.before.textFrame.attributes.length;
     if (forApply) {
       if (!operation.same(plan.before, request.expectedBefore)) {
         throw mutationError("preflight_failed", mixedStepLabel(step) + ": state does not match expected_before.");
@@ -680,6 +700,9 @@ function mixedResolve(forApply) {
   }
   if (styleCharacters > MIXED_BATCH_MAX_STYLE_CHARACTERS) {
     throw mutationError("preflight_failed", "Mixed batch set_text_style targets exceed " + MIXED_BATCH_MAX_STYLE_CHARACTERS + " characters in total.");
+  }
+  if (transformTextBytes > MIXED_BATCH_MAX_TRANSFORM_TEXT_EVIDENCE_UNITS) {
+    throw mutationError("preflight_failed", "Mixed batch text-frame translation evidence exceeds " + MIXED_BATCH_MAX_TRANSFORM_TEXT_EVIDENCE_UNITS + " UTF-16 code units in total.");
   }
   var union = mixedUnionBlockers(perStepBlockers);
   if (forApply && union.length > 0) {
@@ -867,7 +890,7 @@ function normalizedRequest(input) {
 export const mutateBatchToolContract = {
     name: 'illustrator_mutate_batch',
     title: 'Plan or Apply a Mixed Mutation Batch',
-    description: `Plan or apply ${MIXED_BATCH_MIN_STEPS} to ${MIXED_BATCH_MAX_STEPS} ordered steps of replace_point_text, set_text_style (size or RGB fill), transform_object (translate only), and set_path_appearance on distinct native UUIDs in one document as one command. Planning evaluates every step and writes nothing; any stale, unsupported, or blocked step rejects the whole batch before a single write. Apply performs exact per-step compare-and-set in one host call, native read-back verification of every step, and verified inverse rollback of attempted steps in reverse order. Point-text contents total at most ${MIXED_BATCH_MAX_TEXT_CODE_UNITS} UTF-16 code units and set_text_style targets at most ${MIXED_BATCH_MAX_STYLE_CHARACTERS} characters.`,
+    description: `Plan or apply ${MIXED_BATCH_MIN_STEPS} to ${MIXED_BATCH_MAX_STEPS} ordered steps of replace_point_text, set_text_style (size or RGB fill), transform_object (translate only, of a PathItem or an unthreaded layer-direct point or area TextFrame), and set_path_appearance on distinct native UUIDs in one document as one command. Planning evaluates every step and writes nothing; any stale, unsupported, or blocked step rejects the whole batch before a single write. Apply performs exact per-step compare-and-set in one host call, native read-back verification of every step, and verified inverse rollback of attempted steps in reverse order. Point-text contents total at most ${MIXED_BATCH_MAX_TEXT_CODE_UNITS} UTF-16 code units and set_text_style targets at most ${MIXED_BATCH_MAX_STYLE_CHARACTERS} characters.`,
     inputSchema,
     publicInputSchema: mutateBatchPublicInputSchema,
     outputSchema: mutateBatchResponseSchema,

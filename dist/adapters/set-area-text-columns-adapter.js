@@ -477,9 +477,17 @@ function columnsWrite(target, values) {
   }
 }
 
+/**
+ * Measured on 30.8.1 and 30.8.2: writing the area options leaves the document's
+ * saved flag true, so a save skipped the change and closing lost it. Writing saved = false marks the document changed
+ * (it reads false in the next call, and save() then writes the options to the file); the flag is set only when the
+ * options actually change, and the rollback puts the value read before the write back.
+ */
 function columnsApply(preflight, plan, state) {
   state.operationState.mutationStarted = true;
+  state.operationState.savedBefore = preflight.document.saved === true;
   columnsWrite(preflight.target, params.options);
+  if (!columnsSame(plan.after.options, plan.before.options)) preflight.document.saved = false;
   return preflight.target;
 }
 
@@ -499,7 +507,19 @@ function columnsVerify(preflight, plan) {
   if (!columnsSame(actual, plan.after)) {
     throw mutationError("verify_mismatch", "Area-text column postcondition does not match the plan.");
   }
+  if (!columnsSame(plan.after.options, plan.before.options) && preflight.document.saved !== false) {
+    throw mutationError("verify_mismatch", "The document is not marked changed after the area options write.");
+  }
   return actual;
+}
+
+/** Puts the saved flag read before the apply back, once the options are the before state again. */
+function columnsRestoreSaved(preflight, state) {
+  if (typeof state.operationState.savedBefore !== "boolean") return true;
+  try {
+    preflight.document.saved = state.operationState.savedBefore;
+    return preflight.document.saved === state.operationState.savedBefore;
+  } catch (savedError) { return false; }
 }
 
 function columnsRollback(state) {
@@ -518,7 +538,9 @@ function columnsRollback(state) {
   try { current = columnsSnapshot(preflight.document, target); } catch (currentError) { current = null; }
   if (current !== null && columnsSame(current, preflight.before)) {
     state.operationState.rollbackEvidence.restoredSnapshot = current;
-    return { status: "verified" };
+    return columnsRestoreSaved(preflight, state)
+      ? { status: "verified" }
+      : { status: "indeterminate", message: "Rollback could not restore the document saved flag." };
   }
   // The five options are the only thing the edit writes, so they are the only thing the inverse writes.
   try { columnsWrite(target, preflight.before.options); }
@@ -527,16 +549,19 @@ function columnsRollback(state) {
   try { restored = columnsSnapshot(preflight.document, target); }
   catch (verifyError) { return { status: "indeterminate", message: "Rollback verification is indeterminate." }; }
   state.operationState.rollbackEvidence.restoredSnapshot = restored;
-  return columnsSame(restored, preflight.before)
+  if (!columnsSame(restored, preflight.before)) {
+    return { status: "failed", message: "Rollback did not restore the exact before area-text layout." };
+  }
+  return columnsRestoreSaved(preflight, state)
     ? { status: "verified" }
-    : { status: "failed", message: "Rollback did not restore the exact before area-text layout." };
+    : { status: "indeterminate", message: "Rollback could not restore the document saved flag." };
 }
 `;
 export const SET_AREA_TEXT_COLUMNS_RUNNER_SCRIPT = `var columnsExecution = runMutationTransaction({
   apply: params.apply === true,
   editSessionAffected: function () { return [params.targetUuid]; },
   initialOperationState: function () {
-    return { mutationStarted: false, rollbackEvidence: { targetUuid: params.targetUuid, restoredSnapshot: null } };
+    return { mutationStarted: false, savedBefore: null, rollbackEvidence: { targetUuid: params.targetUuid, restoredSnapshot: null } };
   },
   preflight: columnsPreflight,
   plan: columnsPlan,

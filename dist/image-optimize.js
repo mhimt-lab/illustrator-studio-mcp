@@ -1,8 +1,8 @@
+import { HOST_VERSION_POLICY_JSX } from './host-version-policy.js';
 import { z } from 'zod';
 import { EXPORT_HELPERS } from './document-export.js';
 import { documentContextSchema } from './mutation-result-schema-core.js';
 import { visualDiffResultSchema } from './visual-diff.js';
-export const IMAGE_OPTIMIZE_APP_VERSION = '30.8.1';
 export const IMAGE_OPTIMIZE_MIN_PPI = 72;
 export const IMAGE_OPTIMIZE_MAX_PPI = 1200;
 export const IMAGE_OPTIMIZE_MAX_TARGETS = 10;
@@ -13,6 +13,7 @@ export const IMAGE_OPTIMIZE_QUALITY_CONTRACT = Object.freeze({
     channelThreshold: 12, maxChangedRatio: 0.02, maxMeanAbsoluteChannelDelta: 2, maxChannelDelta: 48,
 });
 export const IMAGE_OPTIMIZE_GEOMETRY_TOLERANCE_PT = 0.01;
+export const IMAGE_OPTIMIZE_GRID_EPSILON = 1e-7;
 export const IMAGE_OPTIMIZE_PIXEL_TOLERANCE = 1;
 export const IMAGE_OPTIMIZE_ANISOTROPY_TOLERANCE_PPI = 0.1;
 export const IMAGE_OPTIMIZE_FIXED_SAVE_OPTIONS = Object.freeze({
@@ -51,6 +52,8 @@ function optimizeFacts(item, index) {
     optimizeNode = optimizeNode.parent;
   }
   var optimizeMatrix = item.matrix;
+  var optimizeDocumentOrigin = optimizeVector(optimizeNode.rulerOrigin, 2, "document rulerOrigin");
+  var optimizeBoardOrigin = optimizeVector(optimizeNode.artboards[0].rulerOrigin, 2, "artboard rulerOrigin");
   return {
     index: index,
     uuid: String(item.uuid),
@@ -73,7 +76,8 @@ function optimizeFacts(item, index) {
     clippedAncestor: optimizeClipped,
     lockedAncestor: optimizeLockedAncestor,
     hiddenAncestor: optimizeHiddenAncestor,
-    layer: String(item.layer.name)
+    layer: String(item.layer.name),
+    rasterGridOriginZero: optimizeDocumentOrigin[0] === 0 && optimizeDocumentOrigin[1] === 0 && optimizeBoardOrigin[0] === 0 && optimizeBoardOrigin[1] === 0
   };
 }
 function optimizeScan(doc) {
@@ -150,6 +154,7 @@ function optimizeWorkIdentity(doc, index) {
   return { key: optimizeIdentity.key, path: optimizeIdentity.path, saved: optimizeIdentity.saved, fileRevision: optimizeIdentity.fileRevision };
 }
 `;
+export const IMAGE_OPTIMIZE_VERSION_GUARD = HOST_VERSION_POLICY_JSX + '\nif (!hostVersionAdmitted("optimize_images", String(app.version))) throw new Error("HOST_VERSION_REFUSED: Host version changed or consent does not match.");\n';
 export const IMAGE_OPTIMIZE_READ_SOURCE_SCRIPT = `${OPTIMIZE_HELPERS}
 var optimizeSourceContext = requireDocumentForRead(params.expectedDocumentKey);
 var optimizeSourceDocument = app.activeDocument;
@@ -163,7 +168,7 @@ var result = {
 };
 `;
 export const IMAGE_OPTIMIZE_BASELINE_CODES = ['OPTIMIZE_TOO_MANY_IMAGES', 'OPTIMIZE_RENDER_EXISTS', 'OPTIMIZE_RENDER_MISSING'];
-export const IMAGE_OPTIMIZE_BASELINE_SCRIPT = `${OPTIMIZE_HELPERS}
+export const IMAGE_OPTIMIZE_BASELINE_SCRIPT = `${IMAGE_OPTIMIZE_VERSION_GUARD}${OPTIMIZE_HELPERS}
 var optimizeBaselineTarget = optimizeRequireWorkCopy();
 var optimizeBaselineDocument = optimizeBaselineTarget.doc;
 var optimizeBaselineRasters = optimizeScan(optimizeBaselineDocument);
@@ -176,7 +181,7 @@ var result = {
   render: optimizeBaselineRender
 };
 `;
-export const IMAGE_OPTIMIZE_RASTERIZE_SCRIPT = `${OPTIMIZE_HELPERS}
+export const IMAGE_OPTIMIZE_RASTERIZE_SCRIPT = `${IMAGE_OPTIMIZE_VERSION_GUARD}${OPTIMIZE_HELPERS}
 var optimizeTarget = optimizeRequireWorkCopy();
 var optimizeDocument = optimizeTarget.doc;
 var optimizeResults = [];
@@ -204,6 +209,19 @@ for (var optimizeTargetCursor = 0; optimizeTargetCursor < params.targets.length;
     var optimizeContainer = optimizeSource.parent;
     var optimizeSiblingsBefore = optimizeSiblings(optimizeContainer);
     var optimizeCountBefore = optimizeDocument.rasterItems.length;
+    var optimizeQuantum = 72 / params.capPpi;
+    var optimizeWidthPixels = (optimizeBefore.bounds[2] - optimizeBefore.bounds[0]) / optimizeQuantum;
+    var optimizeHeightPixels = (optimizeBefore.bounds[1] - optimizeBefore.bounds[3]) / optimizeQuantum;
+    if (!optimizeBefore.rasterGridOriginZero || Math.round(optimizeWidthPixels) < 1 || Math.round(optimizeHeightPixels) < 1 ||
+        Math.abs(optimizeWidthPixels - Math.round(optimizeWidthPixels)) > ${IMAGE_OPTIMIZE_GRID_EPSILON} ||
+        Math.abs(optimizeHeightPixels - Math.round(optimizeHeightPixels)) > ${IMAGE_OPTIMIZE_GRID_EPSILON}) {
+      throw new Error("OPTIMIZE_RASTER_GRID_UNMEASURED");
+    }
+    var optimizeGridLeft = Math.round(optimizeBefore.bounds[0] / optimizeQuantum) * optimizeQuantum;
+    var optimizeGridTop = Math.round(optimizeBefore.bounds[1] / optimizeQuantum) * optimizeQuantum;
+    var optimizeGridTranslation = [optimizeGridLeft - optimizeBefore.bounds[0], optimizeGridTop - optimizeBefore.bounds[1]];
+    var optimizeGridBounds = [optimizeGridLeft, optimizeGridTop,
+      optimizeGridLeft + Math.round(optimizeWidthPixels) * optimizeQuantum, optimizeGridTop - Math.round(optimizeHeightPixels) * optimizeQuantum];
     var optimizeOptions = new RasterizeOptions();
     optimizeOptions.resolution = params.capPpi;
     optimizeOptions.antiAliasingMethod = AntiAliasingMethod.ARTOPTIMIZED;
@@ -211,9 +229,19 @@ for (var optimizeTargetCursor = 0; optimizeTargetCursor < params.targets.length;
     optimizeOptions.transparency = true;
     optimizeOptions.padding = 0;
     optimizeOptions.convertSpotColors = true;
+    optimizeStage = "align_raster_grid";
+    if (optimizeGridTranslation[0] !== 0 || optimizeGridTranslation[1] !== 0) optimizeSource.translate(optimizeGridTranslation[0], optimizeGridTranslation[1]);
+    var optimizeAlignedBounds = optimizeSource.geometricBounds;
+    for (var optimizeGridCursor = 0; optimizeGridCursor < 4; optimizeGridCursor++) {
+      if (Math.abs(optimizeAlignedBounds[optimizeGridCursor] - optimizeGridBounds[optimizeGridCursor]) > optimizeQuantum * ${IMAGE_OPTIMIZE_GRID_EPSILON}) {
+        throw new Error("OPTIMIZE_RASTER_GRID_TRANSLATION_MISMATCH");
+      }
+    }
     optimizeStage = "rasterize";
-    var optimizeMade = optimizeAlertsOff(function () { return optimizeDocument.rasterize(optimizeSource, optimizeSource.geometricBounds, optimizeOptions); });
+    var optimizeMade = optimizeAlertsOff(function () { return optimizeDocument.rasterize(optimizeSource, optimizeGridBounds, optimizeOptions); });
     if (optimizeMade === null || optimizeMade === undefined) throw new Error("OPTIMIZE_RASTERIZE_RETURNED_NOTHING");
+    optimizeStage = "restore_position";
+    if (optimizeGridTranslation[0] !== 0 || optimizeGridTranslation[1] !== 0) optimizeMade.translate(-optimizeGridTranslation[0], -optimizeGridTranslation[1]);
     optimizeStage = "restore_name";
     var optimizeNameAfterRasterize = String(optimizeMade.name);
     if (optimizeNameAfterRasterize !== optimizeBefore.name) optimizeMade.name = optimizeBefore.name;
@@ -226,7 +254,8 @@ for (var optimizeTargetCursor = 0; optimizeTargetCursor < params.targets.length;
       rasterCountBefore: optimizeCountBefore,
       rasterCountAfter: optimizeDocument.rasterItems.length,
       siblingsBefore: optimizeSiblingsBefore,
-      siblingsAfter: optimizeSiblings(optimizeMade.parent)
+      siblingsAfter: optimizeSiblings(optimizeMade.parent),
+      gridTranslation: optimizeGridTranslation
     });
   } catch (optimizeCaught) {
     optimizeErrors.push({ uuid: optimizeUuid, stage: optimizeStage, message: String(optimizeCaught.message) });
@@ -248,7 +277,7 @@ var result = {
 `;
 export const IMAGE_OPTIMIZE_SAVE_PRE_ATTEMPT_CODES = ['OPTIMIZE_WORK_COPY_NOT_UNIQUE', 'OPTIMIZE_WORK_COPY_IDENTITY_MISMATCH', 'EXPORT_OUTPUT_EXISTS'];
 export const IMAGE_OPTIMIZE_SAVE_FAILED_CODE = 'OPTIMIZE_SAVE_FAILED';
-export const IMAGE_OPTIMIZE_SAVE_SCRIPT = `${OPTIMIZE_HELPERS}
+export const IMAGE_OPTIMIZE_SAVE_SCRIPT = `${IMAGE_OPTIMIZE_VERSION_GUARD}${OPTIMIZE_HELPERS}
 var optimizeSaveTarget = optimizeRequireWorkCopy();
 var optimizeSaveDocument = optimizeSaveTarget.doc;
 var optimizeStagedFile = new File(params.stagedPath);
@@ -358,10 +387,15 @@ export function classifyRasters(reads, capPpi, artboard) {
             exclude('outside_artboard');
         else if (Math.min(measured.ppi[0], measured.ppi[1]) <= capPpi)
             exclude('at_or_below_cap');
+        else if (!facts.rasterGridOriginZero)
+            exclude('raster_grid_origin_unmeasured');
         else {
             const expectedPixels = [Math.round(measured.points[0] * capPpi / 72), Math.round(measured.points[1] * capPpi / 72)];
             if (expectedPixels[0] < 1 || expectedPixels[1] < 1)
                 exclude('geometry_unavailable');
+            else if ([(facts.bounds[2] - facts.bounds[0]) * capPpi / 72, (facts.bounds[1] - facts.bounds[3]) * capPpi / 72]
+                .some((pixels) => Math.abs(pixels - Math.round(pixels)) > IMAGE_OPTIMIZE_GRID_EPSILON))
+                exclude('raster_grid_misaligned_size');
             else
                 candidates.push({ index: read.index, uuid: facts.uuid, name: facts.name, layer: facts.layer, pixels: measured.pixels, ppi: measured.ppi, expectedPixels });
         }
@@ -416,6 +450,8 @@ export function verifyTargetResult(result, capPpi) {
         problems.push('bounds changed');
     if (!near(after.position, before.position, IMAGE_OPTIMIZE_GEOMETRY_TOLERANCE_PT))
         problems.push('position changed');
+    if (!before.rasterGridOriginZero || !after.rasterGridOriginZero)
+        problems.push('raster grid origin unmeasured');
     if (after.matrix[1] !== 0 || after.matrix[2] !== 0 || !(after.matrix[0] > 0) || !(after.matrix[3] > 0))
         problems.push('result is rotated or flipped');
     if (after.colorSpace !== before.colorSpace || after.bitsPerChannel !== before.bitsPerChannel)
@@ -442,6 +478,7 @@ export function verifyTargetResult(result, capPpi) {
             layer: after.layer, pixelsBefore: ppiBefore.pixels, pixelsAfter: ppiAfter.pixels, ppiBefore: ppiBefore.ppi, ppiAfter: ppiAfter.ppi,
             bounds: after.bounds, position: after.position, colorSpace: after.colorSpace, bitsPerChannel: after.bitsPerChannel,
             channelsBefore: before.channels, channelsAfter: after.channels, stackingPreserved: true,
+            gridTranslation: result.gridTranslation,
         },
     };
 }
@@ -467,7 +504,8 @@ const candidateSchema = z.strictObject({
 const exclusionSchema = z.strictObject({
     index: z.number().int().nonnegative(), uuid: z.string().nullable(), name: z.string().nullable(),
     reason: z.enum(['read_failed', 'linked', 'not_rgb', 'bit_depth_unmeasured', 'rotated_or_flipped', 'anisotropic_scale', 'in_group_unmeasured',
-        'clipped', 'locked_or_hidden', 'appearance_unmeasured', 'outside_artboard', 'geometry_unavailable', 'at_or_below_cap']),
+        'clipped', 'locked_or_hidden', 'appearance_unmeasured', 'outside_artboard', 'geometry_unavailable', 'at_or_below_cap',
+        'raster_grid_misaligned_size', 'raster_grid_origin_unmeasured']),
     ppi: pairSchema.nullable(),
 });
 const saveOptionsSchema = z.strictObject({
@@ -481,12 +519,13 @@ const filesSchema = z.strictObject({
     renderFiles: z.array(z.string()),
 });
 const targetResultSchema = z.strictObject({
+    gridTranslation: pairSchema,
     sourceUuid: z.string(), resultUuid: z.string(), name: z.string(), nameRestored: z.boolean(), layer: z.string(),
     pixelsBefore: pairSchema, pixelsAfter: pairSchema, ppiBefore: pairSchema, ppiAfter: pairSchema, bounds: boundsSchema, position: pairSchema,
     colorSpace: z.string(), bitsPerChannel: z.number(), channelsBefore: z.number(), channelsAfter: z.number(), stackingPreserved: z.literal(true),
 });
 export const imageOptimizeRejectionReasonSchema = z.enum([
-    'document_key_mismatch', 'document_not_admitted', 'app_version_unmeasured', 'host_not_foreground', 'document_color_space_unsupported',
+    'document_key_mismatch', 'document_not_admitted', 'host_version_unmeasured', 'host_not_foreground', 'document_color_space_unsupported',
     'multiple_artboards_unmeasured', 'render_budget_exceeded', 'source_file_unsupported', 'too_many_images', 'no_targets', 'too_many_targets',
     'target_not_eligible', 'targets_required', 'output_path_required', 'output_exists', 'output_path_invalid', 'output_cross_device',
     'source_file_unavailable', 'export_root_unavailable',

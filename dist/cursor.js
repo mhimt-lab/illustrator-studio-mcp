@@ -1,11 +1,10 @@
-import { constants } from 'node:fs';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { link, lstat, open, rename, unlink } from 'node:fs/promises';
+import { link, lstat, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { defaultStateRoot } from './command-store.js';
 import { InvalidCursorError } from './domain.js';
-import { ensurePrivateDirectory, isMissingPath, unsafePrivateState, validatePrivateDirectory, validatePrivateOwnerAndMode, } from './private-state.js';
+import { createPrivateFileExclusive, ensurePrivateStateRoot, isMissingPath, openPrivateDirectory, openPrivateFileForRead, unsafePrivateState, validatePrivateOwnerAndMode, validatePrivateStateRoot, } from './private-state.js';
 const CURSOR_FORMAT = 'v1';
 const KEY_BYTES = 32;
 const KEY_FILE = 'cursor-signing-key.v1';
@@ -172,7 +171,7 @@ export class CursorSigner {
         }
     }
     async loadKeyForSign() {
-        await ensurePrivateDirectory(this.stateRoot, 'state root');
+        await ensurePrivateStateRoot(this.stateRoot);
         let state;
         try {
             state = await this.readState();
@@ -205,7 +204,7 @@ export class CursorSigner {
     }
     async loadExistingKey() {
         try {
-            await validatePrivateDirectory(this.stateRoot, 0o700, 'state root');
+            await validatePrivateStateRoot(this.stateRoot);
         }
         catch (error) {
             if (isMissingPath(error))
@@ -228,7 +227,7 @@ export class CursorSigner {
     }
     async initializeClaimedKey(initializationId) {
         const temporaryPath = join(this.stateRoot, `.${KEY_FILE}.${randomUUID()}.tmp`);
-        const handle = await open(temporaryPath, 'wx', 0o600);
+        const handle = await createPrivateFileExclusive(temporaryPath);
         const record = encodeKeyRecord(randomBytes(KEY_BYTES));
         try {
             await handle.chmod(0o600);
@@ -299,7 +298,7 @@ export class CursorSigner {
         }
     }
     async writePrivateRecord(path, record) {
-        const handle = await open(path, 'wx', 0o600);
+        const handle = await createPrivateFileExclusive(path);
         try {
             await handle.chmod(0o600);
             await handle.writeFile(record);
@@ -350,7 +349,7 @@ export class CursorSigner {
         validatePrivateOwnerAndMode(metadata, 0o600, `the existing ${description} file`);
         let handle;
         try {
-            handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+            handle = await openPrivateFileForRead(path);
         }
         catch (error) {
             throw unsafePrivateState(`the ${description} file could not be opened safely (${error instanceof Error ? error.message : String(error)}).`);
@@ -378,7 +377,7 @@ export class CursorSigner {
         }
     }
     async syncStateRoot() {
-        const directory = await open(this.stateRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+        const directory = await openPrivateDirectory(this.stateRoot);
         try {
             const metadata = await directory.stat();
             if (!metadata.isDirectory())

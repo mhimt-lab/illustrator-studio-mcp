@@ -77,6 +77,7 @@ export const NEXT_CALL_PLAN_ECHOES = Object.freeze({
     illustrator_release_clipping_mask: { expected_group_before: 'groupBefore', expected_parent_order: 'parentOrderBefore' },
     illustrator_create_clipping_mask: { expected_mask_before: 'maskBefore', expected_content_before: 'contentBefore', expected_parent_order: 'parentOrderBefore' },
     illustrator_create_layer: { expected_container_before: 'containerBefore', expected_sibling_order: 'siblingOrderBefore' },
+    illustrator_create_trim_marks: { expected_container_before: 'containerBefore', expected_sibling_order: 'siblingOrderBefore', expected_artboard_rect: 'artboardRect' },
     illustrator_set_layer_state: { expected_before: 'targetBefore', expected_sibling_order: 'siblingOrderBefore' },
     illustrator_reorder_layer: { expected_before: 'targetBefore', expected_sibling_order: 'siblingOrderBefore' },
     illustrator_move_object_to_layer: { expected_before: 'before', expected_after: 'after', expected_source_order: 'sourceOrderBefore', expected_destination_order: 'destinationOrderBefore' },
@@ -160,15 +161,18 @@ export const NEXT_CALL_BUILDERS = Object.freeze({
             expected_usage: { characters: plan.usage.characters, frames: plan.usage.frames } };
     },
     illustrator_replace_font: (input, plan) => {
-        if (!isRecord(plan.usage) || plan.usage.complete !== true || !Array.isArray(plan.usage.frameList))
+        if (!isRecord(plan.usage) || plan.usage.complete !== true || !Array.isArray(plan.usage.storyList))
             return undefined;
         const targets = [];
-        for (const frame of plan.usage.frameList) {
-            if (!isRecord(frame))
+        const frames = [];
+        for (const story of plan.usage.storyList) {
+            if (!isRecord(story) || !Array.isArray(story.frames))
                 return undefined;
-            targets.push({ uuid: frame.uuid, ranges: frame.ranges });
+            targets.push({ uuid: story.uuid, ranges: story.ranges, mappings: story.mappings });
+            frames.push(...story.frames);
         }
-        return { ...input, expected_usage: { characters: plan.usage.characters, frames: plan.usage.frames }, expected_targets: targets };
+        return { ...input, scope: { target_uuids: frames },
+            expected_usage: { characters: plan.usage.characters, stories: plan.usage.stories }, expected_targets: targets };
     },
     illustrator_edit_path_points: (input, plan) => isRecord(plan.after)
         ? { ...input, confirmed_after: plan.after.path } : undefined,

@@ -28,6 +28,58 @@ function stringifyJson(value) {
   return "{" + objectParts.join(",") + "}";
 }
 
+// Measured on 30.8.1: every read of an invalid page-item reference throws ReferenceError 45, and a native UUID lookup
+// that cannot serve an item throws Error 1200 with this exact message. Only these signatures are classified.
+var HOST_MRAP_MESSAGE = "an Illustrator error occurred: 1346458189 ('MRAP')";
+
+function hostErrorEvidence(error) {
+  var number = null;
+  var name = null;
+  var message = null;
+  try { number = error && typeof error.number === "number" ? error.number : null; } catch (numberError) {}
+  try { name = error && error.name ? String(error.name) : null; } catch (nameError) {}
+  try { message = error && error.message ? String(error.message) : null; } catch (messageError) {}
+  return { number: number, name: name, message: message };
+}
+
+function isHostReferenceInvalidError(error) {
+  var evidence = hostErrorEvidence(error);
+  return evidence.name === "ReferenceError" && evidence.number === 45;
+}
+
+/** The typed host error for an invalid reference; route and index say where it was read, when known. */
+function hostReferenceInvalidMessage(detail) {
+  var payload = { code: "ILLUSTRATOR_HOST_REFERENCE_INVALID" };
+  for (var key in detail) if (detail.hasOwnProperty(key)) payload[key] = detail[key];
+  return "MCP_ERROR:" + stringifyJson(payload);
+}
+
+/**
+ * The failure message a command records. ReferenceError 45 becomes the typed error with its raw number, name and
+ * message. A mutation adapter's OBJECT_NOT_FOUND (plan or apply; a lookup MRAP) is checked on this failure path only:
+ * when an item whose uuid cannot be read is still in the document, absence is unproved and the typed error replaces it.
+ */
+function hostFailureMessage(error) {
+  var message = error && error.message ? error.message : String(error);
+  if (isHostReferenceInvalidError(error)) {
+    return hostReferenceInvalidMessage({ route: null, index: null, hostError: hostErrorEvidence(error) });
+  }
+  var prefix = "MCP_ERROR:";
+  if (typeof runMutationTransaction !== "function" || typeof esAbsenceUnproved !== "function" || String(message).indexOf(prefix) !== 0 ||
+      (typeof MUTATION_SIDE_EFFECT_ATTEMPTED !== "undefined" && MUTATION_SIDE_EFFECT_ATTEMPTED === true) ||
+      String(message).indexOf("OBJECT_NOT_FOUND") < 0) {
+    return message;
+  }
+  var detail;
+  try { detail = eval("(" + message.substring(prefix.length) + ")"); } catch (parseError) { return message; }
+  if (!detail || detail.code !== "OBJECT_NOT_FOUND" || typeof detail.uuid !== "string" || app.documents.length === 0) return message;
+  var unproved;
+  try { unproved = esAbsenceUnproved(app.activeDocument, [detail.uuid]); } catch (scanError) { unproved = "scan_failed"; }
+  if (unproved === null || unproved === "uuid_present") return message;
+  return hostReferenceInvalidMessage({ uuid: detail.uuid, route: null, index: null, absenceUnproved: unproved,
+    hostError: { number: 1200, name: "Error", message: HOST_MRAP_MESSAGE } });
+}
+
 function readJson(path) {
   var file = new File(path);
   file.encoding = "UTF-8";
@@ -38,16 +90,63 @@ function readJson(path) {
   return eval("(" + text + ")");
 }
 
+// Measured on 30.8.1: a UTF-8 File.write of a string holding U+E0100 fails with a character conversion error and writes
+// nothing (U+20BB7 and 120 KB of BMP text write). Every surrogate code unit is therefore written as a JSON unicode escape,
+// so the encoder sees BMP text only. A surrogate can only occur inside a JSON string, so the JSON value is unchanged;
+// stringifyJson itself is not changed because host scripts hash and compare its output. The same pass counts the UTF-8
+// bytes the write must produce (measured on 30.8.1: no BOM, the written length equals this count).
+function jsonFileTextWithBytes(text) {
+  var hex = "0123456789abcdef";
+  var out = "";
+  var start = 0;
+  var bytes = 0;
+  for (var index = 0; index < text.length; index++) {
+    var unit = text.charCodeAt(index);
+    if (unit >= 0xD800 && unit <= 0xDFFF) {
+      out += text.substring(start, index) + "\\u" + hex.charAt((unit >> 12) & 15) + hex.charAt((unit >> 8) & 15) +
+        hex.charAt((unit >> 4) & 15) + hex.charAt(unit & 15);
+      start = index + 1;
+      bytes += 6;
+    } else if (unit < 0x80) bytes += 1;
+    else if (unit < 0x800) bytes += 2;
+    else bytes += 3;
+  }
+  return { text: start === 0 ? text : out + text.substring(start), bytes: bytes };
+}
+
+function jsonFileText(text) {
+  return jsonFileTextWithBytes(text).text;
+}
+
+// A failed write publishes nothing: File.write returns false and sets file.error (which close() clears, so it is read
+// first), and the staged length must equal the counted bytes before the rename (measured on 30.8.1).
 function writeJsonNew(path, value) {
   var file = new File(path + ".tmp");
   if (!file.exists) throw new Error("Secure command record staging file is missing " + path);
   file.encoding = "UTF-8";
   if (!file.open("w")) throw new Error("Cannot write " + path);
-  file.write(stringifyJson(value));
-  file.close();
+  var encoded = jsonFileTextWithBytes(stringifyJson(value));
+  var written = file.write(encoded.text);
+  var writeError = String(file.error);
+  var closed = file.close();
+  if (written !== true || writeError !== "" || closed !== true) {
+    throw new Error("Cannot write " + path + ": " + (writeError !== "" ? writeError : "write or close failed"));
+  }
+  var stagedLength = new File(path + ".tmp").length;
+  if (stagedLength !== encoded.bytes) {
+    throw new Error("Cannot write " + path + ": wrote " + stagedLength + " of " + encoded.bytes + " bytes");
+  }
   var target = new File(path);
   if (target.exists) throw new Error("Refusing to replace existing command record " + path);
   if (!file.rename(target.name)) throw new Error("Cannot publish " + path);
+}
+
+// Publishes a record Node prepared in full. Only a rename is used: it fails when the staging file is gone and never
+// creates one, unlike File.open "w" or "e".
+function publishPreparedRecord(path) {
+  var staged = new File(path + ".tmp");
+  if (new File(path).exists) throw new Error("Refusing to replace existing command record " + path);
+  if (!staged.rename(new File(path).name)) throw new Error("Secure command record staging file is missing " + path);
 }
 
 var DOCUMENT_KEY_SHA256_K = [
@@ -316,11 +415,11 @@ export function buildJsxCommand(options) {
         `if (typeof MUTATION_EDIT_SESSION_EVIDENCE !== "undefined" && MUTATION_EDIT_SESSION_EVIDENCE !== null) envelope.editSession = MUTATION_EDIT_SESSION_EVIDENCE;\n` +
         `return envelope;\n` +
         `}\n` +
-        `writeJsonNew(STATUS_PATH + ".running.json", { commandId: COMMAND_ID, state: "running" });\n` +
+        `publishPreparedRecord(STATUS_PATH + ".running.json");\n` +
         `var operationError = null;\n` +
         `try {\nvar params = readJson(PARAMS_PATH);\n${options.script}\n` +
         `} catch (error) {\n` +
-        `operationError = error && error.message ? error.message : String(error);\n` +
+        `operationError = hostFailureMessage(error);\n` +
         `}\n` +
         `if (operationError === null) {\n` +
         `if (typeof MUTATION_RUNNER_DISPOSITION !== "undefined" && MUTATION_RUNNER_DISPOSITION === "indeterminate") {\n` +

@@ -1,7 +1,7 @@
-import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { open, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { noFollowDirectoryFlags } from './platform-primitives.js';
 export class IndeterminateCallBlockedError extends Error {
     details;
     constructor(details) {
@@ -113,9 +113,10 @@ export class IndeterminateCallGate {
         finally {
             await handle.close();
         }
+        const directoryFlags = noFollowDirectoryFlags();
         try {
             await rename(temporaryPath, path);
-            const directory = await open(this.context.artifactRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+            const directory = await open(this.context.artifactRoot, directoryFlags);
             try {
                 await directory.sync();
             }

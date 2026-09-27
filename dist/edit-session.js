@@ -3,8 +3,9 @@ import { lstat, readdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { atomicCreatePrivateRecord, atomicReplacePrivateRecord, PRIVATE_RECORD_LIMITS, readSecurePrivateRecord, } from './private-record.js';
-import { ensurePrivateDirectory, isMissingPath, withPrivateDirectoryScope } from './private-state.js';
+import { ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath, withPrivateDirectoryScope } from './private-state.js';
 import { attributeEntry, ensureQuarantineArea, publishQuarantineManifest, quarantineArea, quarantineManifestExists, readQuarantineManifest, stateRootDevice, temporaryTwinPattern, } from './state-quarantine.js';
+import { currentUid } from './platform-primitives.js';
 export const EDIT_SESSION_RECORD_VERSION = 1;
 export const EDIT_SESSION_MAX_ITEMS = 2_000;
 export const EDIT_SESSION_SCAN_DEADLINE_MS = 15_000;
@@ -232,7 +233,7 @@ export class EditSessionStore {
         return join(this.recordDirectory, `${sessionId}${RECORD_SUFFIX}`);
     }
     async ensure() {
-        await ensurePrivateDirectory(this.stateRoot, 'state root');
+        await ensurePrivateStateRoot(this.stateRoot);
         await ensurePrivateDirectory(this.recordDirectory, 'edit session record directory');
     }
     async read(sessionId) {
@@ -295,9 +296,7 @@ export class EditSessionStore {
         if (options.confirmSessionId !== sessionId) {
             throw new EditSessionRecordError('Quarantining an edit session requires confirmSessionId to exactly match the session id.');
         }
-        if (typeof process.getuid !== 'function')
-            throw new EditSessionRecordError('Quarantine cannot verify the operating-system user.');
-        const selfUid = process.getuid();
+        const selfUid = currentUid();
         const hooks = options.hooks ?? {};
         const name = `${sessionId}${RECORD_SUFFIX}`;
         const { area } = quarantineArea(this.stateRoot, 'edit-sessions');

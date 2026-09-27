@@ -1,3 +1,4 @@
+import { hostVersionPublicFields, hostVersionInternalFields, normalizeHostVersionConsent } from '../host-version-consent.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { DeleteBackupError, deleteBackupFactsSchema, verifyDeleteBackup } from '../delete-shared.js';
@@ -6,17 +7,19 @@ import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, layerPathSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
+import { ANCESTOR_STATE_SCRIPT } from './ancestor-state-host-script.js';
 import { admitSourceWithColorSpace, placeImageAdmissionSchema } from './place-image-adapter.js';
+import { describeHostVersionScope } from '../host-version-admission.js';
+import { HOST_VERSION_POLICY_JSX } from '../host-version-policy.js';
 export const EMBED_IMAGE_OPERATION = 'embed_image';
 export const EMBED_IMAGE_VALIDATOR = { kind: EMBED_IMAGE_OPERATION, version: 1 };
 export const EMBED_IMAGE_MAX_DIRECT_ITEMS = 128;
 export const EMBED_IMAGE_TOLERANCE_PT = 0.01;
 export const EMBED_IMAGE_PRECISION_DIGITS = 6;
-export const EMBED_IMAGE_MEASURED_APP_VERSION = '30.8.1';
 export const EMBED_IMAGE_MEASURED_FORMATS = ['jpeg', 'png'];
 export const EMBED_IMAGE_MEASURED_COLOR_SPACES = ['RGB'];
-const CANONICAL_VERSION = 1;
-const RESULT_SCHEMA_VERSION = 1;
+const CANONICAL_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 2;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
@@ -41,6 +44,8 @@ const commonSnapshotFields = {
     hidden: z.boolean(),
     layerVisible: z.boolean(),
     layerLocked: z.boolean(),
+    ancestorLocked: z.boolean(),
+    ancestorHidden: z.boolean(),
 };
 export const embedImageBeforeSchema = z.strictObject({
     uuid: uuidSchema,
@@ -83,7 +88,7 @@ export function plannedEmbedAfter(before, pixels) {
     return {
         uuid: null, type: 'RasterItem', layerPath: before.layerPath, layerIndex: before.layerIndex, siblingUuids: before.siblingUuids,
         name: before.name, position: before.position, geometricBounds: before.geometricBounds,
-        locked: before.locked, hidden: before.hidden, layerVisible: before.layerVisible, layerLocked: before.layerLocked,
+        locked: before.locked, hidden: before.hidden, layerVisible: before.layerVisible, layerLocked: before.layerLocked, ancestorLocked: before.ancestorLocked, ancestorHidden: before.ancestorHidden,
         embedded: true, pixels: { width: pixels.width, height: pixels.height },
     };
 }
@@ -94,6 +99,7 @@ export function embedAfterWithinTolerance(left, right) {
         left.name === right.name && left.embedded === right.embedded &&
         left.pixels.width === right.pixels.width && left.pixels.height === right.pixels.height &&
         left.locked === right.locked && left.hidden === right.hidden && left.layerVisible === right.layerVisible && left.layerLocked === right.layerLocked &&
+        left.ancestorLocked === right.ancestorLocked && left.ancestorHidden === right.ancestorHidden &&
         left.position.every((value, index) => near(value, right.position[index])) &&
         left.geometricBounds.every((value, index) => near(value, right.geometricBounds[index]));
 }
@@ -102,7 +108,7 @@ const colorSpaceAdmissionSchema = z.strictObject({
     value: z.enum(['RGB', 'CMYK', 'Gray', 'Lab', 'Indexed', 'unknown']).nullable(),
     message: z.string().max(500).nullable(),
 });
-const commonRequest = {
+const commonRequest = { ...hostVersionInternalFields,
     expectedDocumentKey: documentKeySchema,
     targetUuid: uuidSchema,
     source: sourceSchema,
@@ -131,7 +137,7 @@ const internalInputSchema = z.discriminatedUnion('apply', [
     if (request.apply && request.confirmedAfter.uuid !== null)
         context.addIssue({ code: 'custom', message: 'confirmed_after must leave the UUID unknown (null).' });
 });
-const commonPublic = {
+const commonPublic = { ...hostVersionPublicFields,
     expected_document_key: documentKeySchema,
     target_uuid: uuidSchema.describe('Native PageItem.uuid of the linked PlacedItem to embed.'),
     source: sourceSchema.describe('The linked file: its absolute path (as illustrator_preflight_images reports it) and the SHA-256 of the bytes to embed.'),
@@ -155,7 +161,7 @@ const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(embe
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
 function normalizePublicInput(input) {
     const value = embedImagePublicInputSchema.parse(input);
-    const common = { expectedDocumentKey: value.expected_document_key, targetUuid: value.target_uuid, source: value.source, backupId: value.backup_id };
+    const common = { ...normalizeHostVersionConsent(value), expectedDocumentKey: value.expected_document_key, targetUuid: value.target_uuid, source: value.source, backupId: value.backup_id };
     return value.apply
         ? { ...common, expectedBefore: value.expected_before, confirmedAfter: value.confirmed_after, apply: true, commandId: value.command_id }
         : { ...common, apply: false };
@@ -188,7 +194,7 @@ async function beforeHost(input, services) {
 }
 export const EMBED_IMAGE_BLOCKERS = [
     'document_not_saved', 'backup_mismatch', 'backup_stale', 'host_version_unmeasured', 'document_color_space_unmeasured',
-    'target_locked', 'target_hidden', 'layer_hidden', 'layer_locked',
+    'target_locked', 'target_hidden', 'layer_hidden', 'layer_locked', 'ancestor_hidden', 'ancestor_locked',
     'link_missing', 'link_path_mismatch',
     'source_file_missing', 'source_file_unavailable', 'source_hash_mismatch', 'source_format_unmeasured', 'source_file_changed',
     'source_color_space_unmeasured', 'source_pixels_unknown',
@@ -293,6 +299,10 @@ export const embedImageResultSchema = z.union([
         derived.add('layer_hidden');
     if (result.plan.before.layerLocked)
         derived.add('layer_locked');
+    if (result.plan.before.ancestorHidden)
+        derived.add('ancestor_hidden');
+    if (result.plan.before.ancestorLocked)
+        derived.add('ancestor_locked');
     if (result.plan.sourceAdmission.status === 'blocked')
         derived.add(result.plan.sourceAdmission.reason);
     else {
@@ -406,11 +416,11 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
         throw new Error('Embed terminal result requires attestation.');
     await assertOperationSafetyAdapterConformance({ registration: EMBED_IMAGE_SAFETY, plan, result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
-export const EMBED_IMAGE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
+export const EMBED_IMAGE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}${ANCESTOR_STATE_SCRIPT}
 var EMBED_IMAGE_MAX_DIRECT_ITEMS = ${EMBED_IMAGE_MAX_DIRECT_ITEMS};
 var EMBED_IMAGE_TOLERANCE_PT = ${EMBED_IMAGE_TOLERANCE_PT};
 var EMBED_IMAGE_PRECISION_DIGITS = ${EMBED_IMAGE_PRECISION_DIGITS};
-var EMBED_IMAGE_MEASURED_APP_VERSION = ${JSON.stringify(EMBED_IMAGE_MEASURED_APP_VERSION)};
+${HOST_VERSION_POLICY_JSX}
 var EMBED_IMAGE_MEASURED_COLOR_SPACES = ${JSON.stringify(EMBED_IMAGE_MEASURED_COLOR_SPACES)};
 
 function embedRound(value) {
@@ -477,6 +487,7 @@ function embedCommon(document, item) {
   if (!item.parent || String(item.parent.typename) !== "Layer") throw mutationError("preflight_failed", "Embedding supports layer-direct items only; the target is inside a " + String(item.parent && item.parent.typename) + ".");
   var layerPath = embedLayerPath(document, item.layer);
   if (layerPath === null) throw mutationError("preflight_failed", "Target layer path is unavailable.");
+  var ancestors = mutationAncestorState(item);
   var slot = embedSlot(item.layer, item);
   if (slot.index < 0) throw mutationError("preflight_failed", "Target is not a direct child of its layer.");
   var position = item.position, bounds = item.geometricBounds;
@@ -485,7 +496,8 @@ function embedCommon(document, item) {
     uuid: String(item.uuid), layerPath: layerPath, layerIndex: slot.index, siblingUuids: slot.siblings, name: String(item.name || ""),
     position: [embedRound(position[0]), embedRound(position[1])],
     geometricBounds: [embedRound(bounds[0]), embedRound(bounds[1]), embedRound(bounds[2]), embedRound(bounds[3])],
-    locked: item.locked, hidden: item.hidden, layerVisible: item.layer.visible, layerLocked: item.layer.locked
+    locked: item.locked, hidden: item.hidden, layerVisible: item.layer.visible, layerLocked: item.layer.locked,
+    ancestorLocked: ancestors.ancestorLocked, ancestorHidden: ancestors.ancestorHidden
   };
 }
 
@@ -499,7 +511,7 @@ function embedBeforeSnapshot(document, target) {
   return {
     uuid: snapshot.uuid, type: "PlacedItem", layerPath: snapshot.layerPath, layerIndex: snapshot.layerIndex, siblingUuids: snapshot.siblingUuids,
     name: snapshot.name, position: snapshot.position, geometricBounds: snapshot.geometricBounds,
-    locked: snapshot.locked, hidden: snapshot.hidden, layerVisible: snapshot.layerVisible, layerLocked: snapshot.layerLocked,
+    locked: snapshot.locked, hidden: snapshot.hidden, layerVisible: snapshot.layerVisible, layerLocked: snapshot.layerLocked, ancestorLocked: snapshot.ancestorLocked, ancestorHidden: snapshot.ancestorHidden,
     linkPath: linkPath, width: embedRound(target.width), height: embedRound(target.height),
     matrix: [embedRound(matrix.mValueA), embedRound(matrix.mValueB), embedRound(matrix.mValueC), embedRound(matrix.mValueD), embedRound(matrix.mValueTX), embedRound(matrix.mValueTY)]
   };
@@ -513,7 +525,7 @@ function embedRasterSnapshot(document, raster) {
   return {
     uuid: snapshot.uuid, type: "RasterItem", layerPath: snapshot.layerPath, layerIndex: snapshot.layerIndex, siblingUuids: snapshot.siblingUuids,
     name: snapshot.name, position: snapshot.position, geometricBounds: snapshot.geometricBounds,
-    locked: snapshot.locked, hidden: snapshot.hidden, layerVisible: snapshot.layerVisible, layerLocked: snapshot.layerLocked,
+    locked: snapshot.locked, hidden: snapshot.hidden, layerVisible: snapshot.layerVisible, layerLocked: snapshot.layerLocked, ancestorLocked: snapshot.ancestorLocked, ancestorHidden: snapshot.ancestorHidden,
     embedded: raster.embedded === true,
     pixels: { width: Math.round(Math.abs(Number(box[2]) - Number(box[0]))), height: Math.round(Math.abs(Number(box[1]) - Number(box[3]))) }
   };
@@ -522,7 +534,8 @@ function embedRasterSnapshot(document, raster) {
 function embedBeforeMatches(left, right) {
   if (!left || !right || left.type !== right.type || !mutationSameSequence(left.layerPath, right.layerPath) || left.layerIndex !== right.layerIndex ||
       !mutationSameSequence(left.siblingUuids, right.siblingUuids) || left.name !== right.name || left.linkPath !== right.linkPath ||
-      left.locked !== right.locked || left.hidden !== right.hidden || left.layerVisible !== right.layerVisible || left.layerLocked !== right.layerLocked) return false;
+      left.locked !== right.locked || left.hidden !== right.hidden || left.layerVisible !== right.layerVisible || left.layerLocked !== right.layerLocked ||
+      left.ancestorLocked !== right.ancestorLocked || left.ancestorHidden !== right.ancestorHidden) return false;
   for (var p = 0; p < 2; p++) if (!embedNear(left.position[p], right.position[p])) return false;
   for (var b = 0; b < 4; b++) if (!embedNear(left.geometricBounds[b], right.geometricBounds[b])) return false;
   if (!embedNear(left.width, right.width) || !embedNear(left.height, right.height)) return false;
@@ -534,7 +547,8 @@ function embedAfterMatches(left, right) {
   if (!left || !right || left.type !== right.type || !mutationSameSequence(left.layerPath, right.layerPath) || left.layerIndex !== right.layerIndex ||
       !mutationSameSequence(left.siblingUuids, right.siblingUuids) || left.name !== right.name || left.embedded !== right.embedded ||
       !left.pixels || !right.pixels || left.pixels.width !== right.pixels.width || left.pixels.height !== right.pixels.height ||
-      left.locked !== right.locked || left.hidden !== right.hidden || left.layerVisible !== right.layerVisible || left.layerLocked !== right.layerLocked) return false;
+      left.locked !== right.locked || left.hidden !== right.hidden || left.layerVisible !== right.layerVisible || left.layerLocked !== right.layerLocked ||
+      left.ancestorLocked !== right.ancestorLocked || left.ancestorHidden !== right.ancestorHidden) return false;
   for (var p = 0; p < 2; p++) if (!embedNear(left.position[p], right.position[p])) return false;
   for (var b = 0; b < 4; b++) if (!embedNear(left.geometricBounds[b], right.geometricBounds[b])) return false;
   return true;
@@ -546,7 +560,7 @@ function embedPlannedAfter(before) {
   return {
     uuid: null, type: "RasterItem", layerPath: before.layerPath, layerIndex: before.layerIndex, siblingUuids: before.siblingUuids,
     name: before.name, position: before.position, geometricBounds: before.geometricBounds,
-    locked: before.locked, hidden: before.hidden, layerVisible: before.layerVisible, layerLocked: before.layerLocked,
+    locked: before.locked, hidden: before.hidden, layerVisible: before.layerVisible, layerLocked: before.layerLocked, ancestorLocked: before.ancestorLocked, ancestorHidden: before.ancestorHidden,
     embedded: true, pixels: { width: admission.pixels.width, height: admission.pixels.height }
   };
 }
@@ -581,12 +595,14 @@ function embedResolve(forApply) {
   if (!context.mutationAllowed) block("document_not_saved");
   if (context.path !== params.backup.sourcePath) block("backup_mismatch");
   else if (context.fileRevision !== params.backup.sourceFileRevision) block("backup_stale");
-  if (String(app.version) !== EMBED_IMAGE_MEASURED_APP_VERSION) block("host_version_unmeasured");
+  if (!hostVersionAdmitted("embed_image", String(app.version))) block("host_version_unmeasured");
   if (context.colorSpace !== "RGB") block("document_color_space_unmeasured");
   if (before.locked) block("target_locked");
   if (before.hidden) block("target_hidden");
   if (!before.layerVisible) block("layer_hidden");
   if (before.layerLocked) block("layer_locked");
+  if (before.ancestorHidden) block("ancestor_hidden");
+  if (before.ancestorLocked) block("ancestor_locked");
   if (before.linkPath === null || !(new File(before.linkPath)).exists) block("link_missing");
   // A broken link (file throws) reads as a placeholder path, which no admitted source equals.
   if (before.linkPath === null) before.linkPath = "/unavailable";
@@ -741,7 +757,7 @@ function normalizedRequest(input) {
 export const embedImageToolContract = {
     name: 'illustrator_embed_image',
     title: 'Plan or Embed Linked Image',
-    description: `Plan or embed one linked, layer-direct PlacedItem (bound by document key and native UUID) into the document, so illustrator_optimize_images can process it. Irreversible in the document: requires a verified backup (illustrator_create_backup) of the clean saved file and the linked file's absolute path and SHA-256. Measured scope only (Illustrator ${EMBED_IMAGE_MEASURED_APP_VERSION}, foreground, unlocked, RGB document, ${EMBED_IMAGE_MEASURED_FORMATS.join('/').toUpperCase()} RGB sources). The plan returns before (the linked item) and after (a RasterItem in the same slot, name and frame, with the source's pixels); apply echoes both as expected_before and confirmed_after, re-checks them and the link immediately before embedding, and verifies the raster (new UUID, which the result reports). Refused: missing or changed links, other files, locked or hidden items or layers, items in groups, dirty or unsaved documents, backup mismatch or staleness. The document is then unsaved; save it with illustrator_save_document and the same backup_id. There is no in-call undo: a failure after embedding is indeterminate and keeps the Illustrator lock (release with illustrator_reconcile action=release_unverified); the unchanged file equals the backup, so closing without saving and reopening restores the before state.`,
+    description: `Plan or embed one linked, layer-direct PlacedItem (bound by document key and native UUID) into the document, so illustrator_optimize_images can process it. Irreversible in the document: requires a verified backup (illustrator_create_backup) of the clean saved file and the linked file's absolute path and SHA-256. Measured scope only (Illustrator ${describeHostVersionScope('embed_image')}, foreground, unlocked, RGB document, ${EMBED_IMAGE_MEASURED_FORMATS.join('/').toUpperCase()} RGB sources). The plan returns before (the linked item) and after (a RasterItem in the same slot, name and frame, with the source's pixels); apply echoes both as expected_before and confirmed_after, re-checks them and the link immediately before embedding, and verifies the raster (new UUID, which the result reports). Refused: missing or changed links, other files, locked or hidden items or layers, items in groups, dirty or unsaved documents, backup mismatch or staleness. The document is then unsaved; save it with illustrator_save_document and the same backup_id. There is no in-call undo: a failure after embedding is indeterminate and keeps the Illustrator lock (release with illustrator_reconcile action=release_unverified); the unchanged file equals the backup, so closing without saving and reopening restores the before state.`,
     inputSchema,
     publicInputSchema: embedImagePublicInputSchema,
     outputSchema: embedImageResponseSchema,
@@ -760,6 +776,7 @@ export function createEmbedImageAdapter() {
         mutationHostApplicationMode: 'foreground',
         admit: admitEmbedImageRequest,
         beforeHost,
+        hostVersionOperation: () => 'embed_image',
         buildCommand(input) {
             const normalized = normalizedRequest(input);
             const { commandId: _commandId, ...params } = normalized.request;

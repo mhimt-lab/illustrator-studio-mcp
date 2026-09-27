@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { isShortDocumentKey } from './document-key.js';
-import { constants } from 'node:fs';
 import { link, lstat, open, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { inflateSync } from 'node:zlib';
@@ -9,6 +8,7 @@ import { canonicalCommandIdSchema } from './command-id.js';
 import { canonicalSha256 } from './mutation-canonical.js';
 import { boundAppearancePreviewResultSchema, pathAppearanceMutationSchema, pathAppearanceStateSchema, } from './adapters/set-path-appearance-adapter.js';
 import { IndeterminateExecutionError, ProvenPreApplyFailureError } from './domain.js';
+import { noFollowNonBlockingReadFlags, noFollowDirectoryFlags } from './platform-primitives.js';
 export const M6_P0_RECIPE_ID = 'm6_appearance_preview_v2';
 export const M6_P0_RECIPE_VERSION = 2;
 export const M6_P0_RECIPE_DEFINITION = Object.freeze({
@@ -294,12 +294,6 @@ function inspectPng(bytes) {
     }
     return { width, height };
 }
-function secureReadFlags() {
-    if (typeof constants.O_NOFOLLOW !== 'number' || typeof constants.O_NONBLOCK !== 'number') {
-        throw codedError('Secure PNG publication requires O_NOFOLLOW and O_NONBLOCK.', 'UNSUPPORTED_FILESYSTEM');
-    }
-    return constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
-}
 function identity(statValue) {
     return { dev: String(statValue.dev), ino: String(statValue.ino), size: String(statValue.size) };
 }
@@ -344,7 +338,9 @@ function assertExpectedRenderEvidence(actual, expected) {
 }
 export async function publishPngPreviewNoReplace(planValue, options = {}) {
     const plan = await revalidatePngPreviewPublicationPlan(planValue);
-    const stagingHandle = await open(plan.stagingPath, secureReadFlags());
+    const readFlags = noFollowNonBlockingReadFlags();
+    const directoryFlags = noFollowDirectoryFlags();
+    const stagingHandle = await open(plan.stagingPath, readFlags);
     let destinationHandle;
     let linkedByThisCall = false;
     try {
@@ -369,7 +365,7 @@ export async function publishPngPreviewNoReplace(planValue, options = {}) {
             if (options.expectedRenderEvidence === undefined || options.onBoundary === undefined)
                 throw error;
         }
-        destinationHandle = await open(plan.destinationPath, secureReadFlags());
+        destinationHandle = await open(plan.destinationPath, readFlags);
         const published = await readVerifiedPngHandle(destinationHandle);
         if (!sameIdentity(staging.stat, published.stat) || staging.sha256 !== published.sha256 ||
             staging.width !== published.width || staging.height !== published.height) {
@@ -386,7 +382,7 @@ export async function publishPngPreviewNoReplace(planValue, options = {}) {
         await options.onBoundary?.('file_synced', evidence);
         await options.fault?.('after_file_sync');
         await options.fault?.('before_directory_sync');
-        const directoryHandle = await open(plan.destinationDirectory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+        const directoryHandle = await open(plan.destinationDirectory, directoryFlags);
         try {
             const directoryStat = await directoryHandle.stat({ bigint: true });
             if (String(directoryStat.dev) !== plan.destinationDirectoryIdentity.dev ||
@@ -769,7 +765,7 @@ async function executeM6P0AppearancePreviewRecipeOwned(inputValue, dependencies)
                 postcondition: postcondition,
                 evidenceDigest: evidenceDigest(response),
             };
-            const stagingHandle = await open(publicationPlan.stagingPath, secureReadFlags());
+            const stagingHandle = await open(publicationPlan.stagingPath, noFollowNonBlockingReadFlags());
             let inspected;
             try {
                 inspected = await readVerifiedPngHandle(stagingHandle);

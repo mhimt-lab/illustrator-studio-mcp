@@ -1,4 +1,7 @@
+import { ANCESTOR_STATE_SCRIPT } from './ancestor-state-host-script.js';
 import { TRANSFORM_GROUP_SCRIPT, transformGroupRowsSchema, translateGroupRows, groupRowsMatch } from './transform-group-snapshot.js';
+import { TRANSFORM_IMAGE_SCRIPT, imageMatches, imageModelMatches, rotateImage, scaleImage, transformImageSchema, } from './transform-image-snapshot.js';
+import { TRANSFORM_TEXT_MAX_CHARACTERS, TRANSFORM_TEXT_SCRIPT, textFrameMatches, transformTextFrameSchema, translateTextFrame, } from './transform-text-snapshot.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
@@ -8,8 +11,8 @@ import { boundsSchema, documentContextSchema, layerPathSchema, mutationAuditSche
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 export const TRANSFORM_OBJECT_OPERATION = 'transform_object';
 export const TRANSFORM_OBJECT_VALIDATOR = { kind: TRANSFORM_OBJECT_OPERATION, version: 1 };
-const TRANSFORM_OBJECT_CANONICAL_VERSION = 5;
-const TRANSFORM_OBJECT_RESULT_SCHEMA_VERSION = 4;
+const TRANSFORM_OBJECT_CANONICAL_VERSION = 8;
+const TRANSFORM_OBJECT_RESULT_SCHEMA_VERSION = 7;
 const TRANSFORM_OBJECT_CLASSIFIER_VERSION = 1;
 const TRANSFORM_OBJECT_CONFORMANCE_VERSION = 2;
 const TRANSFORM_OBJECT_ERROR_MAPPING_VERSION = 1;
@@ -81,18 +84,39 @@ export const transformPathSnapshotSchema = z.strictObject({
     editable: z.boolean(),
     layerVisible: z.boolean(),
     layerLocked: z.boolean(),
+    ancestorLocked: z.boolean(),
+    ancestorHidden: z.boolean(),
     pathGeometry: pathGeometrySchema.nullable(),
     stroke: strokeGeometrySchema.nullable(),
 });
+function refineTextFrameSnapshot(snapshot, context) {
+    if (snapshot.type === 'TextFrame' ? snapshot.textFrame === undefined || snapshot.pathGeometry !== null ||
+        snapshot.stroke !== null : snapshot.textFrame !== undefined) {
+        context.addIssue({ code: 'custom', message: 'Only TextFrame snapshots carry text evidence, and they require it.' });
+    }
+}
+export const transformPathOrTextSnapshotSchema = transformPathSnapshotSchema.extend({
+    type: z.enum(['PathItem', 'TextFrame']),
+    textFrame: transformTextFrameSchema.optional(),
+}).superRefine(refineTextFrameSnapshot);
 export const transformObjectSnapshotSchema = transformPathSnapshotSchema.extend({
-    type: z.enum(['PathItem', 'GroupItem']),
+    type: z.enum(['PathItem', 'GroupItem', 'TextFrame', 'PlacedItem', 'RasterItem']),
     groupRows: transformGroupRowsSchema.optional(),
+    textFrame: transformTextFrameSchema.optional(),
+    image: transformImageSchema.optional(),
 }).superRefine((snapshot, context) => {
+    const isImage = snapshot.type === 'PlacedItem' || snapshot.type === 'RasterItem';
+    if (isImage ? snapshot.image === undefined || snapshot.pathGeometry !== null || snapshot.stroke !== null ||
+        (snapshot.image.kind === 'linked') !== (snapshot.type === 'PlacedItem')
+        : snapshot.image !== undefined) {
+        context.addIssue({ code: 'custom', message: 'Only PlacedItem and RasterItem snapshots carry image evidence, and they require it.' });
+    }
     if (snapshot.type === 'GroupItem' ? snapshot.groupRows === undefined || snapshot.pathGeometry !== null ||
         snapshot.stroke !== null || snapshot.groupRows[0]?.uuid !== snapshot.uuid
         : snapshot.groupRows !== undefined) {
         context.addIssue({ code: 'custom', message: 'Only GroupItem snapshots require complete descendant evidence.' });
     }
+    refineTextFrameSnapshot(snapshot, context);
 });
 const commonInternalFields = {
     expectedDocumentKey: z.string().min(1).max(16_384),
@@ -344,6 +368,8 @@ const blockerSchema = z.enum([
     'target_not_editable',
     'layer_hidden',
     'layer_locked',
+    'ancestor_hidden',
+    'ancestor_locked',
 ]);
 function canonicalGeometryNumber(value) {
     const rounded = Number(value.toFixed(12));
@@ -381,6 +407,7 @@ function deriveExpectedSnapshot(before, transform) {
         return {
             ...before,
             ...(before.groupRows === undefined ? {} : { groupRows: translateGroupRows(before.groupRows, transform.deltaX, transform.deltaY) }),
+            ...(before.textFrame === undefined ? {} : { textFrame: translateTextFrame(before.textFrame, transform.deltaX, transform.deltaY) }),
             geometricBounds: before.geometricBounds.map((value, index) => canonicalGeometryNumber(value + (index % 2 === 0 ? transform.deltaX : transform.deltaY))),
             position: mapGeometryPoint(before.position, translatePoint),
             pathGeometry: before.pathGeometry === null ? null : {
@@ -392,6 +419,22 @@ function deriveExpectedSnapshot(before, transform) {
                 })),
             },
         };
+    }
+    if (before.image !== undefined) {
+        if (!imageModelMatches(before.image, before.geometricBounds, TRANSFORM_BOUNDS_TOLERANCE_PT)) {
+            throw new Error('Image bounds do not match its matrix; scale and rotation are unsupported for this image.');
+        }
+        if (transform.type === 'rotate') {
+            const rotated = rotateImage(before.image, before.geometricBounds, transform.angleDegrees);
+            return { ...before, geometricBounds: rotated.bounds, position: [rotated.bounds[0], rotated.bounds[1]], image: rotated.image };
+        }
+        const factor = transform.scalePercent / 100;
+        const [left, top, right, bottom] = before.geometricBounds;
+        const cx = (left + right) / 2;
+        const cy = (top + bottom) / 2;
+        const geometricBounds = [cx + (left - cx) * factor, cy + (top - cy) * factor, cx + (right - cx) * factor, cy + (bottom - cy) * factor]
+            .map(canonicalGeometryNumber);
+        return { ...before, geometricBounds, position: [geometricBounds[0], geometricBounds[1]], image: scaleImage(before.image, factor) };
     }
     if (before.type !== 'PathItem' || before.pathGeometry === null || before.stroke === null) {
         throw new Error('Scale and rotation planning require bounded path geometry and stroke state.');
@@ -465,12 +508,14 @@ function deriveExpectedSnapshot(before, transform) {
     };
 }
 export function snapshotsWithinTolerance(left, right) {
-    if (!groupRowsMatch(left.groupRows, right.groupRows))
+    if (!groupRowsMatch(left.groupRows, right.groupRows) || !textFrameMatches(left.textFrame, right.textFrame) ||
+        !imageMatches(left.image, right.image))
         return false;
     if (left.uuid !== right.uuid || left.type !== right.type ||
         canonicalDigest(left.layerPath) !== canonicalDigest(right.layerPath) ||
         left.locked !== right.locked || left.hidden !== right.hidden || left.editable !== right.editable ||
         left.layerVisible !== right.layerVisible || left.layerLocked !== right.layerLocked ||
+        left.ancestorLocked !== right.ancestorLocked || left.ancestorHidden !== right.ancestorHidden ||
         left.geometricBounds.some((value, index) => Math.abs(value - right.geometricBounds[index]) > TRANSFORM_BOUNDS_TOLERANCE_PT) ||
         left.position.some((value, index) => Math.abs(value - right.position[index]) > TRANSFORM_BOUNDS_TOLERANCE_PT) ||
         (left.stroke === null) !== (right.stroke === null) ||
@@ -496,7 +541,7 @@ export function snapshotsWithinTolerance(left, right) {
     return true;
 }
 function snapshotsMatchTransformContract(left, right, transform) {
-    return transform.type === 'rotate' || left.type === 'GroupItem'
+    return transform.type === 'rotate' || left.type === 'GroupItem' || left.type === 'TextFrame' || left.image !== undefined
         ? snapshotsWithinTolerance(left, right)
         : canonicalDigest(left) === canonicalDigest(right);
 }
@@ -518,7 +563,8 @@ export const transformObjectPlanSchema = z.strictObject({
         canonicalDigest(plan.before.layerPath) !== canonicalDigest(plan.after.layerPath) ||
         plan.before.locked !== plan.after.locked || plan.before.hidden !== plan.after.hidden ||
         plan.before.editable !== plan.after.editable || plan.before.layerVisible !== plan.after.layerVisible ||
-        plan.before.layerLocked !== plan.after.layerLocked) {
+        plan.before.layerLocked !== plan.after.layerLocked || plan.before.ancestorLocked !== plan.after.ancestorLocked ||
+        plan.before.ancestorHidden !== plan.after.ancestorHidden) {
         context.addIssue({ code: 'custom', message: 'Translate plan must preserve target identity and safety state.' });
     }
     try {
@@ -748,8 +794,13 @@ var TRANSFORM_SCALE_MAX_PERCENT = ${TRANSFORM_SCALE_MAX_PERCENT};
 var TRANSFORM_MAX_PATH_POINTS = ${TRANSFORM_MAX_PATH_POINTS};
 var TRANSFORM_ROTATE_MIN_DEGREES = ${TRANSFORM_ROTATE_MIN_DEGREES};
 var TRANSFORM_ROTATE_MAX_DEGREES = ${TRANSFORM_ROTATE_MAX_DEGREES};
-
+${ANCESTOR_STATE_SCRIPT}
 function transformFindTarget(document, uuid) {
+  // Measured: native UUID lookup misreports images, so a runner with the image module scans their collections first.
+  if (typeof transformImageFind === "function") {
+    var image = transformImageFind(document, uuid);
+    if (image !== null) return image;
+  }
   if (typeof document.getPageItemFromUuid !== "function") {
     throw mutationError("preflight_failed", "Illustrator native UUID lookup is unavailable.");
   }
@@ -821,21 +872,14 @@ function transformStroke(target) {
 
 function transformSnapshot(document, target) {
   var isGroup = target.typename === "GroupItem";
-  if (target.typename !== "PathItem" && !(isGroup && params.transform.type === "translate" && typeof transformGroupRows === "function")) {
-    throw mutationError("preflight_failed", "Transform supports PathItem targets and measured GroupItem translation only.");
+  var isText = target.typename === "TextFrame";
+  var isImage = (target.typename === "PlacedItem" || target.typename === "RasterItem") && typeof transformImageEvidence === "function";
+  if (target.typename !== "PathItem" && !isImage && !(isGroup && params.transform.type === "translate" && typeof transformGroupRows === "function") &&
+      !(isText && params.transform.type === "translate" && typeof transformTextFrameEvidence === "function")) {
+    throw mutationError("preflight_failed", "Transform supports PathItem targets, measured GroupItem translation and measured TextFrame translation only.");
   }
-  if (isGroup) {
-    if (!target.parent || target.parent.typename !== "Layer") {
-      throw mutationError("preflight_failed", "The translated group must be directly on a layer; its contents may be nested.");
-    }
-    var ancestor = target.parent, depth = 0;
-    while (ancestor && ancestor.typename !== "Document") {
-      if (++depth > 32 || ancestor.locked !== false ||
-          (ancestor.typename === "Layer" ? ancestor.visible !== true : ancestor.hidden !== false)) {
-        throw mutationError("preflight_failed", "Group ancestor is locked, hidden or unreadable.");
-      }
-      ancestor = ancestor.parent;
-    }
+  if (isGroup && (!target.parent || target.parent.typename !== "Layer")) {
+    throw mutationError("preflight_failed", "The translated group must be directly on a layer; its contents may be nested.");
   }
   if (typeof target.uuid !== "string" || target.uuid !== params.targetUuid) {
     throw mutationError("preflight_failed", "Target native UUID is unavailable or changed.");
@@ -847,6 +891,7 @@ function transformSnapshot(document, target) {
   }
   var layerPath = transformLayerPath(document, target.layer);
   if (layerPath === null) throw mutationError("preflight_failed", "Target layer path is unavailable.");
+  var ancestors = mutationAncestorState(target);
   var bounds = target.geometricBounds;
   var position = target.position;
   if (!bounds || bounds.length !== 4 || !position || position.length !== 2) {
@@ -866,10 +911,17 @@ function transformSnapshot(document, target) {
     editable: target.editable,
     layerVisible: target.layer.visible,
     layerLocked: target.layer.locked,
-    pathGeometry: params.transform.type !== "translate" ? transformPathGeometry(target) : null,
-    stroke: params.transform.type !== "translate" ? transformStroke(target) : null
+    ancestorLocked: ancestors.ancestorLocked,
+    ancestorHidden: ancestors.ancestorHidden,
+    pathGeometry: params.transform.type !== "translate" && !isImage ? transformPathGeometry(target) : null,
+    stroke: params.transform.type !== "translate" && !isImage ? transformStroke(target) : null
   };
-  if (isGroup) snapshot.groupRows = transformGroupRows(target);
+  if (isImage) snapshot.image = transformImageEvidence(target);
+  if (isGroup) {
+    snapshot.groupRows = transformGroupRows(target, snapshot.locked || snapshot.hidden || !snapshot.layerVisible || snapshot.layerLocked ||
+      snapshot.ancestorLocked || snapshot.ancestorHidden);
+  }
+  if (isText) snapshot.textFrame = transformTextFrameEvidence(target);
   return snapshot;
 }
 
@@ -884,10 +936,17 @@ function transformSnapshotMatches(left, right) {
   if ((left && left.groupRows) || (right && right.groupRows)) {
     if (typeof transformGroupRowsMatch !== "function" || !transformGroupRowsMatch(left.groupRows,right.groupRows)) return false;
   }
+  if ((left && left.textFrame) || (right && right.textFrame)) {
+    if (typeof transformTextFrameMatches !== "function" || !transformTextFrameMatches(left.textFrame,right.textFrame)) return false;
+  }
+  if ((left && left.image) || (right && right.image)) {
+    if (typeof transformImageMatches !== "function" || !transformImageMatches(left.image,right.image)) return false;
+  }
   if (!left || !right || left.uuid !== right.uuid || left.type !== right.type ||
       !mutationSameSequence(left.layerPath, right.layerPath) || left.locked !== right.locked ||
       left.hidden !== right.hidden || left.editable !== right.editable ||
-      left.layerVisible !== right.layerVisible || left.layerLocked !== right.layerLocked) return false;
+      left.layerVisible !== right.layerVisible || left.layerLocked !== right.layerLocked ||
+      left.ancestorLocked !== right.ancestorLocked || left.ancestorHidden !== right.ancestorHidden) return false;
   for (var boundIndex = 0; boundIndex < 4; boundIndex++) {
     if (Math.abs(left.geometricBounds[boundIndex] - right.geometricBounds[boundIndex]) > TRANSFORM_TOLERANCE_PT) return false;
   }
@@ -921,6 +980,7 @@ function transformScalePoint(point, centerX, centerY, factor, name) {
 }
 
 function transformScaleSnapshot(before, factor) {
+  if (before.image && typeof transformImageScale === "function") return transformImageScale(before, factor);
   if (before.pathGeometry === null || before.stroke === null) {
     throw mutationError("preflight_failed", "Scale geometry or stroke state is unavailable.");
   }
@@ -957,6 +1017,8 @@ function transformScaleSnapshot(before, factor) {
     editable: before.editable,
     layerVisible: before.layerVisible,
     layerLocked: before.layerLocked,
+    ancestorLocked: before.ancestorLocked,
+    ancestorHidden: before.ancestorHidden,
     pathGeometry: { closed: before.pathGeometry.closed, points: points },
     stroke: before.stroke
   };
@@ -984,6 +1046,7 @@ function transformStraightPathBounds(pathGeometry) {
 }
 
 function transformRotateSnapshot(before, angleDegrees) {
+  if (before.image && typeof transformImageRotate === "function") return transformImageRotate(before, angleDegrees);
   if (before.pathGeometry === null || before.stroke === null) {
     throw mutationError("preflight_failed", "Rotation geometry or stroke state is unavailable.");
   }
@@ -1026,6 +1089,8 @@ function transformRotateSnapshot(before, angleDegrees) {
     editable: before.editable,
     layerVisible: before.layerVisible,
     layerLocked: before.layerLocked,
+    ancestorLocked: before.ancestorLocked,
+    ancestorHidden: before.ancestorHidden,
     pathGeometry: pathGeometry,
     stroke: before.stroke
   };
@@ -1066,10 +1131,14 @@ function transformTranslateSnapshot(before, deltaX, deltaY) {
     editable: before.editable,
     layerVisible: before.layerVisible,
     layerLocked: before.layerLocked,
+    ancestorLocked: before.ancestorLocked,
+    ancestorHidden: before.ancestorHidden,
     pathGeometry: pathGeometry,
     stroke: before.stroke
   };
   if (before.groupRows) snapshot.groupRows = transformTranslateGroupRows(before.groupRows,deltaX,deltaY);
+  if (before.textFrame) snapshot.textFrame = transformTranslateTextFrame(before.textFrame,deltaX,deltaY);
+  if (before.image) snapshot.image = before.image;
   return snapshot;
 }
 
@@ -1113,6 +1182,8 @@ function transformResolve(forApply) {
   if (!before.editable) blockers.push("target_not_editable");
   if (!before.layerVisible) blockers.push("layer_hidden");
   if (before.layerLocked) blockers.push("layer_locked");
+  if (before.ancestorHidden) blockers.push("ancestor_hidden");
+  if (before.ancestorLocked) blockers.push("ancestor_locked");
   if (forApply && blockers.length > 0) {
     throw new Error("MCP_ERROR:" + stringifyJson({ code: "TRANSFORM_APPLY_BLOCKED", reasonCodes: blockers, uuid: params.targetUuid }));
   }
@@ -1213,7 +1284,7 @@ function transformRollback(state) {
   var currentHeight = current.geometricBounds[1] - current.geometricBounds[3];
   if (!mutationSameSequence(current.layerPath, preflight.before.layerPath) ||
       current.type !== preflight.before.type || current.locked || current.hidden || !current.editable ||
-      !current.layerVisible || current.layerLocked ||
+      !current.layerVisible || current.layerLocked || current.ancestorLocked || current.ancestorHidden ||
       (current.stroke === null) !== (preflight.before.stroke === null) ||
       (current.stroke !== null && (current.stroke.enabled !== preflight.before.stroke.enabled ||
         (current.stroke.width === null) !== (preflight.before.stroke.width === null) ||
@@ -1257,9 +1328,9 @@ function transformRollback(state) {
           Math.abs(beforeHeight - currentHeight) > TRANSFORM_TOLERANCE_PT) {
         return { status: "indeterminate", message: "Rollback refused because translated target size changed." };
       }
-      if (current.groupRows && !transformSnapshotMatches(current, transformTranslateSnapshot(preflight.before,
+      if ((current.groupRows || current.textFrame) && !transformSnapshotMatches(current, transformTranslateSnapshot(preflight.before,
           current.position[0] - preflight.before.position[0], current.position[1] - preflight.before.position[1]))) {
-        return { status: "indeterminate", message: "Rollback refused because descendants are not a uniform translation of the before state." };
+        return { status: "indeterminate", message: "Rollback refused because the target is not a uniform translation of the before state." };
       }
       target.translate(
         preflight.before.position[0] - current.position[0],
@@ -1318,7 +1389,7 @@ var result = {
 if (transformExecution.transaction.state === "verified") result.postcondition = transformExecution.value;
 `;
 export const TRANSFORM_OBJECT_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
-${TRANSFORM_OBJECT_MODULE_SCRIPT}${TRANSFORM_GROUP_SCRIPT}${TRANSFORM_OBJECT_RUNNER_SCRIPT}`;
+${TRANSFORM_OBJECT_MODULE_SCRIPT}${TRANSFORM_GROUP_SCRIPT}${TRANSFORM_TEXT_SCRIPT}${TRANSFORM_IMAGE_SCRIPT}${TRANSFORM_OBJECT_RUNNER_SCRIPT}`;
 export const TRANSFORM_OBJECT_HOST_SCRIPT_DIGEST = canonicalSha256(TRANSFORM_OBJECT_SCRIPT);
 export const TRANSFORM_OBJECT_ADAPTER_IDENTITY = mutationAdapterIdentity({
     version: 2,
@@ -1354,7 +1425,7 @@ function normalizedRequest(input) {
 export const transformObjectToolContract = {
     name: 'illustrator_transform_object',
     title: 'Plan or Transform Object',
-    description: 'Plan or transform one existing PathItem or translate a bounded nested mixed GroupItem bound by explicit document key and native UUID. Supports relative translation, bounded uniform center scaling, and bounded center rotation of closed straight-segment paths. Apply compares complete planned geometry, verifies native read-back, and uses measured verified recovery.',
+    description: `Plan or transform one existing PathItem, or translate a bounded nested mixed GroupItem or an unthreaded point or area TextFrame (horizontal or vertical, directly on a layer, 1-${TRANSFORM_TEXT_MAX_CHARACTERS} characters, RGB/CMYK/Gray/none character paint), bound by explicit document key and native UUID. Supports relative translation, bounded uniform center scaling, and bounded center rotation of closed straight-segment paths and of linked (PlacedItem) or embedded (RasterItem) images directly on a layer or in one unclipped group. Apply compares complete planned geometry, verifies native read-back, and uses measured verified recovery.`,
     inputSchema: transformObjectInputSchema,
     publicInputSchema: transformObjectPublicInputSchema,
     outputSchema: transformObjectResponseSchema,

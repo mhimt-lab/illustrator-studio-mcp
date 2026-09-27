@@ -1,17 +1,22 @@
+import { hostVersionConsentSchema } from '../host-version-consent.js';
+import { hostVersionPublicFields, hostVersionInternalFields, normalizeHostVersionConsent } from '../host-version-consent.js';
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { z } from 'zod';
+import { extractSvgTextExpectation, SvgNestedGroupError, svgTextExpectationSchema, svgCodePointCountsSchema, SVG_TEXT_MAX_UNITS, SVG_TEXT_MAX_DISTINCT, SVG_FONT_READ_LIMIT, SVG_TEXT_DIFFERENCE_LIMIT, SVG_FONT_WARNING_LIMIT, SVG_TEXT_VERIFICATION_SCRIPT } from '../svg-text-verification.js';
+import { BLOCKED_NEXT_STEPS_NOTE } from '../blocked-guidance.js';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, layerPathSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
+import { noFollowReadFlags } from '../platform-primitives.js';
+import { describeHostVersionScope } from '../host-version-admission.js';
+import { HOST_VERSION_POLICY_JSX, hostVersionAdmitted } from '../host-version-policy.js';
 export const IMPORT_VECTOR_ARTWORK_OPERATION = 'import_vector_artwork';
 export const IMPORT_VECTOR_ARTWORK_VALIDATOR = { kind: IMPORT_VECTOR_ARTWORK_OPERATION, version: 1 };
-export const IMPORT_VECTOR_MEASURED_APP_VERSION = '30.8.1';
 export const IMPORT_VECTOR_MAX_LAYER_ITEMS = 128;
 export const IMPORT_VECTOR_MAX_SOURCE_CHILDREN = 256;
 export const IMPORT_VECTOR_MAX_SVG_BYTES = 8 * 1024 * 1024;
@@ -22,7 +27,7 @@ export const IMPORT_VECTOR_PRECISION_DIGITS = 6;
 export const IMPORT_VECTOR_MAX_PATH_LENGTH = 4_096;
 export const IMPORT_VECTOR_MEASURED_CHILD_TYPES = ['PathItem', 'CompoundPathItem', 'TextFrame'];
 const CANONICAL_VERSION = 1;
-const RESULT_SCHEMA_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 3;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
@@ -38,13 +43,14 @@ const anchorSchema = z.strictObject({ x: canonicalNumberSchema, y: canonicalNumb
 const layerItemUuidsSchema = z.array(uuidSchema).max(IMPORT_VECTOR_MAX_LAYER_ITEMS);
 export const importVectorSourceBlockerSchema = z.enum([
     'source_file_missing', 'source_file_unavailable', 'source_hash_mismatch', 'source_format_unmeasured',
-    'source_svg_linked_content', 'source_svg_units_unmeasured',
+    'source_svg_linked_content', 'source_svg_units_unmeasured', 'source_svg_text_unverifiable', 'source_svg_nested_group',
 ]);
 export const importVectorAdmissionSchema = z.discriminatedUnion('status', [
     z.strictObject({
         status: z.literal('admitted'),
         resolvedPath: sourcePathSchema,
         format: z.enum(['svg', 'ai']),
+        svgText: svgTextExpectationSchema.nullable(),
         bytes: z.number().int().positive(),
         modifiedAtSeconds: z.number().int().nonnegative(),
         sha256: sha256Schema,
@@ -56,7 +62,7 @@ export const importVectorAdmissionSchema = z.discriminatedUnion('status', [
         message: z.string().min(1).max(500),
     }),
 ]);
-const commonRequest = {
+const commonRequest = { ...hostVersionInternalFields,
     expectedDocumentKey: documentKeySchema,
     expectedLayerPath: layerPathSchema,
     artboardIndex: z.number().int().safe().nonnegative(),
@@ -72,11 +78,14 @@ const internalInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonRequest, admission: importVectorAdmissionSchema.optional(), expectedLayerItemUuids: layerItemUuidsSchema,
         apply: z.literal(true), commandId: canonicalCommandIdSchema }),
 ]).superRefine((request, context) => {
+    if (request.admission?.status === 'admitted' && (request.admission.format === 'svg') !== (request.admission.svgText !== null)) {
+        context.addIssue({ code: 'custom', message: 'SVG admission requires text expectations; AI admission must not carry them.' });
+    }
     if (request.admission?.status === 'admitted' && request.admission.sha256 !== request.source.sha256) {
         context.addIssue({ code: 'custom', message: 'An admitted source must carry the requested SHA-256.' });
     }
 });
-const commonPublic = {
+const commonPublic = { ...hostVersionPublicFields,
     expected_document_key: documentKeySchema,
     expected_layer_path: layerPathSchema,
     artboard_index: z.number().int().safe().nonnegative(),
@@ -102,7 +111,7 @@ const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(impo
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
 function normalizePublicInput(input) {
     const value = importVectorArtworkPublicInputSchema.parse(input);
-    const common = {
+    const common = { ...normalizeHostVersionConsent(value),
         expectedDocumentKey: value.expected_document_key, expectedLayerPath: value.expected_layer_path,
         artboardIndex: value.artboard_index, source: value.source, anchor: value.anchor,
     };
@@ -112,7 +121,22 @@ function normalizePublicInput(input) {
 }
 export async function admitImportVectorRequest(input) {
     const request = unadmittedInputSchema.parse(input);
-    return { ...request, admission: await admitVectorSource(request.source) };
+    const admission = await admitVectorSource(request.source);
+    if (!request.apply && admission.status === 'blocked' &&
+        ['source_svg_text_unverifiable', 'source_svg_nested_group'].includes(admission.reason)) {
+        throw new SvgTextPlanBlockedError(admission.reason, admission.message);
+    }
+    return { ...request, admission };
+}
+export class SvgTextPlanBlockedError extends Error {
+    reason;
+    constructor(reason, message) {
+        super(message);
+        this.reason = reason;
+    }
+    nextSteps() {
+        return { blocked_by: [this.reason], actions: ['unsupported'], note: `${this.message} ${BLOCKED_NEXT_STEPS_NOTE}` };
+    }
 }
 function boundedMessage(error) {
     const raw = error instanceof Error ? error.message : String(error);
@@ -162,8 +186,9 @@ export async function admitVectorSource(source) {
     }
     const format = extname(resolvedPath).toLowerCase() === '.svg' ? 'svg' : 'ai';
     let handle;
+    const flags = noFollowReadFlags();
     try {
-        handle = await open(resolvedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        handle = await open(resolvedPath, flags);
     }
     catch (error) {
         return { status: 'blocked', resolvedPath, reason: 'source_file_unavailable', message: boundedMessage(error) };
@@ -184,6 +209,7 @@ export async function admitVectorSource(source) {
         if (sha256 !== source.sha256) {
             return { status: 'blocked', resolvedPath, reason: 'source_hash_mismatch', message: `Source file SHA-256 ${sha256} does not match the requested ${source.sha256}.` };
         }
+        let svgText = null;
         if (format === 'svg') {
             if (bytes.length > IMPORT_VECTOR_MAX_SVG_BYTES) {
                 return { status: 'blocked', resolvedPath, reason: 'source_format_unmeasured', message: 'SVG is larger than the supported size.' };
@@ -191,6 +217,13 @@ export async function admitVectorSource(source) {
             const blocker = svgSourceBlocker(bytes.toString('utf8'));
             if (blocker !== null)
                 return { status: 'blocked', resolvedPath, ...blocker };
+            try {
+                svgText = extractSvgTextExpectation(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+            }
+            catch (error) {
+                return { status: 'blocked', resolvedPath,
+                    reason: error instanceof SvgNestedGroupError ? 'source_svg_nested_group' : 'source_svg_text_unverifiable', message: boundedMessage(error) };
+            }
         }
         else {
             const head = bytes.subarray(0, 16).toString('latin1');
@@ -199,7 +232,7 @@ export async function admitVectorSource(source) {
             }
         }
         return {
-            status: 'admitted', resolvedPath, format, bytes: bytes.length,
+            status: 'admitted', resolvedPath, format, svgText, bytes: bytes.length,
             modifiedAtSeconds: Number(before.mtimeNs / 1000000000n), sha256,
         };
     }
@@ -219,7 +252,7 @@ export function deriveImportTopLeft(artboardBounds, anchor) {
 }
 const boundsSchema = z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]);
 const hostBlockerSchema = z.enum([
-    'document_mutation_not_allowed', 'unsupported_host_version', 'other_documents_open', 'document_color_space_unmeasured',
+    'document_mutation_not_allowed', 'host_version_unmeasured', 'other_documents_open', 'document_color_space_unmeasured',
     'layer_not_top_level', 'layer_has_sublayers', 'layer_hidden', 'layer_locked', 'layer_item_capacity_exceeded',
     'source_file_changed', 'source_is_target_document',
 ]);
@@ -233,6 +266,7 @@ const layerStateSchema = z.strictObject({
     itemUuids: z.array(uuidSchema).max(IMPORT_VECTOR_MAX_LAYER_ITEMS),
 });
 const planSchema = z.strictObject({
+    hostVersionConsent: hostVersionConsentSchema,
     operation: z.literal(IMPORT_VECTOR_ARTWORK_OPERATION),
     documentKey: documentKeySchema,
     hostVersion: z.string().max(64),
@@ -368,6 +402,22 @@ const unmeasuredEvidenceSchema = z.strictObject({
     translate: z.strictObject({ ms: z.number().int().nonnegative(), threw: z.string().max(500).nullable(),
         delta: z.tuple([z.number().finite(), z.number().finite()]), boundsBefore: boundsSchema, boundsAfter: boundsSchema }),
 });
+const textVerificationSchema = z.strictObject({
+    status: z.enum(['matched', 'mismatch']),
+    reasonCode: z.enum(['text_content_mismatch']).nullable(),
+    actualCounts: svgCodePointCountsSchema,
+    missing: svgCodePointCountsSchema.max(SVG_TEXT_DIFFERENCE_LIMIT),
+    extra: svgCodePointCountsSchema.max(SVG_TEXT_DIFFERENCE_LIMIT),
+    truncated: z.boolean(),
+});
+const fontSubstitutionsSchema = z.strictObject({
+    status: z.enum(['checked', 'skipped_limit', 'unspecified_fonts', 'not_svg']),
+    entries: z.array(z.strictObject({ font: z.string().min(1).max(255), characters: z.number().int().positive().max(SVG_FONT_READ_LIMIT) })).max(SVG_FONT_WARNING_LIMIT),
+    truncated: z.boolean(),
+    checkedCharacters: z.number().int().nonnegative().max(SVG_FONT_READ_LIMIT),
+    totalCodeUnits: z.number().int().nonnegative().max(SVG_TEXT_MAX_UNITS),
+    ms: z.number().int().nonnegative(),
+});
 const createdSchema = z.strictObject({
     uuid: uuidSchema,
     type: z.literal('GroupItem'),
@@ -384,14 +434,15 @@ const createdSchema = z.strictObject({
     }),
     timing: z.strictObject({ openMs: z.number().int().nonnegative(), duplicateMs: z.number().int().nonnegative() }),
     unmeasured: unmeasuredEvidenceSchema,
+    font_substitutions: fontSubstitutionsSchema,
 });
 function nodeDerivedBlockers(result, planned) {
     const blockers = new Set();
     const { plan } = result;
     if (planned && !result.document.mutationAllowed)
         blockers.add('document_mutation_not_allowed');
-    if (plan.hostVersion !== IMPORT_VECTOR_MEASURED_APP_VERSION)
-        blockers.add('unsupported_host_version');
+    if (!hostVersionAdmitted('import_vector_artwork', plan.hostVersion, plan.hostVersionConsent))
+        blockers.add('host_version_unmeasured');
     if (planned && plan.documentCount !== 1)
         blockers.add('other_documents_open');
     if (result.document.colorSpace !== 'RGB')
@@ -413,10 +464,34 @@ function nodeDerivedBlockers(result, planned) {
 const HOST_ONLY_BLOCKERS = new Set(['source_file_changed', 'source_is_target_document', 'source_file_missing']);
 export const importVectorArtworkResultSchema = z.union([
     z.strictObject({ operation: z.literal(IMPORT_VECTOR_ARTWORK_OPERATION), applied: z.literal(false),
-        document: documentContextSchema, plan: planSchema, transaction: transactionSchema }),
+        document: documentContextSchema, plan: planSchema, transaction: transactionSchema, text_verification: textVerificationSchema.nullable() }),
     z.strictObject({ operation: z.literal(IMPORT_VECTOR_ARTWORK_OPERATION), applied: z.literal(true),
-        document: documentContextSchema, plan: planSchema, created: createdSchema, transaction: transactionSchema }),
+        document: documentContextSchema, plan: planSchema, created: createdSchema, transaction: transactionSchema, text_verification: textVerificationSchema.nullable() }),
 ]).superRefine((result, context) => {
+    const expectation = result.plan.admission.status === 'admitted' ? result.plan.admission.svgText : null;
+    const text = result.text_verification;
+    if (result.applied && expectation !== null && text?.status !== 'matched') {
+        context.addIssue({ code: 'custom', message: 'Applied SVG import requires verified character counts.' });
+    }
+    if (result.applied && expectation?.hasRenderedText === false && result.created.children.some((child) => child.typename === 'TextFrame')) {
+        context.addIssue({ code: 'custom', message: 'Text-free SVG import must not create text frames.' });
+    }
+    if (text !== null) {
+        const actual = new Map(text.actualCounts);
+        const expected = new Map(expectation?.counts ?? []);
+        const missing = [...expected].filter(([point, count]) => count > (actual.get(point) ?? 0))
+            .map(([point, count]) => [point, count - (actual.get(point) ?? 0)]);
+        const extra = [...actual].filter(([point, count]) => count > (expected.get(point) ?? 0))
+            .map(([point, count]) => [point, count - (expected.get(point) ?? 0)]);
+        const mismatch = missing.length > 0 || extra.length > 0;
+        if (expectation === null || text.status !== (mismatch ? 'mismatch' : 'matched') ||
+            text.reasonCode !== (mismatch ? 'text_content_mismatch' : null) ||
+            text.truncated !== (missing.length > SVG_TEXT_DIFFERENCE_LIMIT || extra.length > SVG_TEXT_DIFFERENCE_LIMIT) ||
+            JSON.stringify(text.missing) !== JSON.stringify(missing.slice(0, SVG_TEXT_DIFFERENCE_LIMIT)) ||
+            JSON.stringify(text.extra) !== JSON.stringify(extra.slice(0, SVG_TEXT_DIFFERENCE_LIMIT))) {
+            context.addIssue({ code: 'custom', message: 'SVG text verification does not match the source and observed counts.' });
+        }
+    }
     const planned = result.transaction.state === 'planned';
     const derived = nodeDerivedBlockers(result, planned);
     const reported = new Set(result.plan.applyBlockedReasonCodes);
@@ -549,11 +624,18 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
     await assertOperationSafetyAdapterConformance({ registration: IMPORT_VECTOR_ARTWORK_SAFETY, plan, result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
 export const IMPORT_VECTOR_ARTWORK_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
-var VI_MEASURED_APP_VERSION = ${JSON.stringify(IMPORT_VECTOR_MEASURED_APP_VERSION)};
+${HOST_VERSION_POLICY_JSX}
+${SVG_TEXT_VERIFICATION_SCRIPT}
 var VI_MAX_LAYER_ITEMS = ${IMPORT_VECTOR_MAX_LAYER_ITEMS};
 var VI_MAX_SOURCE_CHILDREN = ${IMPORT_VECTOR_MAX_SOURCE_CHILDREN};
 var VI_TOLERANCE_PT = ${IMPORT_VECTOR_TOLERANCE_PT};
 var VI_PRECISION_DIGITS = ${IMPORT_VECTOR_PRECISION_DIGITS};
+var VI_TEXT_MAX_UNITS = ${SVG_TEXT_MAX_UNITS};
+var VI_TEXT_MAX_DISTINCT = ${SVG_TEXT_MAX_DISTINCT};
+var VI_FONT_READ_LIMIT = ${SVG_FONT_READ_LIMIT};
+var VI_DIFFERENCE_LIMIT = ${SVG_TEXT_DIFFERENCE_LIMIT};
+var VI_FONT_WARNING_LIMIT = ${SVG_FONT_WARNING_LIMIT};
+var viTextVerification = null;
 var VI_CHILD_TYPES = { PathItem: true, CompoundPathItem: true, TextFrame: true };
 
 function viRound(value) {
@@ -655,7 +737,7 @@ function viResolve(forApply) {
   var sublayerCount = layer.layers.length;
   var blockers = [];
   if (!context.mutationAllowed) blockers.push("document_mutation_not_allowed");
-  if (String(app.version) !== VI_MEASURED_APP_VERSION) blockers.push("unsupported_host_version");
+  if (!hostVersionAdmitted("import_vector_artwork", String(app.version))) blockers.push("host_version_unmeasured");
   // Measured with the target as the only open document; which document becomes active after closing the source
   // with others open is not measured.
   if (app.documents.length !== 1) blockers.push("other_documents_open");
@@ -678,7 +760,7 @@ function viResolve(forApply) {
 }
 
 function viPlan(preflight) {
-  return {
+  var plan = {
     operation: "import_vector_artwork", documentKey: preflight.context.key, hostVersion: String(app.version),
     documentCount: app.documents.length, coordinateSpace: "artboard_top_left", unit: "pt",
     artboardIndex: params.artboardIndex, artboardBounds: preflight.rect,
@@ -689,6 +771,9 @@ function viPlan(preflight) {
     predicted: { consumedUuids: [], created: "one GroupItem at index 0 of the layer; its UUIDs and children are known only after apply opens the source" },
     applyBlockedReasonCodes: preflight.blockers, applyAllowed: preflight.blockers.length === 0
   };
+  var consent = hostVersionConsent(params);
+  if (consent !== null) plan.hostVersionConsent = consent;
+  return plan;
 }
 
 /** The children of the root group, or a refusal reason; nothing nested, locked, hidden, or of an unmeasured type. */
@@ -700,6 +785,12 @@ function viTree(root, withUuid) {
     var item = items[index];
     var typename = String(item.typename);
     if (VI_CHILD_TYPES[typename] !== true || item.locked === true || item.hidden === true) return { reason: "source_content_unmeasured" };
+    // Measured (30.8.1 and 30.8.2, an SVG with a marker): the source holds an empty CompoundPathItem whose bounds are
+    // inverted, and Illustrator drops it when the file is saved, so the saved document no longer matches the import.
+    if (typename === "CompoundPathItem") {
+      var compoundBounds = viBounds(item);
+      if (compoundBounds[0] > compoundBounds[2] || compoundBounds[1] < compoundBounds[3]) return { reason: "source_empty_compound_path" };
+    }
     var node = { typename: typename, name: String(item.name), memberCount: typename === "CompoundPathItem" ? item.pathItems.length : null };
     if (withUuid) node = { uuid: String(item.uuid), typename: node.typename, name: node.name, memberCount: node.memberCount };
     nodes.push(node);
@@ -935,10 +1026,11 @@ function viVerifySteps(preflight, plan, op) {
   var tree = viTree(copy, true);
   if (tree.reason || !viSameTree(preflight.source.children, tree.nodes)) throw mutationError("verify_mismatch", "The imported group does not keep the source children.");
   if (!viSourceFileUnchanged(params.admission)) throw mutationError("verify_mismatch", "The source file changed during the import.");
+  var fonts = viVerifyText(copy, params.admission);
   return { uuid: op.copiedUuid, type: "GroupItem", name: String(copy.name), geometricBounds: bounds, width: width, height: height,
     children: tree.nodes, layerItemUuids: order,
     source: { rootName: preflight.source.rootName, geometricBounds: sourceBounds, children: preflight.source.children },
-    timing: { openMs: preflight.openMs, duplicateMs: op.duplicateMs }, unmeasured: op.evidence };
+    timing: { openMs: preflight.openMs, duplicateMs: op.duplicateMs }, unmeasured: op.evidence, font_substitutions: fonts };
 }
 
 /**
@@ -1021,7 +1113,7 @@ var viExecution = runMutationTransaction({
 var viDocument = viExecution.preflight.context;
 if (app.documents.length > 0 && app.activeDocument === viExecution.preflight.document) viDocument = getDocumentContext();
 var result = { operation: "import_vector_artwork", applied: viExecution.transaction.state === "verified",
-  document: viDocument, plan: viExecution.plan, transaction: viExecution.transaction };
+  document: viDocument, plan: viExecution.plan, transaction: viExecution.transaction, text_verification: viTextVerification };
 if (viExecution.transaction.state === "verified") result.created = viExecution.value;
 `;
 export const IMPORT_VECTOR_ARTWORK_HOST_SCRIPT_DIGEST = canonicalSha256(IMPORT_VECTOR_ARTWORK_SCRIPT);
@@ -1042,7 +1134,7 @@ function normalizedRequest(input) {
 export const importVectorArtworkToolContract = {
     name: 'illustrator_import_vector_artwork',
     title: 'Plan or Import SVG / AI Artwork',
-    description: 'Plan or import the editable contents of one .svg or .ai file (absolute path plus its SHA-256) as one new GroupItem at the front of an explicit top-level layer, with the top-left of its bounds at an artboard-top-left anchor in points. Measured profile only: Illustrator 30.8.1 in the foreground, the target is the only open document, RGB source and target, a top-level target layer without sublayers, and a source whose single layer holds exactly one visible unlocked GroupItem of paths, compound paths, and text. SVG must declare px width and height and must not reference images or external resources; anything else is refused. The plan reads only the target (the source is checked in Node); pass plan.layer.itemUuids back as expected_layer_item_uuids to apply. Apply opens the source without alerts, duplicates the root group, proves the copy by collection scans, closes the source without saving, moves the copy to the anchor, and verifies position, size, children, and layer order; on failure it removes only the copy and closes the source. The source file is never written.',
+    description: 'Plan or import the editable contents of one .svg or .ai file (absolute path plus its SHA-256) as one new GroupItem at the front of an explicit top-level layer, with the top-left of its bounds at an artboard-top-left anchor in points. Measured profile only: Illustrator ' + describeHostVersionScope('import_vector_artwork') + ' in the foreground, the target is the only open document, RGB source and target, a top-level target layer without sublayers, and a source whose single layer holds exactly one visible unlocked GroupItem of paths, compound paths, and text. SVG must declare px width and height and must not reference images or external resources; anything else is refused. The plan reads only the target (the source is checked in Node); pass plan.layer.itemUuids back as expected_layer_item_uuids to apply. Apply opens the source without alerts, duplicates the root group, proves the copy by collection scans, closes the source without saving, moves the copy to the anchor, and verifies position, size, children, and layer order; on failure it removes only the copy and closes the source. The source file is never written. SVG text verification compares character counts across flat frames, ignoring order and tab/LF/CR/space; font substitutions are warnings. Plans refuse malformed XML and, for SVGs with text, nested groups/tspans or unverifiable rendering.',
     inputSchema,
     publicInputSchema: importVectorArtworkPublicInputSchema,
     outputSchema: importVectorArtworkResponseSchema,
@@ -1069,6 +1161,7 @@ export function createImportVectorArtworkAdapter() {
         errorMappingVersion: ERROR_MAPPING_VERSION, hostScriptDigest: IMPORT_VECTOR_ARTWORK_HOST_SCRIPT_DIGEST,
         mutationHostApplicationMode: 'foreground',
         admit: admitImportVectorRequest,
+        hostVersionOperation: () => 'import_vector_artwork',
         buildCommand(input) {
             const normalized = normalizedRequest(input);
             const { commandId: _commandId, ...params } = normalized.request;

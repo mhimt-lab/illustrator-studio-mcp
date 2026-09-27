@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { canonicalCommandIdSchema } from './command-id.js';
 import { canonicalSha256 } from './mutation-canonical.js';
 import { atomicCreatePrivateRecord, readSecurePrivateRecord } from './private-record.js';
-import { ensurePrivateDirectory, isMissingPath, validatePrivateDirectory, withPrivateDirectoryScope } from './private-state.js';
+import { ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath, validatePrivateDirectory, validatePrivateStateRoot, withPrivateDirectoryScope } from './private-state.js';
 export const RECIPE_EXECUTION_AUTHORITY_VERSION = 1;
 const DIRECTORY = 'recipe-executions';
 const MAX_RECORD_BYTES = 262_144;
@@ -88,7 +88,7 @@ export class RecipeExecutionAuthorityStore {
         canonicalCommandIdSchema.parse(input.commandId);
         if (!isDigest(input.executionDigest))
             throw new Error('Recipe execution digest must be SHA-256.');
-        await ensurePrivateDirectory(this.root, 'state root');
+        await ensurePrivateStateRoot(this.root);
         await ensurePrivateDirectory(this.executionsRoot, 'recipe executions directory');
         const directory = this.executionDirectory(input.commandId);
         let directoryCreated = false;
@@ -198,7 +198,7 @@ export class RecipeExecutionAuthorityStore {
     async inspect(commandId) {
         canonicalCommandIdSchema.parse(commandId);
         try {
-            await validatePrivateDirectory(this.root, 0o700, 'state root');
+            await validatePrivateStateRoot(this.root);
             await validatePrivateDirectory(this.executionsRoot, 0o700, 'recipe executions directory');
         }
         catch (error) {

@@ -1,8 +1,9 @@
+import { hostVersionConsentSchema } from '../../host-version-consent.js';
 import { z } from 'zod';
 import { canonicalSha256 } from '../../mutation-canonical.js';
 import { documentContextSchema, mutationAuditSchema } from '../../mutation-result-schema-core.js';
 import { swatchResourceDefinitionSchema } from './request.js';
-import { spotHostVersionVerified } from './version-gate.js';
+import { hostVersionAdmitted } from '../../host-version-policy.js';
 const snapshotEntrySchema = z.string().min(1).max(16_384);
 export const RESOURCE_SNAPSHOT_MAX_BYTES = 32 * 1024;
 export const RESOURCE_CONTEXT_MAX_BYTES = 24 * 1024;
@@ -46,9 +47,10 @@ const blockedReasonSchema = z.enum([
     'resource_name_already_exists',
     'resource_collection_capacity_exceeded',
     'result_size_limit_exceeded',
-    'spot_host_version_unverified',
+    'host_version_unmeasured',
 ]);
 const planSchema = z.strictObject({
+    hostVersionConsent: hostVersionConsentSchema,
     operation: z.literal('create_swatch_resource'),
     documentKey: z.string().min(1).max(16_384),
     resource: swatchResourceDefinitionSchema,
@@ -76,7 +78,7 @@ const planSchema = z.strictObject({
     if (plan.resultSizeWithinLimit === plan.applyBlockedReasonCodes.includes('result_size_limit_exceeded')) {
         context.addIssue({ code: 'custom', message: 'Result-size admission must match its blocker.', path: ['resultSizeWithinLimit'] });
     }
-    if (plan.hostVersionVerified === plan.applyBlockedReasonCodes.includes('spot_host_version_unverified')) {
+    if (plan.hostVersionVerified === plan.applyBlockedReasonCodes.includes('host_version_unmeasured')) {
         context.addIssue({ code: 'custom', message: 'Host version verification must match its blocker.', path: ['hostVersionVerified'] });
     }
     if (plan.resource.kind !== 'spot' && !plan.hostVersionVerified) {
@@ -275,8 +277,8 @@ export const swatchResourceResultSchema = z.union([
         }
     }
     if (result.plan.resource.kind === 'spot' &&
-        result.plan.hostVersionVerified !== spotHostVersionVerified(result.document.appVersion)) {
-        context.addIssue({ code: 'custom', message: 'Spot host-version verification must match the measured application version allowlist.', path: ['plan', 'hostVersionVerified'] });
+        result.plan.hostVersionVerified !== hostVersionAdmitted('spot_rollback', result.document.appVersion, result.plan.hostVersionConsent)) {
+        context.addIssue({ code: 'custom', message: 'Spot host-version verification must match the host version policy.', path: ['plan', 'hostVersionVerified'] });
     }
     if (result.transaction.state === 'rolled_back' &&
         digest(result.transaction.rollback.restoredSnapshot) !== digest(result.transaction.rollback.resourceIdentity.beforeSnapshot)) {

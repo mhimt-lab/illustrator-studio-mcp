@@ -1,36 +1,54 @@
 # Illustrator Studio MCP
 
-[![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg) ![Node.js >=20](https://img.shields.io/badge/node-%3E%3D20-339933.svg) ![MCP: 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-blue.svg) ![Status: beta](https://img.shields.io/badge/status-beta-orange.svg) [![npm beta version](https://img.shields.io/npm/v/illustrator-studio-mcp/beta)](https://www.npmjs.com/package/illustrator-studio-mcp)
+**Ask AI to work in Adobe Illustrator — safely and verifiably.**
+
+Create, revise, verify, and prepare artwork for print — by asking your AI app.
+
+![Status: beta](https://img.shields.io/badge/status-beta-orange.svg) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg) ![Illustrator: 2026 (30.8)](https://img.shields.io/badge/Illustrator-2026%20%2830.8%29-FF9A00.svg) [![npm beta version](https://img.shields.io/npm/v/illustrator-studio-mcp/beta)](https://www.npmjs.com/package/illustrator-studio-mcp) [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE)
 
 **English** | [日本語](README.ja.md)
 
-**Ask an AI assistant to do your Illustrator work, in plain words.**
+Claude Desktop · ChatGPT Work · Claude Code · Codex CLI
 
-For example:
+[88 functions](docs/tools.en.md) · Plan before apply · Read-back verification
+
+<!-- demo-video:start -->
+<!-- npm: [![Demo video: made by talking to Illustrator, from a blank page to a print-ready PDF (opens the video)](https://raw.githubusercontent.com/mhimt-lab/illustrator-studio-mcp/main/docs/images/demo-poster-en.webp)](https://github.com/user-attachments/assets/08701dd6-7016-4915-8fb7-811602866b34) -->
+
+https://github.com/user-attachments/assets/08701dd6-7016-4915-8fb7-811602866b34
+
+*65-second demo recorded live over MCP in the real Illustrator 30.8.1 (waiting time trimmed): it builds a poster, applies a client’s changes in one go, stops instead of overwriting a line you touched up by hand after asking, and exports a print-ready PDF. The touch-up after asking was staged for the demo.*
+<!-- demo-video:end -->
+
+## Plan → Apply → Verify
+
+Ask in plain words. For example:
 
 - “Change the selected headline to ‘Weekend Special’. Keep its size and color.”
 - “Space these three shapes evenly in a row.”
 - “Swap this photo for the latest version. Keep its position and size.”
 
-Before changing anything, it shows what will change and where. Afterwards, it reads the result back from Illustrator to check it. This is a Public Beta (0.1.0-beta.4).
+1. **Plan** — before changing anything, it shows the target and the proposed change. You check it before it is applied.
+2. **Apply** — it checks the target again immediately before writing. If someone changed it after the plan, it stops instead of overwriting.
+3. **Verify** — it reads the result back from Illustrator. If a response is lost and the outcome is unclear, it stops further edits instead of guessing. Check the final look and print readiness in Illustrator yourself.
 
-[84 functions](docs/tools.en.md) · [Checked operation by operation on Illustrator 2026 (30.8)](docs/compatibility.en.md) · Works with Claude Desktop, ChatGPT, Claude Code, and Codex CLI
+This is a Public Beta (0.1.0-beta.5), [checked operation by operation on Illustrator 2026 (30.8)](docs/compatibility.en.md).
 
-## AI apps and how to start
+## Install
 
 ### Claude Desktop (easiest, no Node.js needed)
 
-1. [Download illustrator-studio-mcp-0.1.0-beta.4.mcpb](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.4/illustrator-studio-mcp-0.1.0-beta.4.mcpb), double-click it, then click Install.
+1. [Download illustrator-studio-mcp-0.1.0-beta.5.mcpb](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.5/illustrator-studio-mcp-0.1.0-beta.5.mcpb), double-click it, then click Install.
 2. Check that the extension is enabled, then start using it in a new chat.
 
-To check the downloaded file, compare it with `SHA256SUMS` on the [GitHub release page](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.4) (steps in [Install](docs/install.en.md#desktop-extension-mcpb-main-method)).
+To check the downloaded file, compare it with `SHA256SUMS` on the [GitHub release page](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.5) (steps in [Install](docs/install.en.md#desktop-extension-mcpb-main-method)).
 
 ### ChatGPT
 
 You need: Node.js 20 or newer (install it with the installer from the [official website](https://nodejs.org/))
 
 1. In the ChatGPT sidebar, open Plugins, then choose Add (top right) → Add a marketplace.
-2. Enter `mhimt-lab/illustrator-studio-mcp` as the Source and `v0.1.0-beta.4` as the Git ref, then click Add marketplace. The Git ref pins the version.
+2. Enter `mhimt-lab/illustrator-studio-mcp` as the Source and `v0.1.0-beta.5` as the Git ref, then click Add marketplace. The Git ref pins the version.
 3. On the same screen, search for "Illustrator" and click the "+" next to Illustrator Studio MCP. It is done when "plugin installed" appears.
 4. Choose Work at the top, check that the computer icon at the lower right of the message box is set to On your computer, then start using it in a new chat.
 
@@ -39,7 +57,7 @@ To remove it, choose "…" → Uninstall on Illustrator Studio MCP under Plugins
 If you are comfortable with Terminal, you can also add it with two Codex CLI commands (restart ChatGPT afterwards):
 
 ```bash
-codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.4
+codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.5
 codex plugin add illustrator-studio-mcp@illustrator-studio-mcp
 ```
 
@@ -61,9 +79,54 @@ codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@beta
 
 For checking the download, updating, uninstalling, and other ways to register, see [Install](docs/install.en.md).
 
+## Features
+
+The main things it does. Every picture is real artwork: cards 1, 2 and 6 are from the demo recorded in the real Illustrator 30.8.1 (in card 6, the manual change between plan and apply was staged for the demo), and cards 3–5 were made and exported with this server in the real Illustrator 30.8.2. In card 5, the body text was set to justified by a one-off script before the check, because this server cannot change paragraph alignment yet. The photo is a CC0 (public domain) photo from Wikimedia Commons.
+
+<table>
+<tr>
+<td width="33%" valign="top"><img src="docs/images/features/make-with-words-en.webp" width="260" alt="A finished grand-opening poster made in Illustrator, labeled: 12 objects, all verified"><br><b>Design in Illustrator by just asking</b><br>Describe what you want, and the AI builds the shapes and text in Illustrator. Each object is read back from Illustrator to check it.<br><a href="docs/usage.en.md">Usage →</a></td>
+<td width="33%" valign="top"><img src="docs/images/features/batch-changes-en.webp" width="260" alt="The poster before and after a client revision (new date and color), labeled: 3 changes in one batch"><br><b>Apply a round of changes at once</b><br>Apply several changes, like a client’s revision list, in one go. If one step fails, the others are rolled back.<br><a href="docs/usage.en.md">Usage →</a></td>
+<td width="33%" valign="top"><img src="docs/images/features/photo-fit-en.webp" width="260" alt="A menu card with a photo placed to fill its frame (the frame dashed), and the same card after the photo is cropped to the frame, labeled: Fitted to the frame and cropped"><br><b>Fill a frame with a photo and crop it</b><br>Place a photo so it covers the frame, with the part you want to show (like the cup) kept in view. A rectangular clipping mask crops what spills over.<br><a href="docs/tools.en.md#fit-a-photo-to-a-frame">Conditions →</a></td>
+</tr>
+<tr>
+<td width="33%" valign="top"><img src="docs/images/features/print-pdf-en.webp" width="260" alt="The menu card exported as a PDF with trim marks, registration marks, color bars and page information, labeled: PDF with trim marks and 9 pt bleed"><br><b>Export a print PDF with trim marks</b><br>Writes a new PDF with trim marks, color bars, page information and bleed (9 pt here), then checks its trim size and bleed. The original file is not changed.<br><a href="docs/tools.en.md#pdf-with-bleed-and-trim-marks">Conditions →</a></td>
+<td width="33%" valign="top"><img src="docs/images/features/jp-typesetting-en.webp" width="260" alt="A Japanese booklet page made in Illustrator, with 書籍 at the end of line 2 and 用紙 at the start of line 3 marked, and a callout: Protected term 書籍用紙 split across lines. Labeled: Typesetting check: 1 split protected term"><br><b>Check Japanese typesetting, swap fonts in one go</b><br>Reads the line breaks Illustrator actually set and points out kinsoku breaks and protected terms split across lines, without changing the document. Several font pairs, like body and headings, can be replaced in one go.<br><a href="docs/tools.en.md#check-japanese-line-breaks">Conditions →</a></td>
+<td width="33%" valign="top"><img src="docs/images/features/no-overwrite-en.webp" width="260" alt="The poster keeps a line that was changed by hand after the plan, labeled: Refused — not overwritten"><br><b>Your manual edits are safe</b><br>If you touched up the artwork after asking, the AI stops before writing and checks with you. The same goes for changes by another script or plug-in.<br><a href="docs/safety.en.md">Safety →</a></td>
+</tr>
+</table>
+
+## What you can do
+
+<table>
+<tr>
+<td width="33%" valign="top"><img src="docs/images/grid/create.webp" width="96" height="96" align="left" alt="A poster headline"><sub>Design</sub><br><b><a href="docs/tools.en.md#create-shapes-and-text">Create shapes and text by asking</a></b></td>
+<td width="33%" valign="top"><img src="docs/images/grid/batch-text.webp" width="96" height="96" align="left" alt="A poster with a new date"><sub>Text</sub><br><b><a href="docs/tools.en.md#replace-text-in-one-go">Update headlines and dates in one go</a></b></td>
+<td width="33%" valign="top"><img src="docs/images/grid/jp-audit.webp" width="96" height="96" align="left" alt="Japanese body text with a split term marked"><sub>Text</sub><br><b><a href="docs/tools.en.md#check-japanese-line-breaks">Check Japanese line breaks</a></b></td>
+</tr>
+<tr>
+<td width="33%" valign="top"><img src="docs/images/grid/font-sets.webp" width="96" height="96" align="left" alt="A page with its heading and body fonts swapped"><sub>Text</sub><br><b><a href="docs/tools.en.md#replace-several-fonts-at-once">Replace several fonts at once</a></b></td>
+<td width="33%" valign="top"><img src="docs/images/grid/photo-fit.webp" width="96" height="96" align="left" alt="A photo placed to fill its frame"><sub>Images</sub><br><b><a href="docs/tools.en.md#fit-a-photo-to-a-frame">Fill a frame with a photo</a></b></td>
+<td width="33%" valign="top"><img src="docs/images/grid/photo-crop.webp" width="96" height="96" align="left" alt="A photo cropped to its frame"><sub>Images</sub><br><b><a href="docs/tools.en.md#crop-a-photo">Crop a photo to its frame</a></b></td>
+</tr>
+<tr>
+<td width="33%" valign="top"><img src="docs/images/grid/preflight.webp" width="96" height="96" align="left" alt="An event flyer"><sub>Print</sub><br><b><a href="docs/tools.en.md#check-before-printing">Check before printing</a></b></td>
+<td width="33%" valign="top"><img src="docs/images/grid/print-pdf.webp" width="96" height="96" align="left" alt="A PDF with trim marks and color bars"><sub>Print</sub><br><b><a href="docs/tools.en.md#pdf-with-bleed-and-trim-marks">PDF with trim marks and bleed</a></b></td>
+<td width="33%" valign="top"><img src="docs/images/grid/trim-marks.webp" width="96" height="96" align="left" alt="Trim marks drawn in the document"><sub>Print</sub><br><b><a href="docs/tools.en.md#add-trim-marks-to-the-document">Add trim marks to the document</a></b></td>
+</tr>
+<tr>
+<td width="33%" valign="top"><img src="docs/images/grid/outlined.webp" width="96" height="96" align="left" alt="A PDF with outlined text"><sub>Print</sub><br><b><a href="docs/tools.en.md#export-with-outlined-text">Export with outlined text</a></b></td>
+<td width="33%" valign="top"><img src="docs/images/grid/no-overwrite.webp" width="96" height="96" align="left" alt="A poster keeping a line changed by hand"><sub>Safety</sub><br><b><a href="docs/tools.en.md#keep-your-manual-edits">Keep your manual edits</a></b></td>
+<td width="33%" valign="top"><img src="docs/images/grid/backup.webp" width="96" height="96" align="left" alt="A round tea label"><sub>Safety</sub><br><b><a href="docs/tools.en.md#back-up-before-saving-over">Back up before saving over</a></b></td>
+</tr>
+</table>
+
+The small pictures are cropped from the artwork above and from other files made and exported with this server. Conditions differ by operation. See all functions in the [tool catalog](docs/tools.en.md) and requests to try in [Usage and examples](docs/usage.en.md).
+
 ## Before you use it
 
 - **Mac only.** Use it with stable Adobe Illustrator (checked with Illustrator 2026, version 30.8).
+- **Windows support is in preparation.** If you have Windows and Illustrator, we are looking for collaborators to help verify it. The steps and the kit are in the [Windows verification kit](https://github.com/mhimt-lab/illustrator-studio-mcp/blob/main/windows-probe/README.en.md) (results are submitted through a public issue).
 - **Keep Illustrator in the foreground and the screen unlocked.** In the background or with the screen locked, operations stop or fail with an unclear reason.
 - **Try it on a copy of your artwork first.** This is a trial release, not production-ready.
 
@@ -88,12 +151,6 @@ If its formatting is unsupported, tell me why.
 
 If the target and text are right, ask it to go ahead with that change. See [Usage and examples](docs/usage.en.md) for more requests.
 
-## How it keeps your work safe
-
-- Before changing anything, it shows the target and the proposed change. You check it before it is applied.
-- It checks the target again immediately before writing, and reads the result back from Illustrator afterwards. Check the final look and print readiness in Illustrator yourself.
-- If a response is lost and the outcome is unclear, it stops further edits instead of guessing.
-
 ## More information
 
 - [Usage and examples](docs/usage.en.md) — everything you can ask for, and requests to copy
@@ -115,7 +172,7 @@ Illustrator Studio MCP is an independent project, not an Adobe product. It is no
 <details>
 <summary>Connection reference: tool identifiers (not needed for everyday requests)</summary>
 
-`illustrator_align_objects`, `illustrator_apply_character_style`, `illustrator_apply_pathfinder`, `illustrator_capture_preview`, `illustrator_capture_structure_snapshot`, `illustrator_check_contrast`, `illustrator_check_text_consistency`, `illustrator_close_document`, `illustrator_close_edit_session`, `illustrator_compare_images`, `illustrator_create_area_text`, `illustrator_create_backup`, `illustrator_create_batch`, `illustrator_create_character_style`, `illustrator_create_clipping_mask`, `illustrator_create_document`, `illustrator_create_layer`, `illustrator_create_point_text`, `illustrator_create_rectangle`, `illustrator_create_shape`, `illustrator_create_swatch_resource`, `illustrator_delete_objects`, `illustrator_diff_structure`, `illustrator_duplicate_object`, `illustrator_edit_path_points`, `illustrator_embed_image`, `illustrator_export`, `illustrator_export_outlined`, `illustrator_extract_design_tokens`, `illustrator_find_color_usages`, `illustrator_find_fonts`, `illustrator_get_area_text_options`, `illustrator_get_context`, `illustrator_get_edit_session`, `illustrator_get_object`, `illustrator_get_path_points`, `illustrator_group_objects`, `illustrator_import_vector_artwork`, `illustrator_list_documents`, `illustrator_list_layers`, `illustrator_list_objects`, `illustrator_list_recipes`, `illustrator_list_selection`, `illustrator_list_swatches`, `illustrator_list_text_styles`, `illustrator_make_compound_path`, `illustrator_move_object_to_layer`, `illustrator_mutate_batch`, `illustrator_open_document`, `illustrator_open_edit_session`, `illustrator_optimize_images`, `illustrator_place_image`, `illustrator_plan_color_replacement`, `illustrator_plan_recipe`, `illustrator_preflight_images`, `illustrator_preflight_print`, `illustrator_read_structure_diff`, `illustrator_reconcile`, `illustrator_reconcile_backup`, `illustrator_reconcile_delete`, `illustrator_reconcile_export`, `illustrator_release_clipping_mask`, `illustrator_relink_image`, `illustrator_reorder_layer`, `illustrator_replace_font`, `illustrator_replace_point_text`, `illustrator_replace_point_text_batch`, `illustrator_replace_text_range`, `illustrator_run_m6_appearance_preview_recipe`, `illustrator_run_recipe`, `illustrator_save_document`, `illustrator_save_document_as`, `illustrator_save_recipe`, `illustrator_set_area_text_columns`, `illustrator_set_layer_state`, `illustrator_set_no_break`, `illustrator_set_object_state`, `illustrator_set_path_appearance`, `illustrator_set_stacking_order`, `illustrator_set_text_orientation`, `illustrator_set_text_style`, `illustrator_transform_object`, `illustrator_update_artboard`, `illustrator_update_character_style`
+`illustrator_align_objects`, `illustrator_apply_character_style`, `illustrator_apply_pathfinder`, `illustrator_audit_typography`, `illustrator_capture_preview`, `illustrator_capture_structure_snapshot`, `illustrator_check_contrast`, `illustrator_check_text_consistency`, `illustrator_close_document`, `illustrator_close_edit_session`, `illustrator_compare_images`, `illustrator_create_area_text`, `illustrator_create_backup`, `illustrator_create_batch`, `illustrator_create_character_style`, `illustrator_create_clipping_mask`, `illustrator_create_document`, `illustrator_create_layer`, `illustrator_create_point_text`, `illustrator_create_rectangle`, `illustrator_create_shape`, `illustrator_create_swatch_resource`, `illustrator_create_trim_marks`, `illustrator_delete_objects`, `illustrator_diff_structure`, `illustrator_duplicate_object`, `illustrator_edit_path_points`, `illustrator_embed_image`, `illustrator_export`, `illustrator_export_outlined`, `illustrator_export_pdf`, `illustrator_extract_design_tokens`, `illustrator_find_color_usages`, `illustrator_find_fonts`, `illustrator_get_area_text_options`, `illustrator_get_context`, `illustrator_get_edit_session`, `illustrator_get_object`, `illustrator_get_path_points`, `illustrator_group_objects`, `illustrator_import_vector_artwork`, `illustrator_list_documents`, `illustrator_list_layers`, `illustrator_list_objects`, `illustrator_list_recipes`, `illustrator_list_selection`, `illustrator_list_swatches`, `illustrator_list_text_styles`, `illustrator_make_compound_path`, `illustrator_move_object_to_layer`, `illustrator_mutate_batch`, `illustrator_open_document`, `illustrator_open_edit_session`, `illustrator_optimize_images`, `illustrator_place_image`, `illustrator_plan_color_replacement`, `illustrator_plan_recipe`, `illustrator_preflight_images`, `illustrator_preflight_print`, `illustrator_read_structure_diff`, `illustrator_reconcile`, `illustrator_reconcile_backup`, `illustrator_reconcile_delete`, `illustrator_reconcile_export`, `illustrator_reconcile_save_as`, `illustrator_release_clipping_mask`, `illustrator_relink_image`, `illustrator_reorder_layer`, `illustrator_replace_font`, `illustrator_replace_point_text`, `illustrator_replace_point_text_batch`, `illustrator_replace_text_range`, `illustrator_run_m6_appearance_preview_recipe`, `illustrator_run_recipe`, `illustrator_save_document`, `illustrator_save_document_as`, `illustrator_save_recipe`, `illustrator_set_area_text_columns`, `illustrator_set_layer_state`, `illustrator_set_no_break`, `illustrator_set_object_state`, `illustrator_set_path_appearance`, `illustrator_set_stacking_order`, `illustrator_set_text_orientation`, `illustrator_set_text_style`, `illustrator_transform_object`, `illustrator_update_artboard`, `illustrator_update_character_style`
 
 </details>
 

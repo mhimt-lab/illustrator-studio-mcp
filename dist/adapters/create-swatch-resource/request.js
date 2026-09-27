@@ -1,3 +1,4 @@
+import { hostVersionInternalFields, hostVersionRequestFields } from '../../host-version-consent.js';
 import { z } from 'zod';
 import { canonicalCommandIdSchema } from '../../command-id.js';
 import { canonicalSha256 } from '../../mutation-canonical.js';
@@ -25,7 +26,7 @@ const spotSchema = z.strictObject({
     kind: z.literal('spot'), name: resourceNameSchema, color: rgbSchema,
 });
 export const swatchResourceDefinitionSchema = z.discriminatedUnion('kind', [processSchema, gradientSchema, spotSchema]);
-const fields = {
+const fields = { ...hostVersionInternalFields,
     expectedDocumentKey: z.string().min(1).max(16_384),
     resource: swatchResourceDefinitionSchema,
 };
@@ -40,6 +41,7 @@ function digest(request) {
         operation: 'create_swatch_resource',
         validator: CREATE_SWATCH_RESOURCE_MUTATION_VALIDATOR,
         request: {
+            ...hostVersionRequestFields(request),
             expectedDocumentKey: request.expectedDocumentKey,
             resource: request.resource,
             apply: request.apply,

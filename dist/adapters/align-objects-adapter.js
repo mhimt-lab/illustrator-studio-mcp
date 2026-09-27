@@ -12,8 +12,8 @@ export const ALIGN_MIN_TARGETS = 2;
 export const ALIGN_MIN_DISTRIBUTE_TARGETS = 3;
 export const ALIGN_MAX_TARGETS = 16;
 export const ALIGN_PRECISION_DIGITS = 6;
-const CANONICAL_VERSION = 1;
-const RESULT_SCHEMA_VERSION = 1;
+const CANONICAL_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 2;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
@@ -179,7 +179,8 @@ function translatedSnapshot(before, deltaX, deltaY) {
         geometricBounds: [before.geometricBounds[0] + deltaX, before.geometricBounds[1] + deltaY, before.geometricBounds[2] + deltaX, before.geometricBounds[3] + deltaY],
         position: [before.position[0] + deltaX, before.position[1] + deltaY] };
 }
-const blockerSchema = z.enum(['document_mutation_not_allowed', 'target_locked', 'target_hidden', 'target_not_editable', 'layer_hidden', 'layer_locked']);
+const blockerSchema = z.enum(['document_mutation_not_allowed', 'target_locked', 'target_hidden', 'target_not_editable', 'layer_hidden', 'layer_locked',
+    'ancestor_hidden', 'ancestor_locked']);
 const BLOCKER_ORDER = blockerSchema.options;
 function unionBlockers(perTarget) {
     const present = new Set();
@@ -202,6 +203,10 @@ function targetBlockers(mutationAllowed, before) {
         blockers.push('layer_hidden');
     if (before.layerLocked)
         blockers.push('layer_locked');
+    if (before.ancestorHidden)
+        blockers.push('ancestor_hidden');
+    if (before.ancestorLocked)
+        blockers.push('ancestor_locked');
     return blockers;
 }
 const planTargetSchema = z.strictObject({
@@ -497,6 +502,8 @@ function alignTargetBlockers(context, before) {
   if (!before.editable) blockers.push("target_not_editable");
   if (!before.layerVisible) blockers.push("layer_hidden");
   if (before.layerLocked) blockers.push("layer_locked");
+  if (before.ancestorHidden) blockers.push("ancestor_hidden");
+  if (before.ancestorLocked) blockers.push("ancestor_locked");
   return blockers;
 }
 function alignArtboardRect(document, artboardIndex) {

@@ -7,7 +7,6 @@ import { AREA_TEXT_MAX_CODE_UNITS } from './area-text-host-script.js';
 import { PLAIN_POINT_TEXT_V1, POINT_TEXT_JUSTIFICATIONS, POINT_TEXT_MAX_LAYER_DEPTH_LIMIT, pointTextFillColorSchema, } from './point-text-host-script.js';
 export const TEXT_LAYOUT_PROFILE_NAME = 'japanese_text_layout_v1';
 export const TEXT_LAYOUT_MAX_CODE_UNITS = AREA_TEXT_MAX_CODE_UNITS;
-export const TEXT_LAYOUT_MEASURED_APP_VERSION = '30.8.1';
 export const TEXT_LAYOUT_RELEASED = Object.freeze({
     character: ['autoLeading', 'noBreak'],
     frame: ['orientation'],

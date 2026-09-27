@@ -3,7 +3,7 @@ import { canonicalSha256 } from './mutation-canonical.js';
 import { MUTATION_TRANSACTION_SCRIPT } from './mutation-transaction.js';
 import { documentContextSchema, layerPathSchema } from './mutation-result-schema-core.js';
 import { SUPPORTED_PATH_ITEM_HOST_SCRIPT, SUPPORTED_PATH_ITEM_MAX_PATH_POINTS } from './adapters/supported-path-item-host-script.js';
-export const PATH_EDIT_MEASURED_APP_VERSIONS = ['30.8.1'];
+import { HOST_VERSION_POLICY_JSX, hostVersionAdmitted } from './host-version-policy.js';
 export const PATH_EDIT_TOLERANCE_PT = 0.01;
 export const PATH_EDIT_MAX_POINTS = SUPPORTED_PATH_ITEM_MAX_PATH_POINTS;
 export const PATH_EDIT_COORDINATE_LIMIT = 32_768;
@@ -56,14 +56,14 @@ export function samePathTarget(left, right) {
     const { path: rightPath, ...rightRest } = right;
     return sameCanonical(leftRest, rightRest) && samePathGeometry(leftPath, rightPath);
 }
-export const pathEditBlockerSchema = z.enum(['document_mutation_not_allowed', 'host_version_unverified', 'target_locked', 'target_hidden',
+export const pathEditBlockerSchema = z.enum(['document_mutation_not_allowed', 'host_version_unmeasured', 'target_locked', 'target_hidden',
     'target_not_editable', 'layer_hidden', 'layer_locked']);
-export function pathEditBlockers(mutationAllowed, appVersion, before) {
+export function pathEditBlockers(mutationAllowed, appVersion, before, consent) {
     const blockers = [];
     if (!mutationAllowed)
         blockers.push('document_mutation_not_allowed');
-    if (!PATH_EDIT_MEASURED_APP_VERSIONS.includes(appVersion))
-        blockers.push('host_version_unverified');
+    if (!hostVersionAdmitted('edit_path_points', appVersion, consent))
+        blockers.push('host_version_unmeasured');
     const initial = blockers.length;
     if (before.locked)
         blockers.push('target_locked');
@@ -87,7 +87,7 @@ export const getPathPointsResultSchema = z.strictObject({
     }
 });
 export const PATH_POINTS_READ_MODULE_SCRIPT = `
-var PATH_EDIT_MEASURED_APP_VERSIONS = ${JSON.stringify(PATH_EDIT_MEASURED_APP_VERSIONS)};
+${HOST_VERSION_POLICY_JSX}
 var PATH_EDIT_TOLERANCE_PT = ${PATH_EDIT_TOLERANCE_PT};
 var PATH_EDIT_MAX_POINTS = ${PATH_EDIT_MAX_POINTS};
 var PATH_EDIT_COORDINATE_LIMIT = ${PATH_EDIT_COORDINATE_LIMIT};
@@ -97,7 +97,6 @@ function pathEditFailTarget(code, uuid, actual) {
   if (actual !== undefined) detail.actual = actual;
   throw new Error("MCP_ERROR:" + stringifyJson(detail));
 }
-function pathEditContains(list, value) { for (var i = 0; i < list.length; i++) if (list[i] === value) return true; return false; }
 function pathEditCoordinate(value, label) {
   var number = mutationFiniteNumber(value, label);
   if (number < -PATH_EDIT_COORDINATE_LIMIT || number > PATH_EDIT_COORDINATE_LIMIT) throw mutationError("preflight_failed", label + " is outside the supported coordinate range.");
@@ -210,7 +209,7 @@ function pathEditSameTarget(left, right) {
 function pathEditBlockers(context, before) {
   var blockers = [];
   if (!context.mutationAllowed) blockers.push("document_mutation_not_allowed");
-  if (!pathEditContains(PATH_EDIT_MEASURED_APP_VERSIONS, String(context.appVersion))) blockers.push("host_version_unverified");
+  if (!hostVersionAdmitted("edit_path_points", String(context.appVersion))) blockers.push("host_version_unmeasured");
   var initial = blockers.length;
   if (before.locked) blockers.push("target_locked");
   if (before.hidden) blockers.push("target_hidden");

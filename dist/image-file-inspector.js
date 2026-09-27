@@ -63,8 +63,23 @@ async function stableHandleStat(handle) {
     }
 }
 function sameStat(left, right) {
+    return sameContentStat(left, right) && left.ctimeNs === right.ctimeNs;
+}
+function sameContentStat(left, right) {
     return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-        left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs && left.isFile === right.isFile;
+        left.mtimeNs === right.mtimeNs && left.isFile === right.isFile;
+}
+const IMAGE_INSPECTION_ATTEMPTS = 3;
+const CTIME_ONLY_CHANGE = Symbol('ctime_only_change');
+function onlyCtimeMoved(before, ...observations) {
+    let moved = false;
+    for (const observation of observations) {
+        if ('missing' in observation || 'error' in observation || !sameContentStat(before, observation))
+            return false;
+        if (observation.ctimeNs !== before.ctimeNs)
+            moved = true;
+    }
+    return moved;
 }
 function snapshotSuffix(path) {
     const extension = extname(path).toLowerCase();
@@ -233,6 +248,13 @@ export class SipsImageFileInspector {
         this.runSips = runSips;
     }
     async inspect(path) {
+        for (let attempt = 1;; attempt += 1) {
+            const result = await this.inspectOnce(path, attempt < IMAGE_INSPECTION_ATTEMPTS);
+            if (result !== CTIME_ONLY_CHANGE)
+                return result;
+        }
+    }
+    async inspectOnce(path, retryOnCtimeOnly) {
         let handle;
         try {
             handle = await open(path, 'r');
@@ -249,6 +271,8 @@ export class SipsImageFileInspector {
             }
             const pathAtOpen = await stableStat(path);
             if ('missing' in pathAtOpen || 'error' in pathAtOpen || !sameStat(before, pathAtOpen)) {
+                if (retryOnCtimeOnly && onlyCtimeMoved(before, pathAtOpen))
+                    return CTIME_ONLY_CHANGE;
                 return {
                     status: 'unavailable', path, reason: 'file_changed_during_inspection',
                     message: 'The linked path no longer identifies the file object opened for inspection.',
@@ -280,6 +304,8 @@ export class SipsImageFileInspector {
                 catch (error) {
                     const afterFailure = await stableHandleStat(handle);
                     if (!('error' in afterFailure) && !sameStat(before, afterFailure)) {
+                        if (retryOnCtimeOnly && onlyCtimeMoved(before, afterFailure))
+                            return CTIME_ONLY_CHANGE;
                         return {
                             status: 'unavailable', path, reason: 'file_changed_during_inspection',
                             message: 'The opened linked file changed while it was being copied for inspection.',
@@ -310,6 +336,8 @@ export class SipsImageFileInspector {
             const pathAfter = await stableStat(path);
             if ('error' in after || 'missing' in pathAfter || 'error' in pathAfter ||
                 !sameStat(before, after) || !sameStat(before, pathAfter)) {
+                if (retryOnCtimeOnly && onlyCtimeMoved(before, after, pathAfter))
+                    return CTIME_ONLY_CHANGE;
                 return {
                     status: 'unavailable', path, reason: 'file_changed_during_inspection',
                     message: 'The linked file identity changed while metadata and SHA-256 were being inspected.',

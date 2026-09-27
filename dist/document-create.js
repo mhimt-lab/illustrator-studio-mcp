@@ -99,6 +99,7 @@ if (params.artboardName !== undefined && (typeof params.artboardName !== "string
   throw new Error("MCP_ERROR:" + stringifyJson({ code: "CREATE_DOCUMENT_INVALID_INPUT", message: "artboardName must be a string of 1 to 255 characters." }));
 }
 
+var MUTATION_FORCE_INDETERMINATE = false;
 var createDocumentBefore = createDocumentInventory();
 var createDocumentCountBefore = app.documents.length;
 var createDocumentSpace = params.colorSpace === "CMYK" ? DocumentColorSpace.CMYK : DocumentColorSpace.RGB;
@@ -142,6 +143,9 @@ function createDocumentExistingUnchanged() {
 app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
 try {
   try {
+    // From here an uncaught error is an indeterminate outcome, never a failure that frees the lock while the created
+    // document may remain.
+    MUTATION_FORCE_INDETERMINATE = true;
     createdDocument = app.documents.add(createDocumentSpace, params.widthPt, params.heightPt);
   } catch (addError) {
     createDocumentAddError = addError && addError.message ? String(addError.message) : String(addError);

@@ -1,9 +1,9 @@
-import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { lstat, open } from 'node:fs/promises';
 import { extname, isAbsolute, resolve } from 'node:path';
 import { PNG } from 'pngjs';
 import { z } from 'zod';
+import { noFollowNonBlockingReadFlags } from './platform-primitives.js';
 export const VISUAL_DIFF_MAX_FILE_BYTES = 10 * 1024 * 1024;
 export const VISUAL_DIFF_MAX_PIXELS = 4_194_304;
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
@@ -51,8 +51,23 @@ function codedError(code, message) {
     return Object.assign(new Error(message), { code });
 }
 function sameSnapshot(left, right) {
+    return sameContentSnapshot(left, right) && left.ctimeNs === right.ctimeNs;
+}
+function sameContentSnapshot(left, right) {
     return left.dev === right.dev && left.ino === right.ino && left.size === right.size &&
-        left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs && left.isFile() === right.isFile();
+        left.mtimeNs === right.mtimeNs && left.isFile() === right.isFile();
+}
+const VISUAL_DIFF_READ_ATTEMPTS = 3;
+const CTIME_ONLY_CHANGE = Symbol('ctime_only_change');
+function onlyCtimeMoved(before, ...observations) {
+    let moved = false;
+    for (const observation of observations) {
+        if (observation === null || !sameContentSnapshot(before, observation))
+            return false;
+        if (observation.ctimeNs !== before.ctimeNs)
+            moved = true;
+    }
+    return moved;
 }
 function validatePath(path, role) {
     if (!isAbsolute(path) || resolve(path) !== path) {
@@ -62,17 +77,19 @@ function validatePath(path, role) {
         throw codedError('UNSUPPORTED_IMAGE_FORMAT', `${role}_path must use the .png extension.`);
     }
 }
-function secureReadFlags() {
-    if (typeof constants.O_NOFOLLOW !== 'number' || typeof constants.O_NONBLOCK !== 'number') {
-        throw codedError('UNSUPPORTED_FILESYSTEM', 'Secure image reads require O_NOFOLLOW and O_NONBLOCK.');
-    }
-    return constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
-}
 export async function readStableImage(path, role) {
     validatePath(path, role);
+    for (let attempt = 1;; attempt += 1) {
+        const read = await readStableImageOnce(path, role, attempt < VISUAL_DIFF_READ_ATTEMPTS);
+        if (read !== CTIME_ONLY_CHANGE)
+            return read;
+    }
+}
+async function readStableImageOnce(path, role, retryOnCtimeOnly) {
+    const flags = noFollowNonBlockingReadFlags();
     let handle;
     try {
-        handle = await open(path, secureReadFlags());
+        handle = await open(path, flags);
     }
     catch (error) {
         const code = error?.code;
@@ -94,6 +111,8 @@ export async function readStableImage(path, role) {
         const pathAfter = await lstat(path, { bigint: true }).catch(() => null);
         if (bytes.length !== Number(before.size) || !sameSnapshot(before, after) || pathAfter === null ||
             !sameSnapshot(before, pathAfter)) {
+            if (retryOnCtimeOnly && bytes.length === Number(before.size) && onlyCtimeMoved(before, after, pathAfter))
+                return CTIME_ONLY_CHANGE;
             throw codedError('IMAGE_CHANGED_DURING_READ', `${role} image changed while it was being read.`);
         }
         return {
@@ -161,9 +180,14 @@ export function decodePng(bytes, role) {
 }
 async function revalidateSource(source, role) {
     const current = await lstat(source.path, { bigint: true }).catch(() => null);
-    if (current === null || !sameSnapshot(source.stat, current)) {
-        throw codedError('IMAGE_CHANGED_DURING_COMPARISON', `${role} image changed before comparison completed.`);
+    if (current !== null && sameSnapshot(source.stat, current))
+        return;
+    if (current !== null && onlyCtimeMoved(source.stat, current)) {
+        const reread = await readStableImage(source.path, role).catch(() => null);
+        if (reread !== null && sameContentSnapshot(source.stat, reread.stat) && reread.bytes.equals(source.bytes))
+            return;
     }
+    throw codedError('IMAGE_CHANGED_DURING_COMPARISON', `${role} image changed before comparison completed.`);
 }
 export async function comparePngImages(input) {
     if (!Number.isInteger(input.threshold) || input.threshold < 0 || input.threshold > 255) {

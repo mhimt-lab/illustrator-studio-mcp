@@ -1,0 +1,59 @@
+name: Windows 検証キットの結果 / Windows verification kit results
+description: Windows 検証キットの結果を提出します（公開されます） / Submit the results of the Windows verification kit (public)
+title: "[Windows probe] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **この Issue と添付ファイルは公開され、誰でも読めます。後から完全には消せません。**
+        手順は [Windows 検証キットの手順書](https://github.com/mhimt-lab/illustrator-studio-mcp/blob/main/windows-probe/README.md) にあります。添付する前に、手順書の「提出前の確認」に従って中身を確認してください。
+
+        **This issue and its attachments are public and can be read by anyone. They cannot be fully removed later.**
+        The steps are in the [Windows verification kit guide](https://github.com/mhimt-lab/illustrator-studio-mcp/blob/main/windows-probe/README.en.md). Before attaching anything, check the contents as described in "Check before you submit".
+  - type: checkboxes
+    id: consent
+    attributes:
+      label: 同意と確認 / Consent and confirmation
+      options:
+        - label: 結果が公開されることに同意します。 / I agree that the results are published.
+          required: true
+        - label: 添付するすべてのファイルを開いて読み、ユーザー名・コンピューター名・ドメイン名・社名・実名・メールアドレスなど、公開したくない情報が無いことを確かめました（手順書の Select-String の検索で何も表示されませんでした）。 / I opened and read every file I attach and confirmed that it contains no user name, computer name, domain name, company name, real name, email address or other information I do not want to publish (the Select-String search in the guide printed nothing).
+          required: true
+        - label: 業務の文書や個人のファイルが無い、キット専用の Windows ユーザーで実行しました。 / I ran the kit as a Windows user dedicated to it, with no work documents or personal files.
+          required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: 最後に表示された event / The last event printed
+      options:
+        - completed
+        - stopped
+        - not_started
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows の版 / Windows version
+      description: 例 / e.g. Windows 11 24H2 (26100)
+    validations:
+      required: true
+  - type: input
+    id: illustrator
+    attributes:
+      label: Illustrator の版 / Illustrator version
+      description: ヘルプ > Illustrator について / Help > About Illustrator. Beta を使った場合はその版も / Include the Beta version if you used it
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: 結果のファイル / Result files
+      description: 結果フォルダの environment.json・summary.md・すべての w<番号>.json をここにドラッグしてください（ZIP にまとめても構いません） / Drag environment.json, summary.md and every w<number>.json from the results folder here (a single ZIP is fine)
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: 気づいたこと（任意） / Notes (optional)
+      description: 止まった場合はその時の様子。個人や組織が分かる情報は書かないでください / If the kit stopped, what happened. Do not include anything that identifies you or your organization

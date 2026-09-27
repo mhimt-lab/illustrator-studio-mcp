@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalCommandIdSchema } from './command-id.js';
 import { canonicalSha256 } from './mutation-canonical.js';
 import { atomicCreatePrivateRecord, readSecurePrivateRecord, } from './private-record.js';
-import { ensurePrivateDirectory, isMissingPath, validatePrivateDirectory, withPrivateDirectoryScope, } from './private-state.js';
+import { ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath, validatePrivateDirectory, validatePrivateStateRoot, withPrivateDirectoryScope, } from './private-state.js';
 export const M6_P0_RECIPE_AUTHORITY_VERSION = 2;
 const RECIPE_AUTHORITY_DIRECTORY = 'm6-recipe-executions';
 const MAX_RECIPE_RECORD_BYTES = 262_144;
@@ -101,7 +101,7 @@ export class M6P0RecipeAuthorityStore {
         this.executionsRoot = join(root, RECIPE_AUTHORITY_DIRECTORY);
     }
     async initialize() {
-        await ensurePrivateDirectory(this.root, 'state root');
+        await ensurePrivateStateRoot(this.root);
         await ensurePrivateDirectory(this.executionsRoot, 'M6 recipe executions directory');
     }
     executionDirectory(recipeExecutionId) {
@@ -178,7 +178,7 @@ export class M6P0RecipeAuthorityStore {
     async inspectOnce(recipeExecutionId) {
         canonicalCommandIdSchema.parse(recipeExecutionId);
         try {
-            await validatePrivateDirectory(this.root, 0o700, 'state root');
+            await validatePrivateStateRoot(this.root);
             await validatePrivateDirectory(this.executionsRoot, 0o700, 'M6 recipe executions directory');
         }
         catch (error) {

@@ -1,3 +1,4 @@
+import { hostVersionPublicFields, hostVersionInternalFields, normalizeHostVersionConsent } from '../host-version-consent.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
@@ -7,6 +8,7 @@ import { boundsSchema, documentContextSchema, mutationAuditSchema } from '../mut
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { CLIPPING_MASK_HOST_SCRIPT, clipAuditMatches, clipLayerStateSchema, clipParentOrderSchema, clipPathSnapshotSchema, sameCanonical, } from './clipping-mask-shared.js';
 import { SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS } from './supported-path-item-host-script.js';
+import { describeHostVersionScope } from '../host-version-admission.js';
 export const MAKE_COMPOUND_PATH_OPERATION = 'make_compound_path';
 export const MAKE_COMPOUND_PATH_VALIDATOR = { kind: MAKE_COMPOUND_PATH_OPERATION, version: 1 };
 const CANONICAL_VERSION = 1;
@@ -37,7 +39,7 @@ const selectionSchema = z.strictObject({
     if (selection.restored !== same)
         context.addIssue({ code: 'custom', message: 'Selection restored must reflect the read-back.' });
 });
-const commonInternal = { expectedDocumentKey: documentKeySchema, sourceUuids: sourceUuidsSchema };
+const commonInternal = { ...hostVersionInternalFields, expectedDocumentKey: documentKeySchema, sourceUuids: sourceUuidsSchema };
 const internalInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonInternal, apply: z.literal(false) }),
     z.strictObject({
@@ -48,7 +50,7 @@ const internalInputSchema = z.discriminatedUnion('apply', [
         commandId: canonicalCommandIdSchema,
     }),
 ]);
-const commonPublic = {
+const commonPublic = { ...hostVersionPublicFields,
     expected_document_key: documentKeySchema,
     source_uuids: sourceUuidsSchema.describe('Native PageItem.uuid of exactly two closed straight-segment PathItems directly on the same top-level layer, with the same paint.'),
 };
@@ -73,7 +75,7 @@ const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(make
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
 function normalizePublicInput(input) {
     const value = makeCompoundPathPublicInputSchema.parse(input);
-    const common = { expectedDocumentKey: value.expected_document_key, sourceUuids: value.source_uuids };
+    const common = { ...normalizeHostVersionConsent(value), expectedDocumentKey: value.expected_document_key, sourceUuids: value.source_uuids };
     return value.apply ? {
         ...common,
         expectedSourcesBefore: value.expected_sources_before,
@@ -896,7 +898,7 @@ function normalizedRequest(input) {
 export const makeCompoundPathToolContract = {
     name: 'illustrator_make_compound_path',
     title: 'Plan or Make Compound Path',
-    description: 'Plan or make one compound path from two paths (source_uuids). Non-destructive: the two sources stay unchanged; the tool duplicates both to the back of their layer and makes the duplicates one CompoundPathItem there (use illustrator_set_stacking_order to move it). Measured profile only: two closed straight-segment paths (corner points without handles) with the same RGB or no paint, directly on the same top-level layer of an RGB document, Illustrator 30.8.1 in the foreground; curves, open paths, different paint, groups, clip groups, existing compound paths, text, sublayers, and locked or hidden items are refused. Releasing a compound path is not supported; for Pathfinder (unite, minus front, intersect, exclude) use illustrator_apply_pathfinder. The plan shows the member order (front source first), the parent order with the new compound last, and the predicted bounds. Apply compares expected_sources_before and expected_parent_order, runs the menu command with only the duplicates selected, restores the previous selection (reported, never a failure), verifies the compound, both members, the untouched sources, and the parent order by native read-back, and on failure removes only what it created.',
+    description: 'Plan or make one compound path from two paths (source_uuids). Non-destructive: the two sources stay unchanged; the tool duplicates both to the back of their layer and makes the duplicates one CompoundPathItem there (use illustrator_set_stacking_order to move it). Measured profile only: two closed straight-segment paths (corner points without handles) with the same RGB or no paint, directly on the same top-level layer of an RGB document, Illustrator ' + describeHostVersionScope('clipping_mask') + ' in the foreground; curves, open paths, different paint, groups, clip groups, existing compound paths, text, sublayers, and locked or hidden items are refused. Releasing a compound path is not supported; for Pathfinder (unite, minus front, intersect, exclude) use illustrator_apply_pathfinder. The plan shows the member order (front source first), the parent order with the new compound last, and the predicted bounds. Apply compares expected_sources_before and expected_parent_order, runs the menu command with only the duplicates selected, restores the previous selection (reported, never a failure), verifies the compound, both members, the untouched sources, and the parent order by native read-back, and on failure removes only what it created.',
     inputSchema,
     publicInputSchema: makeCompoundPathPublicInputSchema,
     outputSchema: makeCompoundPathResponseSchema,
@@ -932,6 +934,7 @@ export function createMakeCompoundPathAdapter() {
         errorMappingVersion: ERROR_MAPPING_VERSION,
         hostScriptDigest: MAKE_COMPOUND_PATH_HOST_SCRIPT_DIGEST,
         mutationHostApplicationMode: 'foreground',
+        hostVersionOperation: () => 'clipping_mask',
         buildCommand(input) {
             const normalized = normalizedRequest(input);
             const { commandId: _commandId, ...params } = normalized.request;

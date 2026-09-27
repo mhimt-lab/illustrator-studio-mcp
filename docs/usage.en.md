@@ -6,9 +6,9 @@ Fewer repetitive edits. More time to refine your design.
 
 Replace a headline. Swap a photo. Line up a set of shapes. Ask AI to handle everyday Illustrator tasks in the language you already use to describe your work. You set the creative direction and share the hands-on work with AI.
 
-For setup, see the [README section “AI apps and how to start”](../README.md#ai-apps-and-how-to-start).
+For setup, see the [README section “Install”](../README.md#install).
 
-> **Public Beta 0.1.0-beta.4.** A trial release. Try it on a copy of your artwork. Keep Illustrator in the foreground with the screen unlocked. For what is covered, see [Beta scope](compatibility.en.md#beta-scope).
+> **Public Beta 0.1.0-beta.5.** A trial release. Try it on a copy of your artwork. Keep Illustrator in the foreground with the screen unlocked. For what is covered, see [Beta scope](compatibility.en.md#beta-scope).
 
 ## Try it without changing your artwork
 

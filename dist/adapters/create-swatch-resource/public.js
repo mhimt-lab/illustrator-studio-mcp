@@ -1,7 +1,9 @@
+import { hostVersionPublicFields, normalizeHostVersionConsent } from '../../host-version-consent.js';
 import { z } from 'zod';
 import { cmykResourceColorSchema } from './request.js';
 import { applyCommandIdSchema } from '../../command-id.js';
 import { swatchResourceResponseSchema } from './result-schema.js';
+import { describeHostVersionScope } from '../../host-version-admission.js';
 const channelSchema = z.number().int().min(0).max(255);
 const publicRgbSchema = z.strictObject({
     model: z.literal('rgb'), red: channelSchema, green: channelSchema, blue: channelSchema,
@@ -18,7 +20,7 @@ const publicResourceSchema = z.discriminatedUnion('kind', [
         ]),
     }),
 ]);
-const common = {
+const common = { ...hostVersionPublicFields,
     expected_document_key: z.string().min(1).max(16_384),
     resource: publicResourceSchema,
 };
@@ -48,7 +50,7 @@ export function normalizeCreateSwatchResourcePublicInput(input) {
                 color: stop.color,
             })),
         };
-    const commonInput = { expectedDocumentKey: params.expected_document_key, resource };
+    const commonInput = { ...normalizeHostVersionConsent(params), expectedDocumentKey: params.expected_document_key, resource };
     return params.apply
         ? { ...commonInput, apply: true, commandId: params.command_id }
         : { ...commonInput, apply: false };
@@ -56,7 +58,7 @@ export function normalizeCreateSwatchResourcePublicInput(input) {
 export const createSwatchResourceToolContract = {
     name: 'illustrator_create_swatch_resource',
     title: 'Plan or Create Swatch Resource',
-    description: 'Plan or create one unreferenced process swatch matching the bound RGB/CMYK document, or an RGB-only linear Gradient or ordinary RGB-base Spot in an RGB document. CMYK process channels use five-decimal canonical percentages. Spot creation is allowed only on measured Illustrator versions (currently 30.8.1) and is otherwise blocked before any host effect. Apply verifies the exact native resource identity and complete resource-collection delta; rollback removes only the captured self-created resource.',
+    description: 'Plan or create one unreferenced process swatch matching the bound RGB/CMYK document, or an RGB-only linear Gradient or ordinary RGB-base Spot in an RGB document. CMYK process channels use five-decimal canonical percentages. Spot creation is allowed only on measured Illustrator versions (currently ' + describeHostVersionScope('spot_rollback') + ') and is otherwise blocked before any host effect. Apply verifies the exact native resource identity and complete resource-collection delta; rollback removes only the captured self-created resource.',
     inputSchema: createSwatchResourceInputSchema,
     publicInputSchema: createSwatchResourcePublicInputSchema,
     outputSchema: swatchResourceResponseSchema,

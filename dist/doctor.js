@@ -1,11 +1,12 @@
 import { constants } from 'node:fs';
 import { access, lstat, readdir } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { defaultStateRoot } from './command-store.js';
 import { appleScriptApplicationReference, BETA_ILLUSTRATOR_APPLICATION, detectRunningIllustratorBundles, illustratorApplicationTarget, resolveIllustratorApplication, runningIllustratorChannelBundleIds, spotlightQueryForApplication, STABLE_ILLUSTRATOR_APPLICATION, } from './illustrator-application.js';
 import { defaultCommandRunner, describeCommandOutcome } from './command-runner.js';
 import { summarizeEditSessionRecords } from './edit-session.js';
-import { validatePrivateDirectory } from './private-state.js';
+import { inFileProviderDomain, summarizeSaveAsRecords } from './save-as-session.js';
+import { isWindowsPrivateState, validatePrivateStateRoot } from './private-state.js';
 import { quarantineArea } from './state-quarantine.js';
 export { spotlightQueryForApplication } from './illustrator-application.js';
 export const DOCTOR_REPORT_VERSION = 1;
@@ -310,6 +311,8 @@ async function describeSigningRecord(path, uid) {
         return { present: true, problem: 'is a symbolic link', mode };
     if (!metadata.isFile())
         return { present: true, problem: 'is not a regular file', mode };
+    if (isWindowsPrivateState())
+        return { present: true, problem: null, mode };
     if (uid !== undefined && metadata.uid !== uid)
         return { present: true, problem: 'is not owned by the current user', mode };
     if ((metadata.mode & 0o7777) !== 0o600)
@@ -336,6 +339,10 @@ export async function checkStateRoot(environment) {
         }
     }
     evidence.exists = exists;
+    if (isWindowsPrivateState()) {
+        const prefix = `${basename(root)}.init-`;
+        evidence.initLeftovers = (await readdir(dirname(root)).catch(() => [])).filter((name) => name.startsWith(prefix)).length;
+    }
     if (!exists) {
         const parent = dirname(root);
         const parentWritable = await pathIsWritable(parent);
@@ -350,11 +357,13 @@ export async function checkStateRoot(environment) {
         }
         return {
             id: 'state_root', status: 'pass', evidence,
-            summary: 'State root does not exist yet; the server creates it with mode 0700 on first use.',
+            summary: isWindowsPrivateState()
+                ? 'State root does not exist yet; the server creates it as an owner-only protected directory on first use.'
+                : 'State root does not exist yet; the server creates it with mode 0700 on first use.',
         };
     }
     try {
-        await validatePrivateDirectory(root, 0o700, 'state root');
+        await validatePrivateStateRoot(root);
     }
     catch (error) {
         return {
@@ -411,6 +420,19 @@ export async function checkStateRoot(environment) {
         evidence.editSessionsInvalid = null;
         evidence.editSessionsError = errorMessage(error);
     }
+    let saveAsSessions = 0;
+    try {
+        const saveAs = await summarizeSaveAsRecords(root);
+        evidence.saveAsSessions = saveAsSessions = saveAs.sessions + saveAs.sessionsInvalid;
+        evidence.saveAsSessionsInvalid = saveAs.sessionsInvalid;
+        evidence.saveAsRecordsWithoutSession = saveAs.recordsWithoutSession;
+        evidence.saveAsAbandonedWithStaging = saveAs.abandonedWithStaging;
+    }
+    catch (error) {
+        evidence.saveAsSessions = null;
+        evidence.saveAsError = errorMessage(error);
+    }
+    evidence.stateRootInFileProvider = await inFileProviderDomain(root);
     for (const [kind, key] of [['commands', 'quarantinedCommands'], ['edit-sessions', 'quarantinedEditSessions']]) {
         try {
             evidence[key] = (await readdir(quarantineArea(root, kind).area)).filter((name) => /^[^.]+\.json$/u.test(name)).length;
@@ -426,6 +448,7 @@ export async function checkStateRoot(environment) {
             : 'State root is private (0700), writable, and holds a complete cursor signing record pair.',
         ...(lockPresent ? { recommendation: 'An active-command lock exists. If no server is running, reconcile the recorded command with illustrator_reconcile before new mutations.' } : {}),
         ...(!lockPresent && editSessionsInvalid > 0 ? { recommendation: `${editSessionsInvalid} edit session record(s) under edit-sessions/ are unreadable and are left as is; they refuse every new edit session.` } : {}),
+        ...(!lockPresent && editSessionsInvalid === 0 && saveAsSessions > 0 ? { recommendation: `${saveAsSessions} save-as session(s) are unresolved and block mutations; run illustrator_reconcile_save_as for each save_as_id under exports/.` } : {}),
     };
 }
 export function resolveBundleByAppleEventVersion(bundleCheck, bundles, appleEvent) {

@@ -1,3 +1,4 @@
+import { hostVersionPublicFields, hostVersionInternalFields, normalizeHostVersionConsent } from '../host-version-consent.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
@@ -7,6 +8,7 @@ import { boundsSchema, documentContextSchema, mutationAuditSchema } from '../mut
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { CLIPPING_MASK_HOST_SCRIPT, clipAuditMatches, clipLayerStateSchema, clipParentOrderSchema, clipPathSnapshotSchema, sameCanonical, } from './clipping-mask-shared.js';
 import { SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS, supportedPathCmykPaintSchema, } from './supported-path-item-host-script.js';
+import { describeHostVersionScope } from '../host-version-admission.js';
 export const APPLY_PATHFINDER_OPERATION = 'apply_pathfinder';
 export const APPLY_PATHFINDER_VALIDATOR = { kind: APPLY_PATHFINDER_OPERATION, version: 1 };
 const CANONICAL_VERSION = 1;
@@ -48,7 +50,7 @@ const selectionSchema = z.strictObject({
     if (selection.restored !== same)
         context.addIssue({ code: 'custom', message: 'Selection restored must reflect the read-back.' });
 });
-const commonInternal = { expectedDocumentKey: documentKeySchema, sourceUuids: sourceUuidsSchema, mode: modeSchema };
+const commonInternal = { ...hostVersionInternalFields, expectedDocumentKey: documentKeySchema, sourceUuids: sourceUuidsSchema, mode: modeSchema };
 const internalInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonInternal, apply: z.literal(false) }),
     z.strictObject({
@@ -59,7 +61,7 @@ const internalInputSchema = z.discriminatedUnion('apply', [
         commandId: canonicalCommandIdSchema,
     }),
 ]);
-const commonPublic = {
+const commonPublic = { ...hostVersionPublicFields,
     expected_document_key: documentKeySchema,
     source_uuids: sourceUuidsSchema.describe('Native PageItem.uuid of exactly two axis-aligned rectangle PathItems directly on the same top-level layer, overlapping at one corner each.'),
     mode: modeSchema.describe('unite (Add), minus_front (the front rectangle cut from the back one), intersect, or exclude.'),
@@ -85,7 +87,7 @@ const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(appl
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
 function normalizePublicInput(input) {
     const value = applyPathfinderPublicInputSchema.parse(input);
-    const common = { expectedDocumentKey: value.expected_document_key, sourceUuids: value.source_uuids, mode: value.mode };
+    const common = { ...normalizeHostVersionConsent(value), expectedDocumentKey: value.expected_document_key, sourceUuids: value.source_uuids, mode: value.mode };
     return value.apply ? {
         ...common,
         expectedSourcesBefore: value.expected_sources_before,
@@ -1225,7 +1227,7 @@ function normalizedRequest(input) {
 export const applyPathfinderToolContract = {
     name: 'illustrator_apply_pathfinder',
     title: 'Plan or Apply Pathfinder',
-    description: 'Plan or apply one Pathfinder operation (mode: unite, minus_front, intersect, exclude) to two paths (source_uuids). Non-destructive: the two sources stay unchanged; the tool duplicates both, groups the duplicates, applies the live pathfinder, and expands it, which leaves one new group at the front of the layer holding the result paths (one path; two for exclude, no compound path). Measured profile only: two axis-aligned rectangles (four corner points, no handles), each with exactly one corner strictly inside the other, filled and stroked at 1 pt in the document colour model (RGB in an RGB document, process CMYK in a CMYK document), opacity 100, directly on the same top-level layer, Illustrator 30.8.1 in the foreground; curves, other shapes, contained or separate rectangles, no fill or stroke, other stroke widths, Gray, spot or gradient paint, groups, compound paths, sublayers, and locked or hidden items are refused. The result takes the front source\'s paint (the back source\'s for minus_front). The plan shows that no source is consumed, the front-to-back operand order, the parent order with the new group first, and every result path\'s anchors, bounds, and paint source. Apply compares expected_sources_before and expected_parent_order, restores the previous selection (reported, never a failure), verifies the group, each path\'s outline, bounds, and paint, the untouched sources, the parent order, and the document item counts by native read-back, and on failure removes only what it created.',
+    description: 'Plan or apply one Pathfinder operation (mode: unite, minus_front, intersect, exclude) to two paths (source_uuids). Non-destructive: the two sources stay unchanged; the tool duplicates both, groups the duplicates, applies the live pathfinder, and expands it, which leaves one new group at the front of the layer holding the result paths (one path; two for exclude, no compound path). Measured profile only: two axis-aligned rectangles (four corner points, no handles), each with exactly one corner strictly inside the other, filled and stroked at 1 pt in the document colour model (RGB in an RGB document, process CMYK in a CMYK document), opacity 100, directly on the same top-level layer, Illustrator ' + describeHostVersionScope('clipping_mask') + ' in the foreground; curves, other shapes, contained or separate rectangles, no fill or stroke, other stroke widths, Gray, spot or gradient paint, groups, compound paths, sublayers, and locked or hidden items are refused. The result takes the front source\'s paint (the back source\'s for minus_front). The plan shows that no source is consumed, the front-to-back operand order, the parent order with the new group first, and every result path\'s anchors, bounds, and paint source. Apply compares expected_sources_before and expected_parent_order, restores the previous selection (reported, never a failure), verifies the group, each path\'s outline, bounds, and paint, the untouched sources, the parent order, and the document item counts by native read-back, and on failure removes only what it created.',
     inputSchema,
     publicInputSchema: applyPathfinderPublicInputSchema,
     outputSchema: applyPathfinderResponseSchema,
@@ -1261,6 +1263,7 @@ export function createApplyPathfinderAdapter() {
         errorMappingVersion: ERROR_MAPPING_VERSION,
         hostScriptDigest: APPLY_PATHFINDER_HOST_SCRIPT_DIGEST,
         mutationHostApplicationMode: 'foreground',
+        hostVersionOperation: () => 'clipping_mask',
         buildCommand(input) {
             const normalized = normalizedRequest(input);
             const { commandId: _commandId, ...params } = normalized.request;

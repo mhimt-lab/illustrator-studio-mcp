@@ -1,10 +1,10 @@
 import { MUTATION_TRANSACTION_SCRIPT } from '../../mutation-transaction.js';
-import { SPOT_ROLLBACK_VERIFIED_APP_VERSIONS } from './version-gate.js';
+import { HOST_VERSION_POLICY_JSX } from '../../host-version-policy.js';
 export const CREATE_SWATCH_RESOURCE_SCRIPT = `
 ${MUTATION_TRANSACTION_SCRIPT}
 
 var RESOURCE_COLLECTION_LIMIT = 512;
-var SPOT_ROLLBACK_VERIFIED_APP_VERSIONS = ${JSON.stringify(SPOT_ROLLBACK_VERIFIED_APP_VERSIONS)};
+${HOST_VERSION_POLICY_JSX}
 var RESOURCE_SNAPSHOT_MAX_BYTES = 32768;
 var RESOURCE_CONTEXT_MAX_BYTES = 24576;
 
@@ -289,11 +289,7 @@ function resourceNameAbsent(document, resource) {
 
 function resourceHostVersionVerified(resource) {
   if (resource.kind !== "spot") return true;
-  var version = String(app.version);
-  for (var index = 0; index < SPOT_ROLLBACK_VERIFIED_APP_VERSIONS.length; index++) {
-    if (SPOT_ROLLBACK_VERIFIED_APP_VERSIONS[index] === version) return true;
-  }
-  return false;
+  return hostVersionAdmitted("spot_rollback", String(app.version));
 }
 
 function resourceCollectionKind(resource) {
@@ -340,7 +336,7 @@ function resourcePreflight(forApply) {
   if (!nameAbsent) blockers.push("resource_name_already_exists");
   if (!collectionCapacityWithinLimit) blockers.push("resource_collection_capacity_exceeded");
   if (!resultSizeWithinLimit) blockers.push("result_size_limit_exceeded");
-  if (!hostVersionVerified) blockers.push("spot_host_version_unverified");
+  if (!hostVersionVerified) blockers.push("host_version_unmeasured");
   return {
     context: context,
     document: document,
@@ -354,7 +350,7 @@ function resourcePreflight(forApply) {
 }
 
 function resourcePlan(preflight) {
-  return {
+  var plan = {
     operation: "create_swatch_resource",
     documentKey: preflight.context.key,
     resource: params.resource,
@@ -367,6 +363,9 @@ function resourcePlan(preflight) {
     applyAllowed: preflight.blockers.length === 0,
     applyBlockedReasonCodes: preflight.blockers
   };
+  var consent = hostVersionConsent(params);
+  if (consent !== null) plan.hostVersionConsent = consent;
+  return plan;
 }
 
 function resourceRevalidate(preflight, plan) {
