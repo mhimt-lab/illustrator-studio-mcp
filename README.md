@@ -34,6 +34,23 @@ Ask in plain words. For example:
 
 This is a Public Beta (0.1.0-beta.5), [checked operation by operation on Illustrator 2026 (30.8)](docs/compatibility.en.md).
 
+## How it differs from Adobe's Illustrator MCP (Beta)
+
+Adobe's Illustrator (Beta) has a built-in MCP server. Illustrator Studio MCP is a separate, independent project for stable Illustrator on Mac. They differ in the Illustrator version they target, what they cover, and how a change is checked.
+
+| | Adobe's built-in MCP | Illustrator Studio MCP |
+|---|---|---|
+| Illustrator version | Illustrator (Beta) | Stable Illustrator 2026, checked on 30.8 (Beta is not checked) |
+| OS | The Help pages describe steps for macOS and Windows | Mac only |
+| Scope and count | Tools and actions (the Help lists 40): documents and artboards, inspecting objects, layers and groups, selecting and transforming, simple text edits and appearance, export as PNG, JPEG, SVG or PDF | 88 functions: creating shapes and text, batch text and font changes, Japanese line-break check, print check, PDF export, backups. Counting methods differ, so compare coverage rather than numbers |
+| Reviewing a change | Your AI tool asks you to accept or reject the suggested changes; undo in Illustrator with Command + Z (macOS) or Ctrl + Z (Windows) | Shows the target and change as a plan first, and checks the target again right before writing |
+| Checking the result | Not described in the Help pages | Reads the result back from Illustrator; stops further edits if the outcome is unclear |
+| Edits you made by hand | Not described in the Help pages | Stops instead of overwriting |
+| Print | Export as PDF, PNG, JPEG or SVG | Print check, PDF with trim marks and bleed |
+| Japanese typesetting | Not described in the Help pages | Line-break check; replacing font pairs |
+
+“Not described” means the Help pages do not say either way. It does not mean the feature is absent. The Adobe column reflects three Adobe Help pages ([About](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/about-using-ai-tools-with-illustrator.html), [Connect](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/connect-illustrator-to-ai-tools.html), [Work with documents](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/work-with-illustrator-documents-from-ai-tools.html)), last updated by Adobe on Aug 18, 2026 and read on Oct 1, 2026. The Beta may change. Choose the one that fits your Illustrator version and your work.
+
 ## Install
 
 ### Claude Desktop (easiest, no Node.js needed)

@@ -32,6 +32,23 @@ https://github.com/user-attachments/assets/7bf18adf-ec3e-446f-b878-a40d3d96418c
 
 いまはPublic Beta（0.1.0-beta.5）です。[Illustrator 2026（30.8）で操作ごとに実機確認](docs/compatibility.md)しています。
 
+## Adobe公式のIllustrator MCP（Beta）との違い
+
+AdobeのIllustrator（Beta）には、MCPサーバーが内蔵されています。Illustrator Studio MCPは、通常版のIllustrator（Mac）向けの独立したプロジェクトです。対象にしているIllustratorの版、扱える範囲、変更の確かめ方が違います。
+
+| | Adobe内蔵のMCP | Illustrator Studio MCP |
+|---|---|---|
+| Illustratorの版 | Illustrator（Beta） | 通常版のIllustrator 2026（30.8で確認。Betaは確認していません） |
+| OS | ヘルプにmacOSとWindowsの手順あり | Mac専用 |
+| 範囲と数 | ツールと操作（ヘルプの記載では40）：ドキュメントとアートボード、オブジェクトの確認、レイヤーとグループ、選択と変形、簡単なテキスト編集と見た目の変更、PNG・JPEG・SVG・PDFの書き出し | 88の機能：図形とテキストの作成、テキストやフォントのまとめて変更、日本語の改行チェック、印刷前チェック、PDF書き出し、バックアップ。数え方が異なるため、数ではなく範囲で比べてください |
+| 変更の確認 | AIツールが提案された変更の承認・拒否を尋ねる。取り消しはIllustratorでCommand + Z（macOS）／Ctrl + Z（Windows） | まず対象と変更内容を計画として見せ、書き込む直前にもう一度対象を確かめる |
+| 結果の確認 | ヘルプには記載なし | Illustratorから結果を読み直す。結果が分からないときは次の編集を止める |
+| 手で直した箇所 | ヘルプには記載なし | 上書きせずに止まる |
+| 印刷 | PDF・PNG・JPEG・SVGで書き出し | 印刷前チェック、トンボと塗り足しつきのPDF |
+| 日本語の組版 | ヘルプには記載なし | 改行チェック、フォントの組み合わせの置き換え |
+
+「記載なし」は、ヘルプがどちらとも述べていないという意味で、機能がないという意味ではありません。Adobe側の列は、Adobeのヘルプ3ページ（[概要](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/about-using-ai-tools-with-illustrator.html)、[接続](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/connect-illustrator-to-ai-tools.html)、[ドキュメントの操作](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/work-with-illustrator-documents-from-ai-tools.html)）の内容で、Adobeの最終更新は2026年8月18日、確認は2026年10月1日です。Betaの内容は変わる可能性があります。お使いのIllustratorの版と作業に合うほうをお選びください。
+
 ## インストール
 
 ### Claude Desktop（いちばん簡単・Node.js不要）
