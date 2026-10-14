@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { boundsSchema, documentContextSchema } from './mutation-result-schema-core.js';
+import { PREFLIGHT_SCOPE_NOTE } from './preflight-scope-note.js';
 const messageSchema = z.string().min(1).max(500);
 const positiveFiniteSchema = z.number().finite().positive();
 const imageColorSpaceSchema = z.enum(['RGB', 'CMYK', 'Gray', 'Lab', 'Indexed', 'unknown']);
@@ -176,6 +177,7 @@ export const imagePreflightItemSchema = z.strictObject({
 });
 const pageBaseSchema = z.strictObject({
     document: documentContextSchema,
+    scopeNote: z.literal(PREFLIGHT_SCOPE_NOTE),
     threshold: z.strictObject({ minimumEffectivePpi: positiveFiniteSchema }),
     scope: z.discriminatedUnion('mode', [
         z.strictObject({ mode: z.literal('document') }),

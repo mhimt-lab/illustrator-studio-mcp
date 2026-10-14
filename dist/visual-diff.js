@@ -4,6 +4,10 @@ import { extname, isAbsolute, resolve } from 'node:path';
 import { PNG } from 'pngjs';
 import { z } from 'zod';
 import { noFollowNonBlockingReadFlags } from './platform-primitives.js';
+import { IndeterminateExecutionError } from './domain.js';
+import { isIndeterminateIllustratorError } from './indeterminate-call-gate.js';
+import { assertPrivateImageReadStable, isWindowsPrivateState, openPrivateFileForRead } from './private-state.js';
+import { validateWindowsOutputPath } from './windows/output-path.js';
 export const VISUAL_DIFF_MAX_FILE_BYTES = 10 * 1024 * 1024;
 export const VISUAL_DIFF_MAX_PIXELS = 4_194_304;
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
@@ -77,15 +81,17 @@ function validatePath(path, role) {
         throw codedError('UNSUPPORTED_IMAGE_FORMAT', `${role}_path must use the .png extension.`);
     }
 }
-export async function readStableImage(path, role) {
+export async function readStableImage(path, role, origin = 'private_state') {
     validatePath(path, role);
     for (let attempt = 1;; attempt += 1) {
-        const read = await readStableImageOnce(path, role, attempt < VISUAL_DIFF_READ_ATTEMPTS);
+        const read = await readStableImageOnce(path, role, attempt < VISUAL_DIFF_READ_ATTEMPTS, origin);
         if (read !== CTIME_ONLY_CHANGE)
             return read;
     }
 }
-async function readStableImageOnce(path, role, retryOnCtimeOnly) {
+async function readStableImageOnce(path, role, retryOnCtimeOnly, origin) {
+    if (isWindowsPrivateState())
+        return await readWindowsStableImageOnce(path, role, retryOnCtimeOnly, origin);
     const flags = noFollowNonBlockingReadFlags();
     let handle;
     try {
@@ -126,6 +132,95 @@ async function readStableImageOnce(path, role, retryOnCtimeOnly) {
                 sha256: createHash('sha256').update(bytes).digest('hex'),
             },
         };
+    }
+    finally {
+        await handle.close();
+    }
+}
+export function privatePreviewReadGate(path, shouldRead, accept) {
+    return { afterHost: async ({ commandId, data }) => {
+            if (!shouldRead(data))
+                return;
+            try {
+                accept(await readStableImage(path, 'preview'));
+            }
+            catch (error) {
+                if (isIndeterminateIllustratorError(error)) {
+                    const details = error;
+                    throw new IndeterminateExecutionError('Private preview readback is indeterminate; staging is retained. Run illustrator_reconcile before the next command.', commandId, details);
+                }
+                throw error;
+            }
+        } };
+}
+async function rereadFromStart(handle, length) {
+    const buffer = Buffer.alloc(length + 1);
+    let filled = 0;
+    while (filled < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, filled);
+        if (bytesRead === 0)
+            break;
+        filled += bytesRead;
+    }
+    return buffer.subarray(0, filled);
+}
+async function readWindowsStableImageOnce(path, role, retryOnCtimeOnly, origin) {
+    if (!validateWindowsOutputPath(path).ok)
+        throw codedError('INVALID_IMAGE_PATH', 'Image path must be a plain local Windows path.');
+    let handle;
+    let namedBefore;
+    try {
+        namedBefore = await lstat(path, { bigint: true });
+        if (namedBefore.isSymbolicLink())
+            throw codedError('IMAGE_SYMLINK_UNSUPPORTED', 'Image must not be a link.');
+        if (!namedBefore.isFile())
+            throw codedError('IMAGE_NOT_REGULAR', 'Image must be a regular file.');
+        if (namedBefore.size < 1n || namedBefore.size > BigInt(VISUAL_DIFF_MAX_FILE_BYTES))
+            throw codedError('IMAGE_FILE_SIZE_UNSUPPORTED', 'Image size is unsupported.');
+        handle = origin === 'external' ? await open(path, 'r') : await openPrivateFileForRead(path, { nonBlocking: true, imageAttributes: true });
+    }
+    catch (error) {
+        if (isIndeterminateIllustratorError(error))
+            throw error;
+        const code = error?.code;
+        if (code?.startsWith('IMAGE_'))
+            throw error;
+        if (code === 'ENOENT')
+            throw codedError('IMAGE_NOT_FOUND', `${role} image does not exist.`);
+        if (code === 'ELOOP')
+            throw codedError('IMAGE_SYMLINK_UNSUPPORTED', 'Image path has reparse or cloud attributes.');
+        if (origin === 'external') {
+            throw codedError('IMAGE_OPEN_FAILED', `${role} image could not be opened: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        throw codedError('IMAGE_OPEN_FAILED', 'Image could not be opened inside an attested private root.');
+    }
+    try {
+        const before = await handle.stat({ bigint: true });
+        if (!before.isFile())
+            throw codedError('IMAGE_NOT_REGULAR', 'Opened image is not a regular file.');
+        if (before.size < 1n || before.size > BigInt(VISUAL_DIFF_MAX_FILE_BYTES)) {
+            throw codedError('IMAGE_FILE_SIZE_UNSUPPORTED', 'Opened image size is unsupported.');
+        }
+        if (!sameSnapshot(namedBefore, before)) {
+            if (retryOnCtimeOnly && onlyCtimeMoved(namedBefore, before))
+                return CTIME_ONLY_CHANGE;
+            throw codedError('IMAGE_CHANGED_DURING_READ', `${role} image changed before being read.`);
+        }
+        const bytes = await handle.readFile();
+        if (origin === 'external' && !(await rereadFromStart(handle, bytes.length)).equals(bytes)) {
+            throw codedError('IMAGE_CHANGED_DURING_READ', `${role} image changed while being read.`);
+        }
+        const after = await handle.stat({ bigint: true });
+        if (origin === 'private_state')
+            await assertPrivateImageReadStable(path, handle);
+        const pathAfter = await lstat(path, { bigint: true }).catch(() => null);
+        if (bytes.length !== Number(before.size) || !sameSnapshot(namedBefore, before) ||
+            !sameSnapshot(before, after) || pathAfter === null || !sameSnapshot(before, pathAfter)) {
+            if (retryOnCtimeOnly && bytes.length === Number(before.size) && onlyCtimeMoved(namedBefore, before, after, pathAfter))
+                return CTIME_ONLY_CHANGE;
+            throw codedError('IMAGE_CHANGED_DURING_READ', `${role} image changed while being read.`);
+        }
+        return { path, bytes, stat: before, metadata: { path, format: 'png', bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') } };
     }
     finally {
         await handle.close();
@@ -178,23 +273,24 @@ export function decodePng(bytes, role) {
         throw codedError('INVALID_PNG', `${role} PNG could not be decoded: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
-async function revalidateSource(source, role) {
+async function revalidateSource(source, role, origin) {
     const current = await lstat(source.path, { bigint: true }).catch(() => null);
     if (current !== null && sameSnapshot(source.stat, current))
         return;
     if (current !== null && onlyCtimeMoved(source.stat, current)) {
-        const reread = await readStableImage(source.path, role).catch(() => null);
+        const reread = await readStableImage(source.path, role, origin).catch(() => null);
         if (reread !== null && sameContentSnapshot(source.stat, reread.stat) && reread.bytes.equals(source.bytes))
             return;
     }
     throw codedError('IMAGE_CHANGED_DURING_COMPARISON', `${role} image changed before comparison completed.`);
 }
 export async function comparePngImages(input) {
+    const origin = input.origin ?? 'external';
     if (!Number.isInteger(input.threshold) || input.threshold < 0 || input.threshold > 255) {
         throw codedError('INVALID_THRESHOLD', 'threshold must be an integer from 0 through 255.');
     }
-    const before = await readStableImage(input.beforePath, 'before');
-    const after = await readStableImage(input.afterPath, 'after');
+    const before = await readStableImage(input.beforePath, 'before', origin);
+    const after = await readStableImage(input.afterPath, 'after', origin);
     const beforeDimensions = inspectSupportedPng(before.bytes, 'before');
     const afterDimensions = inspectSupportedPng(after.bytes, 'after');
     if (beforeDimensions.width !== afterDimensions.width || beforeDimensions.height !== afterDimensions.height) {
@@ -240,7 +336,7 @@ export async function comparePngImages(input) {
     if (diffBytes.length > VISUAL_DIFF_MAX_FILE_BYTES) {
         throw codedError('DIFF_IMAGE_SIZE_UNSUPPORTED', `Generated diff exceeds the ${VISUAL_DIFF_MAX_FILE_BYTES}-byte limit.`);
     }
-    await Promise.all([revalidateSource(before, 'before'), revalidateSource(after, 'after')]);
+    await Promise.all([revalidateSource(before, 'before', origin), revalidateSource(after, 'after', origin)]);
     const result = visualDiffResultSchema.parse({
         format: 'png',
         pixelFormat: 'rgba8_straight_alpha',

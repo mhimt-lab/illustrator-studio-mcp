@@ -1,4 +1,5 @@
-export const EDIT_SESSION_JSX = String.raw `
+import { PAGE_ITEM_RESOLVE_HOST_SCRIPT } from './page-item-resolve.js';
+export const EDIT_SESSION_JSX = String.raw `${PAGE_ITEM_RESOLVE_HOST_SCRIPT}
 function esRead(read) { try { var value = read(); return ((value === undefined || value === null) ? ["e"] : ["v", value]); } catch (esError) { return ["e"]; } }
 function esEnum(read) { var slot = esRead(read); return ((slot[0] === "e") ? ["e"] : ["v", String(slot[1])]); }
 function esLength(read) { var slot = esRead(read); return ((slot[0] === "v" && typeof slot[1] === "number") ? slot[1] : null); }
@@ -47,7 +48,7 @@ function esAggregateText(aggregate) { return esHex(aggregate.a) + esHex(aggregat
  * the measured profile), right after a path is created doc.pageItems / doc.pathItems keep their old length for the rest of the
  * host call, even through a re-acquired Document, while layer.pageItems is current. A session document holds only
  * items directly under top-level layers (open refuses groups, sublayers, and anything else), so the sum is its
- * item total, and the 2,000-item limit is judged on it.
+ * item total, and the item limit is judged on it.
  */
 function esStructure(doc) {
   var startedAt = esNow();
@@ -109,10 +110,10 @@ function esStructure(doc) {
  * depend on traversal order. Stacking order inside a container is deliberately not part of the row.
  * Text attributes are the whole-range read, which answers with the first character's value (measured).
  * PR-2b (design gate 14.2, 14.13, 14.14): groups, clip groups, compound paths and linked placed images, at any depth
- * under a top-level layer, are measured; the PathItem and TextFrame rows are the PR-2a rows (a clipping path alone gains a flag), so a
+ * under a top-level layer, are measured; embedded raster images are measured by a row branch of their own (#503); the PathItem and TextFrame rows are the PR-2a rows (a clipping path alone gains a flag), so a
  * session opened by the PR-2a build keeps its aggregate.
  */
-function esItemRow(item) {
+function esItemRowRaw(item) {
   var typename = esEnum(function () { return item.typename; });
   var row = [esEnum(function () { return item.uuid; }), typename,
     esRead(function () { var bounds = item.geometricBounds; return [bounds[0], bounds[1], bounds[2], bounds[3]]; }),
@@ -167,19 +168,38 @@ function esItemRow(item) {
     row.push(esRead(function () { return String(item.file.fsName); }),
       esRead(function () { var m = item.matrix; return [m.mValueA, m.mValueB, m.mValueC, m.mValueD, m.mValueTX, m.mValueTY]; }));
   }
+  var rasterReadable = true;
+  if (typename[1] === "RasterItem") {
+    // An embedded raster (design 503): the pixel box, the placement matrix (y-up) and the colour model. The pixels, the
+    // profile and the colorants are not readable and stay outside the row. Anything but a fully readable embedded
+    // raster is unmeasured, so a linked raster item or an unreadable property keeps refusing the session.
+    var embeddedSlot = esRead(function () { return item.embedded; });
+    var boxSlot = esRead(function () { var box = item.boundingBox; return [box[0], box[1], box[2], box[3]]; });
+    var matrixSlot = esRead(function () { var m = item.matrix; return [m.mValueA, m.mValueB, m.mValueC, m.mValueD, m.mValueTX, m.mValueTY]; });
+    var spaceSlot = esEnum(function () { return item.imageColorSpace; });
+    var bitsSlot = esRead(function () { return item.bitsPerChannel; });
+    var channelsSlot = esRead(function () { return item.channels; });
+    row.push(["raster"], embeddedSlot, boxSlot, matrixSlot, spaceSlot, bitsSlot, channelsSlot);
+    rasterReadable = (embeddedSlot[0] === "v" && embeddedSlot[1] === true && boxSlot[0] === "v" && matrixSlot[0] === "v" &&
+      spaceSlot[0] === "v" && bitsSlot[0] === "v" && channelsSlot[0] === "v");
+  }
   var measured = (typename[1] === "PathItem" || typename[1] === "TextFrame" || typename[1] === "GroupItem" ||
-    typename[1] === "CompoundPathItem" || typename[1] === "PlacedItem");
+    typename[1] === "CompoundPathItem" || typename[1] === "PlacedItem" || (typename[1] === "RasterItem" && rasterReadable));
   var parentType = esEnum(function () { return item.parent.typename; });
   var measuredParent = (parentType[0] === "v" &&
     (parentType[1] === "Layer" || parentType[1] === "GroupItem" || parentType[1] === "CompoundPathItem"));
-  return { uuid: ((row[0][0] === "v") ? row[0][1] : null), hash: esRowHash(stringifyJson(row)),
-    measured: (measured && measuredParent) };
+  return { uuid: ((row[0][0] === "v") ? row[0][1] : null), row: row, measured: (measured && measuredParent) };
+}
+/** The row of one item as its hash: the DOM reads (esItemRowRaw), then the serialization and the two-lane hash. */
+function esItemRow(item) {
+  var raw = esItemRowRaw(item);
+  return { uuid: raw.uuid, hash: esRowHash(stringifyJson(raw.row)), measured: raw.measured };
 }
 
 /**
  * The rows a declaration touches (design gate 14.1, 14.13 M-a, 14.15): each declared item, every descendant
- * (doc.pageItems holds the children of groups, clip groups and compound paths, so moving or restyling a container
- * changes their rows), and every ancestor container (a child's change moves the group's bounds, and a group row
+ * (doc.pageItems holds the children of groups, clip groups and compound paths, and the groups a compound path holds,
+ * so moving or restyling a container changes their rows), and every ancestor container (a child's change moves the group's bounds, and a group row
  * holds its ordered children). Ancestors are added without their other descendants. A uuid that does not resolve
  * stays in the list, so its absence is reported as missing, never dropped.
  */
@@ -204,7 +224,22 @@ function esExpandAffected(doc, uuids) {
     } else if (typename[1] === "CompoundPathItem") {
       var paths = esLength(function () { return item.pathItems.length; });
       for (var pathIndex = 0; pathIndex < ((paths === null) ? 0 : paths); pathIndex++) descend(item.pathItems[pathIndex]);
+      // A group held by a compound path is listed in none of the compound path's collections (measured), only in doc.groupItems.
+      var held = compoundGroups(item);
+      for (var heldIndex = 0; heldIndex < held.length; heldIndex++) descend(held[heldIndex]);
     }
+  }
+  var compoundGroupsRead = false;
+  function compoundGroups(compound) {
+    try {
+      if (!compoundGroupsRead) {
+        resolveScanBegin(doc);
+        collectCompoundGroups(doc);
+        compoundGroupsRead = true;
+      }
+      var held = walkCompoundGroups["c" + String(compound.uuid)];
+      return (held === undefined) ? [] : held;
+    } catch (heldError) { throw new Error("The groups held by an edit session compound path could not be read."); }
   }
   function ascend(item) {
     var parent = esRead(function () { return item.parent; });
@@ -258,32 +293,51 @@ function esTopLayers(doc) {
 }
 
 /**
- * Full scan at session open and before save (never per mutation). Reads doc.pageItems once and indexes it.
- * Returns without reading any item when the document is over maxItems, and stops with truncated:true when
- * the host deadline is reached, so the call never approaches the AppleEvent limit.
+ * Full scan at session open and before save (never per mutation). Walks the layer tree with the one shared walker
+ * (walkDocumentTree: each collection it reads is small, so the cost is linear; indexing doc.pageItems is quadratic) and
+ * reads one row per item. Returns without reading any item when the document is over maxItems, and stops with
+ * truncated:true when the host deadline is reached, so the call never approaches the AppleEvent limit. A walk that
+ * cannot reach every item (an invalid reference, an unreadable children collection) also stops with truncated:true and
+ * a stopReason; the caller refuses an unfinished scan, and visited is compared with total (the size of doc.pageItems).
  */
 function esScan(doc, deadlineMs, maxItems) {
   var startedAt = esNow();
   var aggregate = esAggregateEmpty();
-  var all = doc.pageItems;
-  var total = esLength(function () { return all.length; });
+  var total = esLength(function () { return doc.pageItems.length; });
   var result = { aggregate: null, total: total, visited: 0, missingUuid: 0, unmeasured: 0, truncated: false,
-    overLimit: (total === null || total > maxItems), layerRows: 0, durationMs: 0 };
+    overLimit: (total === null || total > maxItems), layerRows: 0, durationMs: 0, stopReason: null };
   if (result.overLimit) { result.durationMs = esNow() - startedAt; return result; }
-  for (var itemIndex = 0; itemIndex < total; itemIndex++) {
-    if ((itemIndex & 15) === 0 && esNow() - startedAt > deadlineMs) { result.truncated = true; break; }
-    var measured = esItemRow(all[itemIndex]);
-    result.visited++;
-    if (measured.uuid === null) result.missingUuid++;
-    if (!measured.measured) result.unmeasured++;
-    esAggregateAdd(aggregate, measured.hash, 1);
+  // The walker reads its deadline and counters from the host script's globals (see walkDocumentTree).
+  if (typeof params !== "object" || params === null) params = {};
+  var previousDeadline = params.deadlineMs;
+  params.deadlineMs = deadlineMs;
+  scanStartedAt = startedAt;
+  scanTotal = total;
+  scanVisited = 0;
+  scanTicks = 0;
+  try {
+    walkDocumentTree(doc, function (item) {
+      var measured = esItemRow(item);
+      if (measured.uuid === null) result.missingUuid++;
+      if (!measured.measured) result.unmeasured++;
+      esAggregateAdd(aggregate, measured.hash, 1);
+    });
+  } catch (walkError) {
+    var text = String(walkError && walkError.message ? walkError.message : walkError);
+    if (String(text).indexOf("READ_SCAN_DEADLINE") >= 0) result.stopReason = "deadline";
+    else if (String(text).indexOf("ILLUSTRATOR_HOST_REFERENCE_INVALID") >= 0) result.stopReason = "reference_invalid";
+    else if (String(text).indexOf("READ_WALK_INCOMPLETE") >= 0) result.stopReason = "walk_incomplete";
+    else { params.deadlineMs = previousDeadline; throw walkError; }
+    result.truncated = true;
   }
+  params.deadlineMs = previousDeadline;
+  result.visited = scanVisited;
   // One stacking-order row per top-level layer; the aggregate count is items plus layers.
   result.layerRows = 0;
   if (!result.truncated) {
     var topLayers = esTopLayers(doc);
     for (var layerIndex = 0; layerIndex < topLayers.length; layerIndex++) {
-      if (esNow() - startedAt > deadlineMs) { result.truncated = true; break; }
+      if (esNow() - startedAt > deadlineMs) { result.truncated = true; result.stopReason = "deadline"; break; }
       esAggregateAdd(aggregate, esLayerOrderRow(topLayers[layerIndex]), 1);
       result.layerRows++;
     }
@@ -293,75 +347,58 @@ function esScan(doc, deadlineMs, maxItems) {
   return result;
 }
 
-function esTypedLookup(read, uuid) {
-  var collection = esRead(read);
-  if (collection[0] === "e") return null;
-  var count = esLength(function () { return collection[1].length; });
-  for (var index = 0; index < ((count === null) ? 0 : count); index++) {
-    var candidate = collection[1][index];
-    if (esEnum(function () { return candidate.uuid; })[1] === uuid) return candidate;
-  }
-  return null;
-}
-
 /**
- * The item for a uuid. Measured on 30.8.1 (design gate 14.14, probe N2): getPageItemFromUuid answers a PlacedItem
- * uuid with an object reporting GroupItem whose row differs from the doc.pageItems row, and a CompoundPathItem uuid
- * with a row that differs too; the typed collections (document.compoundPathItems, document.placedItems), which the
- * compound and placed-image adapters use, return the item itself. Paths and text resolve directly.
+ * The item for a uuid, by direct reference with the item's real type taken from its own collection row (getPageItemFromUuid
+ * answers a PlacedItem, a CompoundPathItem and a RasterItem with an object reporting GroupItem whose row differs from its
+ * collection row; design gate 14.14, probe N2). Never throws: an item that cannot be resolved reads as null, and the caller
+ * proves absence separately with esAbsenceUnproved.
  */
 function esLookup(doc, uuid) {
-  var item = null;
-  try { item = doc.getPageItemFromUuid(uuid); } catch (lookupError) { item = null; }
-  if (item === undefined) item = null;
-  if (item !== null) {
-    var typename = esEnum(function () { return item.typename; });
-    if (typename[1] === "PathItem" || typename[1] === "TextFrame") return item;
-  }
-  var typed = esTypedLookup(function () { return doc.compoundPathItems; }, uuid);
-  if (typed === null) typed = esTypedLookup(function () { return doc.placedItems; }, uuid);
-  return ((typed === null) ? item : typed);
+  try {
+    var resolved = resolvePageItem(doc, uuid);
+    return (resolved === null) ? null : resolved.item;
+  } catch (lookupError) { return null; }
 }
+
+var esWalkStop = { esWalkStop: true };
 
 /**
  * A uuid lookup that throws MRAP, or a captured reference that reads ReferenceError 45, does not prove
  * absence; live Illustrator 30.8.1 kept such an invalid GroupItem in its collections. Absence is proved only when
- * every item on doc.pageItems, doc.groupItems and each layer's pageItems (sublayers included) reads its uuid and
- * none is one of uuids; the observed invalid items showed on some of these routes and not others. Returns null
+ * every item of doc.groupItems reads its uuid and the layer-tree walk (each layer's items, group children, compound path
+ * members, and the groups held by compound paths) reads every uuid and reaches as many items as doc.pageItems holds,
+ * and none is one of uuids; the observed invalid items showed on some of these routes and not others. Returns null
  * when proved, otherwise the reason. Called only where absence decides an outcome, in the same host call.
  */
 function esAbsenceUnproved(doc, uuids) {
   var wanted = {};
   for (var index = 0; index < uuids.length; index++) wanted[uuids[index]] = true;
-  function check(read) {
-    var collection = esRead(read);
-    if (collection[0] === "e") return "collection_unreadable";
-    var count = esLength(function () { return collection[1].length; });
-    if (count === null) return "collection_unreadable";
-    for (var itemIndex = 0; itemIndex < count; itemIndex++) {
-      var uuid = esEnum(function () { return collection[1][itemIndex].uuid; });
-      if (uuid[0] === "e") return "item_uuid_unreadable";
-      if (wanted.hasOwnProperty(uuid[1])) return "uuid_present";
-    }
-    return null;
+  var groups = esRead(function () { return doc.groupItems; });
+  if (groups[0] === "e") return "collection_unreadable";
+  var groupCount = esLength(function () { return groups[1].length; });
+  if (groupCount === null) return "collection_unreadable";
+  for (var groupIndex = 0; groupIndex < groupCount; groupIndex++) {
+    var groupUuid = esEnum(function () { return groups[1][groupIndex].uuid; });
+    if (groupUuid[0] === "e") return "item_uuid_unreadable";
+    if (wanted.hasOwnProperty(groupUuid[1])) return "uuid_present";
   }
-  function checkLayers(read) {
-    var layers = esRead(read);
-    if (layers[0] === "e") return "collection_unreadable";
-    var count = esLength(function () { return layers[1].length; });
-    if (count === null) return "collection_unreadable";
-    for (var layerIndex = 0; layerIndex < count; layerIndex++) {
-      var layer = layers[1][layerIndex];
-      var reason = check(function () { return layer.pageItems; });
-      if (reason === null) reason = checkLayers(function () { return layer.layers; });
-      if (reason !== null) return reason;
-    }
-    return null;
+  try { resolveScanBegin(doc); } catch (beginError) { return "scan_unavailable"; }
+  var reason = null;
+  try {
+    walkDocumentTree(doc, function (item) {
+      var uuid = esEnum(function () { return item.uuid; });
+      if (uuid[0] === "e") { reason = "item_uuid_unreadable"; throw esWalkStop; }
+      if (wanted.hasOwnProperty(uuid[1])) { reason = "uuid_present"; throw esWalkStop; }
+    });
+  } catch (walkError) {
+    if (walkError === esWalkStop) return reason;
+    var text = String(walkError && walkError.message ? walkError.message : walkError);
+    if (String(text).indexOf("READ_SCAN_DEADLINE") >= 0) return "scan_deadline";
+    if (String(text).indexOf("ILLUSTRATOR_HOST_REFERENCE_INVALID") >= 0) return "item_uuid_unreadable";
+    return "collection_unreadable";
   }
-  var result = check(function () { return doc.pageItems; });
-  if (result === null) result = check(function () { return doc.groupItems; });
-  if (result === null) result = checkLayers(function () { return doc.layers; });
-  return result;
+  if (scanVisited !== scanTotal) return "collection_unreadable";
+  return null;
 }
 
 /** Rows of the declared affected items, resolved by uuid; an item that no longer resolves contributes nothing. */
@@ -390,3 +427,122 @@ var esStructureAfter = esStructure(esDoc);
 return stringifyJson({ structure: esStructureBefore, structureStable: (esStructureBefore.digest === esStructureAfter.digest),
   scan: esFull, context: getDocumentContext() });`;
 }
+export const EDIT_SESSION_CHUNK_JSX = String.raw `var csStop = { csStop: true };
+function csCopyCursor(cursor) {
+  return { phase: cursor.phase, position: cursor.position,
+    lo: { layer: cursor.lo.layer, index: cursor.lo.index, a: cursor.lo.a, b: cursor.lo.b, count: cursor.lo.count } };
+}
+function csStructureBrief(structure) {
+  return { digest: structure.digest, itemCount: structure.itemCount, layerCount: structure.layerCount,
+    sublayerCount: structure.sublayerCount, durationMs: structure.durationMs };
+}
+function csContextBrief() {
+  return getDocumentContext();
+}
+/**
+ * One chunk of the full scan (design 2.1): the items phase walks the layer tree with the product walker, skips cursor.position
+ * items and reads rows until the budget or the row cap; the layer_order phase adds the stacking-order rows of the top layers
+ * by direct index ranges (the row is a weighted sum, so a layer can be split). The partial sums are added by the caller.
+ */
+function csChunk(doc, cursorIn, opt) {
+  var startedAt = esNow();
+  var out = { cursorIn: csCopyCursor(cursorIn), cursor: null, done: false, rowsRead: 0, loRead: 0, rows: { a: 0, b: 0, n: 0 },
+    missingUuid: 0, unmeasured: 0, total: null, stopReason: null, structureMismatch: false, overLimit: false,
+    skipMs: 0, rowMs: 0, loMs: 0, durationMs: 0 };
+  out.contextStart = csContextBrief();
+  var structureStart = esStructure(doc);
+  out.structureStart = csStructureBrief(structureStart);
+  out.total = esLength(function () { return doc.pageItems.length; });
+  var next = csCopyCursor(cursorIn);
+  out.cursor = next;
+  if (opt.expectStructure !== null && structureStart.digest !== opt.expectStructure) {
+    out.structureMismatch = true; out.durationMs = esNow() - startedAt; return out;
+  }
+  if (out.total === null || out.total > opt.maxItems) {
+    out.overLimit = true; out.durationMs = esNow() - startedAt; return out;
+  }
+  var aggregate = esAggregateEmpty();
+  if (next.phase === "items") {
+    if (typeof params !== "object" || params === null) params = {};
+    var previousDeadline = params.deadlineMs;
+    params.deadlineMs = opt.deadlineMs;
+    scanStartedAt = startedAt; scanTotal = out.total; scanVisited = 0; scanTicks = 0;
+    var walkStarted = esNow();
+    var firstRowAt = null;
+    var rowsRead = 0;
+    var walkFinished = false;
+    try {
+      walkDocumentTree(doc, function (item) {
+        var position = scanVisited - 1;
+        if (position < cursorIn.position) return;
+        if (rowsRead >= opt.maxRows) { out.stopReason = "max_rows"; throw csStop; }
+        if (esNow() - startedAt > opt.budgetMs) { out.stopReason = "budget"; throw csStop; }
+        if (firstRowAt === null) firstRowAt = esNow();
+        var measured = esItemRow(item);
+        if (measured.uuid === null) out.missingUuid++;
+        if (!measured.measured) out.unmeasured++;
+        esAggregateAdd(aggregate, measured.hash, 1);
+        rowsRead++;
+      });
+      walkFinished = true;
+    } catch (walkError) {
+      if (walkError !== csStop) {
+        var text = String(walkError && walkError.message ? walkError.message : walkError);
+        if (String(text).indexOf("READ_SCAN_DEADLINE") >= 0) out.stopReason = "deadline";
+        else if (String(text).indexOf("ILLUSTRATOR_HOST_REFERENCE_INVALID") >= 0) out.stopReason = "reference_invalid";
+        else if (String(text).indexOf("READ_WALK_INCOMPLETE") >= 0) out.stopReason = "walk_incomplete";
+        else { params.deadlineMs = previousDeadline; throw walkError; }
+      }
+    }
+    params.deadlineMs = previousDeadline;
+    var walkEnded = esNow();
+    if (firstRowAt === null) { out.skipMs = walkEnded - walkStarted; out.rowMs = 0; }
+    else { out.skipMs = firstRowAt - walkStarted; out.rowMs = walkEnded - firstRowAt; }
+    out.rowsRead = rowsRead;
+    next.position = cursorIn.position + rowsRead;
+    if (walkFinished) {
+      if (scanVisited !== out.total) out.stopReason = "count_mismatch";
+      else next.phase = "layer_order";
+    }
+  }
+  if (next.phase === "layer_order" && out.stopReason === null) {
+    var loStarted = esNow();
+    var topLayers = esTopLayers(doc);
+    while (next.lo.layer < topLayers.length && out.stopReason === null) {
+      if (esNow() - startedAt > opt.deadlineMs) { out.stopReason = "deadline"; break; }
+      var layer = topLayers[next.lo.layer];
+      var slot = esRead(function () { return layer.pageItems; });
+      var count = null;
+      if (slot[0] === "v") count = esLength(function () { return slot[1].length; });
+      if (next.lo.count === null) next.lo.count = count;
+      else if (next.lo.count !== count) { out.stopReason = "layer_count_changed"; break; }
+      var directCount = 0;
+      if (count !== null) directCount = count;
+      while (next.lo.index < directCount) {
+        if (esNow() - startedAt > opt.deadlineMs) { out.stopReason = "deadline"; break; }
+        if (out.loRead >= opt.loMaxRows) { out.stopReason = "max_rows"; break; }
+        if (esNow() - startedAt > opt.budgetMs) { out.stopReason = "budget"; break; }
+        var uuid;
+        try { uuid = String(slot[1][next.lo.index].uuid); } catch (uuidError) { uuid = "?"; }
+        next.lo.a = (next.lo.a + esFnv(uuid, 2166136261) * (next.lo.index + 1)) % 4294967296;
+        next.lo.b = (next.lo.b + esFnv(uuid, 84696351) * (next.lo.index + 1)) % 4294967296;
+        next.lo.index++;
+        out.loRead++;
+      }
+      if (out.stopReason !== null) break;
+      esAggregateAdd(aggregate, esRowHash(stringifyJson(["LO", count, next.lo.a, next.lo.b])), 1);
+      next.lo = { layer: next.lo.layer + 1, index: 0, a: 0, b: 0, count: null };
+    }
+    if (out.stopReason === null) next.phase = "done";
+    out.loMs = esNow() - loStarted;
+  }
+  out.done = (next.phase === "done");
+  out.rows = { a: aggregate.a, b: aggregate.b, n: aggregate.n };
+  out.structureEnd = csStructureBrief(esStructure(doc));
+  out.contextEnd = csContextBrief();
+  out.durationMs = esNow() - startedAt;
+  if (out.durationMs > opt.deadlineMs) { out.stopReason = "deadline"; out.done = false; }
+  return out;
+}
+function csEmptyCursor() { return { phase: "items", position: 0, lo: { layer: 0, index: 0, a: 0, b: 0, count: null } }; }
+`;

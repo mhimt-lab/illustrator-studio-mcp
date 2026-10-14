@@ -1,22 +1,25 @@
 import { z } from 'zod';
+import { TEXT_RESULT_ADMISSION_BYTES, TEXT_RESULT_SIZE_SCRIPT, textResultBytes, textResultSizeMessage } from './text-result-size.js';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
-import { PLAIN_POINT_TEXT_V1, POINT_TEXT_APPLY_BLOCKERS, POINT_TEXT_BLOCKERS_SCRIPT, pointTextApplyBlockers, POINT_TEXT_MAX_CODE_UNITS, POINT_TEXT_MAX_LAYER_DEPTH_LIMIT, POINT_TEXT_PROFILE_NAME, POINT_TEXT_SNAPSHOT_SCRIPT, pointTextSingleLineSchema, pointTextSnapshotSchema, } from './point-text-host-script.js';
+import { PLAIN_POINT_TEXT_V1, POINT_TEXT_APPLY_BLOCKERS, POINT_TEXT_BLOCKERS_SCRIPT, pointTextApplyBlockers, POINT_TEXT_MAX_CODE_UNITS, POINT_TEXT_MAX_LAYER_DEPTH_LIMIT, POINT_TEXT_PROFILE_NAME, POINT_TEXT_GROUP_SCRIPT, POINT_TEXT_SNAPSHOT_SCRIPT, pointTextSingleLineSchema, pointTextGroupSnapshotSchema, } from './point-text-host-script.js';
 import { textLookupFailureError } from './text-lookup-error.js';
+import { defineBatchStep } from './batch-step-contract.js';
+import { REPLACE_POINT_TEXT_BATCH_NEXT_CALL } from './batch-step-next-call.js';
 export const REPLACE_POINT_TEXT_OPERATION = 'replace_point_text';
 export const REPLACE_POINT_TEXT_VALIDATOR = { kind: REPLACE_POINT_TEXT_OPERATION, version: 1 };
 export const REPLACE_POINT_TEXT_MAX_CODE_UNITS = POINT_TEXT_MAX_CODE_UNITS;
 export const REPLACE_POINT_TEXT_PROFILE = POINT_TEXT_PROFILE_NAME;
 export const REPLACE_POINT_TEXT_MAX_LAYER_DEPTH = POINT_TEXT_MAX_LAYER_DEPTH_LIMIT;
-export const replacePointTextSnapshotSchema = pointTextSnapshotSchema;
+export const replacePointTextSnapshotSchema = pointTextGroupSnapshotSchema;
 export { PLAIN_POINT_TEXT_V1 };
 const singleLineTextSchema = pointTextSingleLineSchema;
 const CANONICAL_VERSION = 3;
-const RESULT_SCHEMA_VERSION = 4;
+const RESULT_SCHEMA_VERSION = 5;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 2;
@@ -82,26 +85,30 @@ function sameCanonical(left, right) {
 function deriveAfter(before, replacement) {
     return { ...before, contents: replacement };
 }
-const blockerSchema = z.enum(POINT_TEXT_APPLY_BLOCKERS);
-export const replacePointTextPlanSchema = z.strictObject({
-    operation: z.literal(REPLACE_POINT_TEXT_OPERATION),
-    documentKey: z.string().min(1).max(16_384),
-    targetUuid: z.string().min(1).max(255),
-    replacement: singleLineTextSchema,
-    before: replacePointTextSnapshotSchema,
-    after: replacePointTextSnapshotSchema,
-    applyBlockedReasonCodes: z.array(blockerSchema),
-    confirmationStatus: z.enum(['required', 'confirmed']),
-    applyAllowed: z.boolean(),
-}).superRefine((plan, context) => {
-    if (plan.targetUuid !== plan.before.uuid || !sameCanonical(plan.after, deriveAfter(plan.before, plan.replacement))) {
-        context.addIssue({ code: 'custom', message: 'Point-text plan must bind the target and derive only replacement contents.' });
-    }
-    const allowed = plan.confirmationStatus === 'confirmed' && plan.applyBlockedReasonCodes.length === 0;
-    if (plan.applyAllowed !== allowed) {
-        context.addIssue({ code: 'custom', message: 'Point-text applyAllowed must require confirmation and no blockers.' });
-    }
-});
+const SINGLE_BLOCKERS = [...POINT_TEXT_APPLY_BLOCKERS, 'result_too_large'];
+function planSchemaFor(blockers) {
+    return z.strictObject({
+        operation: z.literal(REPLACE_POINT_TEXT_OPERATION),
+        documentKey: z.string().min(1).max(16_384),
+        targetUuid: z.string().min(1).max(255),
+        replacement: singleLineTextSchema,
+        before: replacePointTextSnapshotSchema,
+        after: replacePointTextSnapshotSchema,
+        applyBlockedReasonCodes: z.array(z.enum(blockers)),
+        confirmationStatus: z.enum(['required', 'confirmed']),
+        applyAllowed: z.boolean(),
+    }).superRefine((plan, context) => {
+        if (plan.targetUuid !== plan.before.uuid || !sameCanonical(plan.after, deriveAfter(plan.before, plan.replacement))) {
+            context.addIssue({ code: 'custom', message: 'Point-text plan must bind the target and derive only replacement contents.' });
+        }
+        const allowed = plan.confirmationStatus === 'confirmed' && plan.applyBlockedReasonCodes.length === 0;
+        if (plan.applyAllowed !== allowed) {
+            context.addIssue({ code: 'custom', message: 'Point-text applyAllowed must require confirmation and no blockers.' });
+        }
+    });
+}
+export const replacePointTextPlanSchema = planSchemaFor(POINT_TEXT_APPLY_BLOCKERS);
+const singlePlanSchema = planSchemaFor(SINGLE_BLOCKERS);
 const failureSchema = z.strictObject({
     phase: z.enum(['apply', 'verify']),
     reasonCode: z.enum(['apply_failed', 'verify_mismatch']),
@@ -190,13 +197,15 @@ const transactionSchema = z.discriminatedUnion('state', [
 });
 export const replacePointTextResultSchema = z.union([
     z.strictObject({ operation: z.literal(REPLACE_POINT_TEXT_OPERATION), applied: z.literal(false),
-        document: documentContextSchema, plan: replacePointTextPlanSchema, transaction: transactionSchema }),
+        document: documentContextSchema, plan: singlePlanSchema, transaction: transactionSchema }),
     z.strictObject({ operation: z.literal(REPLACE_POINT_TEXT_OPERATION), applied: z.literal(true),
-        document: documentContextSchema, plan: replacePointTextPlanSchema, postcondition: replacePointTextSnapshotSchema,
+        document: documentContextSchema, plan: singlePlanSchema, postcondition: replacePointTextSnapshotSchema,
         transaction: transactionSchema }),
 ]).superRefine((result, context) => {
     if (result.transaction.state === 'planned') {
         const blockers = pointTextApplyBlockers(result.document.mutationAllowed, result.plan.before);
+        if (textResultBytes(result.plan) > TEXT_RESULT_ADMISSION_BYTES)
+            blockers.push('result_too_large');
         if (result.plan.confirmationStatus !== 'required' ||
             !sameCanonical(result.plan.applyBlockedReasonCodes, blockers)) {
             context.addIssue({ code: 'custom', message: 'Planned point-text replacement must expose exact blockers.' });
@@ -324,7 +333,7 @@ function pointTextResolve(forApply) {
   var document = app.activeDocument;
   var target = pointTextFind(document, params.targetUuid);
   if (target === null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: params.targetUuid }));
-  var before = pointTextSnapshot(document, target, params.targetUuid);
+  var before = pointTextGroupSnapshot(document, target, params.targetUuid);
   var blockers = pointTextBlockers(context, before);
   if (forApply && blockers.length > 0) {
     throw new Error("MCP_ERROR:" + stringifyJson({ code: "POINT_TEXT_APPLY_BLOCKED",
@@ -337,10 +346,10 @@ function pointTextResolve(forApply) {
 function pointTextPreflight(forApply) {
   var resolved = pointTextResolve(forApply);
   if (forApply) {
-    if (!pointTextSame(resolved.before, params.expectedBefore)) {
+    if (!pointTextGroupSame(resolved.before, params.expectedBefore)) {
       throw mutationError("preflight_failed", "Target state does not match expected_before.");
     }
-    if (!pointTextSame(resolved.after, params.confirmedAfter)) {
+    if (!pointTextGroupSame(resolved.after, params.confirmedAfter)) {
       throw mutationError("preflight_failed", "confirmed_after does not match the derived replacement state.");
     }
   }
@@ -363,7 +372,7 @@ function pointTextRevalidate(preflight, plan) {
   catch (error) { throw mutationBeforeSideEffectError(mutationPublicMessage(error,
     "Point-text preconditions changed before apply.")); }
   if (current.document !== preflight.document || current.target !== preflight.target ||
-      !pointTextSame(current.before, plan.before) || !pointTextSame(current.after, plan.after)) {
+      !pointTextGroupSame(current.before, plan.before) || !pointTextGroupSame(current.after, plan.after)) {
     throw mutationBeforeSideEffectError("Point-text target or contents changed before apply.");
   }
 }
@@ -382,8 +391,8 @@ function pointTextVerify(preflight, plan) {
   if (target === null || target !== preflight.target) {
     throw mutationError("verify_mismatch", "Target native UUID no longer resolves to the same TextFrame.");
   }
-  var actual = pointTextSnapshot(preflight.document, target, params.targetUuid);
-  if (!pointTextSame(actual, plan.after)) {
+  var actual = pointTextGroupSnapshot(preflight.document, target, params.targetUuid);
+  if (!pointTextGroupSame(actual, plan.after)) {
     throw mutationError("verify_mismatch", "Point-text postcondition does not match the plan.");
   }
   return actual;
@@ -401,27 +410,66 @@ function pointTextRollback(state) {
     if (target === null || target !== preflight.target) {
       return { status: "indeterminate", message: "Rollback target identity is indeterminate." };
     }
-    current = pointTextSnapshot(preflight.document, target, params.targetUuid);
+    current = pointTextGroupSnapshot(preflight.document, target, params.targetUuid);
   } catch (error) { return { status: "indeterminate", message: "Rollback target state is indeterminate." }; }
-  if (pointTextSame(current, preflight.before)) {
+  if (pointTextGroupSame(current, preflight.before)) {
     state.operationState.rollbackEvidence.restoredSnapshot = current;
     return { status: "verified" };
   }
-  if (!pointTextSame(current, preflight.after)) {
+  if (!pointTextGroupSame(current, preflight.after)) {
     return { status: "indeterminate", message: "Rollback refused because target state is neither before nor planned after." };
   }
   try { target.contents = preflight.before.contents; }
   catch (error) { return { status: "indeterminate", message: "Rollback contents write is indeterminate." }; }
   var restored;
-  try { restored = pointTextSnapshot(preflight.document, target, params.targetUuid); }
+  try { restored = pointTextGroupSnapshot(preflight.document, target, params.targetUuid); }
   catch (error) { return { status: "indeterminate", message: "Rollback verification is indeterminate." }; }
   state.operationState.rollbackEvidence.restoredSnapshot = restored;
-  return pointTextSame(restored, preflight.before)
+  return pointTextGroupSame(restored, preflight.before)
     ? { status: "verified" }
     : { status: "failed", message: "Rollback did not restore the exact before point-text state." };
 }
 
 `;
+const batchUuidSchema = z.string().min(1).max(255);
+const batchPublicPlan = z.strictObject({
+    operation: z.literal(REPLACE_POINT_TEXT_OPERATION), target_uuid: batchUuidSchema, replacement: singleLineTextSchema,
+});
+const batchInternalPlan = z.strictObject({
+    targetUuid: batchUuidSchema, operation: z.literal(REPLACE_POINT_TEXT_OPERATION), replacement: singleLineTextSchema,
+});
+export const replacePointTextBatchStep = defineBatchStep({
+    operation: REPLACE_POINT_TEXT_OPERATION,
+    admittedProfile: REPLACE_POINT_TEXT_PROFILE,
+    recipeAllowed: true,
+    publicPlan: batchPublicPlan,
+    publicApply: z.strictObject({ ...batchPublicPlan.shape,
+        expected_before: replacePointTextSnapshotSchema, confirmed_after: replacePointTextSnapshotSchema }),
+    internalPlan: batchInternalPlan,
+    internalApply: z.strictObject({ ...batchInternalPlan.shape,
+        expectedBefore: replacePointTextSnapshotSchema, confirmedAfter: replacePointTextSnapshotSchema }),
+    planSchema: replacePointTextPlanSchema,
+    snapshotSchema: replacePointTextSnapshotSchema,
+    normalize: (step) => ({ operation: REPLACE_POINT_TEXT_OPERATION, targetUuid: step.target_uuid, replacement: step.replacement,
+        ...('expected_before' in step ? { expectedBefore: step.expected_before, confirmedAfter: step.confirmed_after } : {}) }),
+    request: (plan) => ({ replacement: plan.replacement }),
+    same: sameCanonical,
+    planBlockers: (mutationAllowed, plan) => pointTextApplyBlockers(mutationAllowed, plan.before),
+    nextCall: REPLACE_POINT_TEXT_BATCH_NEXT_CALL,
+    host: {
+        fragments: [
+            { id: 'point-text.snapshot', source: POINT_TEXT_SNAPSHOT_SCRIPT },
+            { id: 'point-text.group', source: POINT_TEXT_GROUP_SCRIPT },
+            { id: 'point-text.blockers', source: POINT_TEXT_BLOCKERS_SCRIPT },
+            { id: 'replace-point-text.module', source: REPLACE_POINT_TEXT_MODULE_SCRIPT },
+        ],
+        hooks: {
+            resolve: 'function () { return pointTextResolve(false); }',
+            plan: 'pointTextPlan', same: 'pointTextGroupSame', apply: 'pointTextApply', verify: 'pointTextVerify', rollback: 'pointTextRollback',
+        },
+        paramFields: ['replacement'],
+    },
+});
 export const REPLACE_POINT_TEXT_RUNNER_SCRIPT = `var pointTextExecution = runMutationTransaction({
   apply: params.apply === true,
   // the items this change reads and writes, so an edit session can advance its item aggregate.
@@ -429,7 +477,7 @@ export const REPLACE_POINT_TEXT_RUNNER_SCRIPT = `var pointTextExecution = runMut
   initialOperationState: function () { return { mutationStarted: false,
     rollbackEvidence: { targetUuid: params.targetUuid, restoredSnapshot: null } }; },
   preflight: pointTextPreflight,
-  plan: pointTextPlan,
+  plan: function (preflight) { return textResultAdmitPlan(pointTextPlan(preflight)); },
   revalidate: pointTextRevalidate,
   applyMutation: pointTextApply,
   verify: pointTextVerify,
@@ -451,7 +499,9 @@ if (pointTextExecution.transaction.state === "verified") result.postcondition = 
 `;
 export const REPLACE_POINT_TEXT_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
 ${POINT_TEXT_SNAPSHOT_SCRIPT}
+${POINT_TEXT_GROUP_SCRIPT}
 ${POINT_TEXT_BLOCKERS_SCRIPT}
+${TEXT_RESULT_SIZE_SCRIPT}
 ${REPLACE_POINT_TEXT_MODULE_SCRIPT}${REPLACE_POINT_TEXT_RUNNER_SCRIPT}`;
 export const REPLACE_POINT_TEXT_HOST_SCRIPT_DIGEST = canonicalSha256(REPLACE_POINT_TEXT_SCRIPT);
 export const REPLACE_POINT_TEXT_ADAPTER_IDENTITY = mutationAdapterIdentity({
@@ -464,6 +514,13 @@ export const REPLACE_POINT_TEXT_ADAPTER_IDENTITY = mutationAdapterIdentity({
 });
 function normalizedRequest(input) {
     const request = internalInputSchema.parse(input);
+    if (request.apply) {
+        const plan = { operation: REPLACE_POINT_TEXT_OPERATION, documentKey: request.expectedDocumentKey,
+            targetUuid: request.targetUuid, replacement: request.replacement,
+            before: request.expectedBefore, after: request.confirmedAfter };
+        if (textResultBytes(plan) > TEXT_RESULT_ADMISSION_BYTES)
+            throw new Error(textResultSizeMessage(plan));
+    }
     const digestRequest = 'commandId' in request
         ? (({ commandId: _commandId, ...rest }) => rest)(request)
         : request;
@@ -476,7 +533,7 @@ function normalizedRequest(input) {
 export const replacePointTextToolContract = {
     name: 'illustrator_replace_point_text',
     title: 'Plan or Replace Point Text',
-    description: 'Plan or replace one non-empty single-line layer-direct POINTTEXT frame with no manual pair kerning, bound by explicit document key and native UUID. Apply performs exact compare-and-set, native read-back verification, and verified inverse rollback.',
+    description: 'Plan or replace one non-empty single-line POINTTEXT frame in a layer or in unlocked, visible groups (plain or clipped) with no manual pair kerning, bound by explicit document key and native UUID. Apply performs exact compare-and-set, native read-back verification, and verified inverse rollback. A plan whose estimated apply result exceeds 209715 UTF-8 bytes (the enclosing groups\' child lists count) is refused with result_too_large.',
     inputSchema,
     publicInputSchema: replacePointTextPublicInputSchema,
     outputSchema: replacePointTextResponseSchema,

@@ -1,3 +1,4 @@
+import { sameFilePath } from './file-path.js';
 import { randomBytes } from 'node:crypto';
 import { lstat, readdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -7,8 +8,9 @@ import { ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath, withPriv
 import { attributeEntry, ensureQuarantineArea, publishQuarantineManifest, quarantineArea, quarantineManifestExists, readQuarantineManifest, stateRootDevice, temporaryTwinPattern, } from './state-quarantine.js';
 import { currentUid } from './platform-primitives.js';
 export const EDIT_SESSION_RECORD_VERSION = 1;
-export const EDIT_SESSION_MAX_ITEMS = 2_000;
-export const EDIT_SESSION_SCAN_DEADLINE_MS = 15_000;
+export const EDIT_SESSION_MAX_ITEMS = 3_000;
+export const EDIT_SESSION_CHUNKED_MAX_ITEMS = 20_779;
+export const EDIT_SESSION_SCAN_DEADLINE_MS = 60_000;
 const sessionIdPattern = /^es_[0-9a-f]{32}$/u;
 const digestPattern = /^[0-9a-f]{16}$/u;
 const aggregatePattern = /^([0-9a-f]{8})([0-9a-f]{8}):(0|[1-9][0-9]*)$/u;
@@ -122,7 +124,7 @@ function sameInode(left, right) {
     return left !== null && left.dev === right.dev && left.ino === right.ino;
 }
 function unmeasuredStructure(structure) {
-    if (structure.itemCount === null || structure.itemCount > EDIT_SESSION_MAX_ITEMS)
+    if (structure.itemCount === null || structure.itemCount > EDIT_SESSION_CHUNKED_MAX_ITEMS)
         return 'document_too_large';
     if (structure.sublayerCount > 0)
         return 'unmeasured_content';
@@ -138,7 +140,7 @@ export function decideEditSessionAdmission(session, observed) {
         return { outcome: 'refuse', reason: 'session_closed' };
     if (record.state === 'suspended')
         return { outcome: 'refuse', reason: 'session_suspended' };
-    if (observed.sourcePath !== record.sourcePath || !sameInode(observed.sourceInode, record.sourceInode) ||
+    if (!sameFilePath(observed.sourcePath, record.sourcePath) || !sameInode(observed.sourceInode, record.sourceInode) ||
         observed.sourceFileRevision !== record.sourceFileRevision) {
         return { outcome: 'suspend', sessionId: record.sessionId, reason: 'file_changed' };
     }
@@ -150,7 +152,7 @@ export function decideEditSessionAdmission(session, observed) {
     const unmeasured = unmeasuredStructure(observed.structure);
     if (unmeasured !== null)
         return { outcome: 'refuse', reason: unmeasured };
-    if (aggregateItemCount(record.head.itemAggregate) - observed.structure.layerCount > EDIT_SESSION_MAX_ITEMS) {
+    if (aggregateItemCount(record.head.itemAggregate) - observed.structure.layerCount > EDIT_SESSION_CHUNKED_MAX_ITEMS) {
         return { outcome: 'refuse', reason: 'document_too_large' };
     }
     return { outcome: 'admit', sessionId: record.sessionId, head: record.head };
@@ -160,12 +162,12 @@ export function decideEditSessionOpen(existing, backup, observed) {
     if (existing.some((entry) => entry.state === 'invalid'))
         return refuse('session_record_invalid');
     if (existing.some((entry) => entry.state === 'valid' && entry.record.state !== 'closed' &&
-        entry.record.sourcePath === observed.sourcePath))
+        sameFilePath(entry.record.sourcePath, observed.sourcePath)))
         return refuse('active_session_exists');
     if (observed.mutationProfile !== 'saved_file' || !observed.saved || observed.sourceFileRevision === null) {
         return refuse('not_saved_file');
     }
-    if (backup.sourcePath !== observed.sourcePath || backup.sourceFileRevision !== observed.sourceFileRevision ||
+    if (!sameFilePath(backup.sourcePath, observed.sourcePath) || backup.sourceFileRevision !== observed.sourceFileRevision ||
         backup.sha256 !== observed.sourceSha256)
         return refuse('backup_mismatch');
     if (observed.hostProfile !== 'foreground_unlocked')
@@ -286,7 +288,7 @@ export class EditSessionStore {
         if (entries.some((entry) => entry.read.state === 'invalid'))
             return { state: 'invalid', reason: 'unreadable_session_record' };
         const active = entries.flatMap((entry) => entry.read.state === 'valid' && entry.read.record.state !== 'closed' &&
-            entry.read.record.sourcePath === sourcePath ? [entry.read.record] : []);
+            sameFilePath(entry.read.record.sourcePath, sourcePath) ? [entry.read.record] : []);
         if (active.length > 1)
             return { state: 'invalid', reason: 'duplicate_active_session' };
         return active.length === 1 ? { state: 'valid', record: active[0] } : { state: 'missing' };

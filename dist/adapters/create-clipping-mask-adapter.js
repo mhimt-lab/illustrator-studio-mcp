@@ -670,7 +670,7 @@ export function mapClipExecutionError(error, detail) {
         return new Error(`No PageItem with UUID ${JSON.stringify(detail.uuid ?? '')} exists in the bound document.`);
     }
     if (detail?.code === 'CLIP_UNSUPPORTED_TARGET') {
-        return new Error(`Clipping mask target ${JSON.stringify(detail.uuid ?? '')} is outside the measured support profile (${detail.reason ?? 'unknown'}).${detail.reason === 'color_model_unmeasured' ? ' Supported paint is RGB, or process CMYK on the mask and a path content in a CMYK document; CMYK inside a nested clip, CMYK in an RGB document, Gray, and Spot are not supported yet.' : ''}`);
+        return new Error(`Clipping mask target ${JSON.stringify(detail.uuid ?? '')} is outside the measured support profile (${detail.reason ?? 'unknown'}${detail.facts?.length ? `: ${detail.facts.join(', ')}` : ''}).${detail.reason === 'color_model_unmeasured' ? ' Supported paint is RGB, or process CMYK on the mask and a path content in a CMYK document; CMYK inside a nested clip, CMYK in an RGB document, Gray, and Spot are not supported yet.' : ''}`);
     }
     if (detail?.code === 'CLIP_TARGETS_NOT_ADJACENT') {
         return new Error('The mask must sit directly in front of the content in the same layer.');

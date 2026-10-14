@@ -1239,7 +1239,7 @@ export function mapPathfinderExecutionError(error, detail) {
         return new Error(`No PageItem with UUID ${JSON.stringify(detail.uuid ?? '')} exists in the bound document.`);
     }
     if (detail?.code === 'CLIP_UNSUPPORTED_TARGET') {
-        return new Error(`Pathfinder source ${JSON.stringify(detail.uuid ?? '')} is outside the measured support profile (${detail.reason ?? 'unknown'}).`);
+        return new Error(`Pathfinder source ${JSON.stringify(detail.uuid ?? '')} is outside the measured support profile (${detail.reason ?? 'unknown'}${detail.facts?.length ? `: ${detail.facts.join(', ')}` : ''}).`);
     }
     if (detail?.code === 'PATHFINDER_APPLY_BLOCKED') {
         return new Error(`Pathfinder apply is blocked: ${(detail.reasonCodes ?? []).join(', ') || 'unknown reason'}.`);

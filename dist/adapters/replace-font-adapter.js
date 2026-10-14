@@ -662,7 +662,7 @@ function rplFontPairOf(row) {
   return typeof pair === "number" ? pair : -1;
 }
 
-/** A name verified outside Illustrator by the Node admission (#440); anything else is unverified. */
+/** A name verified by an external source or clean Illustrator inventory by the Node admission (#440); anything else is unverified. */
 function rplFontVerified(fontName) {
   var verification = params.fontVerification;
   return verification !== null && verification !== undefined && verification.hasOwnProperty(fontName) && verification[fontName] === true;
@@ -1490,11 +1490,10 @@ export const replaceFontToolContract = {
         + 'chunk: a larger scope is blocked (narrow `scope`). Blocked, with the '
         + 'frames in `blockedFrames`: source-font frames in the scope that are locked, hidden, path text, overset or too '
         + 'large, and stories whose font cannot be read. Also refused: fonts not installed, fonts Illustrator resolves but '
-        + 'the OS and Illustrator\'s font lists do not show (a font missing on this machine resolves while a document using '
-        + 'it is open; fonts that Creative Cloud activates only for Adobe applications cannot be confirmed yet), the same font twice, an unused '
+        + 'have no verified OS/font-list source or process-bound documents=0 inventory, the same font twice, an unused '
         + 'source, overflow after the change, and plans beyond ' + REPLACE_FONT_MAX_SCAN_CHARACTERS.toLocaleString('en-US')
         + ' characters or ' + REPLACE_FONT_MAX_SCAN_RUNS.toLocaleString('en-US') + ' runs. Composite fonts are unsupported. '
-        + 'When blocked, tell the user the reason; do not use GUI automation or a script instead. Rollback restores the '
+        + 'When blocked, tell the user the reason and follow next_steps (a script outside this server only for a custom_script refusal). Rollback restores the '
         + 'exact before state.',
     inputSchema,
     publicInputSchema: replaceFontPublicInputSchema,

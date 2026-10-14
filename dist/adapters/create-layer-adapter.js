@@ -6,7 +6,7 @@ import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema } from '../mutation-result-schema-core.js';
 import { canonicalDigest, operationSafetyPolicyToMcpAnnotations } from '../operation-safety-policy-core.js';
 import { LAYER_OPS_HOST_SCRIPT } from './layer-ops-host-script.js';
-import { classifyLayerTerminal, containerPathSchema, containerTargetSchema, insertSibling, layerBlockers, layerBlockerSchema, layerDocumentKeySchema, layerIdentityToken, layerNameSchema, layerPathSchema, layerSafetyAsserter, layerSafetyRegistration, layerTransactionSchema, LAYER_OPS_MAX_SIBLINGS, NEW_LAYER_DEFAULTS, sameCanonical, siblingEntrySchema, siblingOrderSchema, } from './layer-ops-shared.js';
+import { classifyLayerTerminal, containerPathSchema, containerTargetSchema, insertSibling, createLayerBlockerSchema, layerBlockers, layerDocumentKeySchema, layerIdentityToken, layerNameSchema, layerPathSchema, layerSafetyAsserter, layerSafetyRegistration, layerTransactionSchema, LAYER_OPS_MAX_SIBLINGS, NEW_LAYER_DEFAULTS, sameCanonical, referenceSiblingBlockers, REFERENCE_SIBLING_BLOCKER, siblingEntrySchema, siblingOrderSchema, } from './layer-ops-shared.js';
 import { mapLayerExecutionError } from './reorder-layer-adapter.js';
 export const CREATE_LAYER_OPERATION = 'create_layer';
 export const CREATE_LAYER_VALIDATOR = { kind: CREATE_LAYER_OPERATION, version: 1 };
@@ -56,7 +56,7 @@ const planSchema = z.strictObject({
     createdLayerPath: layerPathSchema,
     activeLayerPathBefore: layerPathSchema,
     activeLayerPathAfter: layerPathSchema,
-    applyBlockedReasonCodes: z.array(layerBlockerSchema),
+    applyBlockedReasonCodes: z.array(createLayerBlockerSchema),
     confirmationStatus: z.enum(['required', 'confirmed']),
     applyAllowed: z.boolean(),
 }).superRefine((plan, context) => {
@@ -85,7 +85,10 @@ export const createLayerResultSchema = z.union([
     z.strictObject({ operation: z.literal(CREATE_LAYER_OPERATION), applied: z.literal(true), document: documentContextSchema, plan: planSchema,
         postcondition: z.strictObject({ siblingOrder: siblingOrderSchema, createdLayerPath: layerPathSchema, createdLayer: siblingEntrySchema, activeLayerPath: layerPathSchema }), transaction: transactionSchema }),
 ]).superRefine((result, context) => {
-    const expectedBlockers = layerBlockers(result.transaction.state === 'planned' ? result.document.mutationAllowed : true, result.plan.containerBefore, { targetStateBlocks: false, targetIsAncestor: true });
+    const expectedBlockers = [
+        ...layerBlockers(result.transaction.state === 'planned' ? result.document.mutationAllowed : true, result.plan.containerBefore, { targetStateBlocks: false, targetIsAncestor: true }),
+        ...referenceSiblingBlockers(result.plan.siblingOrderBefore, result.plan.position),
+    ];
     if (result.transaction.state === 'planned') {
         if (result.plan.confirmationStatus !== 'required' || !sameCanonical(result.plan.applyBlockedReasonCodes, expectedBlockers))
             context.addIssue({ code: 'custom', message: 'Planned layer creation must expose exact blockers.' });
@@ -146,10 +149,13 @@ function createLayerResolve(forApply) {
   var activePath = layerOpsPathOfLayer(document, activeLayer);
   if (activePath === null) throw mutationError("preflight_failed", "The active layer could not be located in the document layer tree.");
   var blockers = layerOpsBlockers(context, snapshot, false, true);
+  // #582: a locked or hidden reference sibling makes move(reference, PLACEBEFORE) throw 9024; refuse before any write.
+  var reference = (params.position > 0 && params.position < orderBefore.length) ? orderBefore[params.position] : null;
+  if (reference !== null && (reference.locked === true || reference.visible !== true)) blockers.push("${REFERENCE_SIBLING_BLOCKER}");
   if (forApply) {
     if (!layerOpsSameTarget(snapshot, params.expectedContainerBefore)) throw mutationError("preflight_failed", "Container state does not match expected_container_before.");
     if (!layerOpsSameOrder(orderBefore, params.expectedSiblingOrder)) throw mutationError("preflight_failed", "Sibling order does not match expected_sibling_order.");
-    if (blockers.length > 0) throw new Error("MCP_ERROR:" + stringifyJson({ code: "LAYER_APPLY_BLOCKED", reasonCodes: blockers, layerPath: params.parentLayerPath }));
+    if (blockers.length > 0) throw new Error("MCP_ERROR:" + stringifyJson({ code: "LAYER_APPLY_BLOCKED", reasonCodes: blockers, layerPath: params.parentLayerPath, name: reference === null ? null : reference.name }));
   }
   return { context: context, document: document, container: container, snapshot: snapshot, orderBefore: orderBefore, orderAfter: orderAfter, entry: entry,
     activeLayer: activeLayer, activePath: activePath, blockers: blockers };
@@ -262,7 +268,7 @@ function normalizedRequest(input) {
 export const createLayerToolContract = {
     name: 'illustrator_create_layer',
     title: 'Plan or Create a Layer',
-    description: 'Plan or apply creating one empty layer named name at position (0 = front, default) among the direct layers of the document root or of parent_layer_path (root-relative, from illustrator_list_layers). The plan binds the container\'s structural snapshot, its complete sibling order, and the active layer, and derives the exact after order (new layers are visible, unlocked, printable, empty). Apply performs compare-and-set on the container and order, adds the layer once, moves it once when position > 0, restores the previous active layer, and verifies the whole parent collection, the exact name, and the active layer by native read-back. On failure only the captured, still-empty created layer is removed and the baseline order is proved. A locked or hidden container or ancestor is refused before any write. Names must be 1-255 characters without leading/trailing whitespace or control characters.',
+    description: 'Plan or apply creating one empty layer named name at position (0 = front, default) among the direct layers of the document root or of parent_layer_path (root-relative, from illustrator_list_layers). The plan binds the container\'s structural snapshot, its complete sibling order, and the active layer, and derives the exact after order (new layers are visible, unlocked, printable, empty). Apply performs compare-and-set on the container and order, adds the layer once, moves it once when position > 0, restores the previous active layer, and verifies the whole parent collection, the exact name, and the active layer by native read-back. On failure only the captured, still-empty created layer is removed and the baseline order is proved. A locked or hidden container or ancestor is refused before any write, and so is a position whose reference sibling (the layer the new layer is moved in front of) is locked or hidden (reference_sibling_locked_or_hidden; unlock or show it, or choose another position such as the end; nothing is unlocked for you). Names must be 1-255 characters without leading/trailing whitespace or control characters.',
     inputSchema,
     publicInputSchema: createLayerPublicInputSchema,
     outputSchema: createLayerResponseSchema,

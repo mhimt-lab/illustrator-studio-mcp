@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { defineBatchStep } from './batch-step-contract.js';
+import { SET_PATH_APPEARANCE_BATCH_NEXT_CALL } from './batch-step-next-call.js';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
@@ -577,11 +579,8 @@ async function assertAppearanceSafetyConformance(value, requestDigest, attestati
 }
 export const SET_PATH_APPEARANCE_MODULE_SCRIPT = `
 function appearanceFindTarget(document, uuid) {
-  for (var index = 0; index < document.pageItems.length; index++) {
-    var candidate = document.pageItems[index];
-    if (typeof candidate.uuid === "string" && candidate.uuid === uuid) return candidate;
-  }
-  return null;
+  var resolved = resolvePageItem(document, uuid);
+  return resolved === null ? null : resolved.item;
 }
 
 function appearanceNumber(value, name, minimum, maximum) {
@@ -1215,6 +1214,57 @@ if (appearanceExecution.transaction.state === "verified") {
 }
 `;
 export const SET_PATH_APPEARANCE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}${SET_PATH_APPEARANCE_MODULE_SCRIPT}${SET_PATH_APPEARANCE_RUNNER_SCRIPT}`;
+const batchAppearanceUuidSchema = z.string().min(1).max(255);
+const batchPublicAppearancePlan = z.strictObject({
+    operation: z.literal(SET_PATH_APPEARANCE_OPERATION), target_uuid: batchAppearanceUuidSchema, appearance: pathAppearanceMutationSchema,
+});
+const batchInternalAppearancePlan = z.strictObject({
+    targetUuid: batchAppearanceUuidSchema, operation: z.literal(SET_PATH_APPEARANCE_OPERATION), appearance: pathAppearanceMutationSchema,
+});
+const batchAppearancePlanSchema = z.strictObject({
+    targetUuid: batchAppearanceUuidSchema,
+    before: pathAppearanceStateSchema,
+    after: pathAppearanceStateSchema,
+    confirmationStatus: z.enum(['required', 'confirmed']),
+    applyAllowed: z.boolean(),
+});
+export const setPathAppearanceBatchStep = defineBatchStep({
+    operation: SET_PATH_APPEARANCE_OPERATION,
+    admittedProfile: 'mixed_batch_path_appearance',
+    recipeAllowed: true,
+    publicPlan: batchPublicAppearancePlan,
+    publicApply: z.strictObject({ ...batchPublicAppearancePlan.shape,
+        expected_before: pathAppearanceStateSchema, confirmed_after: pathAppearanceStateSchema }),
+    internalPlan: batchInternalAppearancePlan,
+    internalApply: z.strictObject({ ...batchInternalAppearancePlan.shape,
+        expectedBefore: pathAppearanceStateSchema, confirmedAfter: pathAppearanceStateSchema }),
+    planSchema: batchAppearancePlanSchema,
+    snapshotSchema: pathAppearanceStateSchema,
+    normalize: (step) => ({ operation: SET_PATH_APPEARANCE_OPERATION, targetUuid: step.target_uuid,
+        appearance: step.appearance,
+        ...('expected_before' in step ? { expectedBefore: step.expected_before, confirmedAfter: step.confirmed_after } : {}) }),
+    request: (plan) => ({ appearance: plan.after }),
+    same: (left, right) => canonicalSha256(left) === canonicalSha256(right),
+    reportedBlockers: () => [],
+    binding: (plan) => ({ targetUuid: plan.targetUuid, documentKey: null, confirmationStatus: plan.confirmationStatus }),
+    snapshotTargetUuid: () => null,
+    planBlockers: () => [],
+    nextCall: SET_PATH_APPEARANCE_BATCH_NEXT_CALL,
+    host: {
+        fragments: [{ id: 'set-path-appearance.module', source: SET_PATH_APPEARANCE_MODULE_SCRIPT }],
+        hooks: {
+            resolve: 'function () { var resolved = appearancePreflight(false); resolved.document = resolved.doc; return resolved; }',
+            plan: 'appearancePlan', same: 'appearanceEqual', apply: 'appearanceApply',
+            verify: 'function (resolved, plan) { return appearanceVerify(resolved, plan).postcondition.appearance; }',
+            rollback: `function (state) {
+  var outcome = appearanceRollback(state);
+  state.operationState.rollbackEvidence.restoredSnapshot = state.operationState.rollbackEvidence.restoredAppearance;
+  return outcome;
+}`,
+        },
+        paramFields: ['appearance'],
+    },
+});
 export const SET_PATH_APPEARANCE_HOST_SCRIPT_DIGEST = canonicalSha256(SET_PATH_APPEARANCE_SCRIPT);
 export const SET_PATH_APPEARANCE_ADAPTER_IDENTITY = mutationAdapterIdentity({
     version: 2,

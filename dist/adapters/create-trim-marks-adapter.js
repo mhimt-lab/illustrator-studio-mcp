@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ARTBOARD_INTEGER_TOLERANCE } from '../artboard-integer.js';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity } from '../mutation-operation-adapter.js';
@@ -58,6 +59,13 @@ export function planTrimMarkLines(rect, spec) {
     });
     return lines;
 }
+function sameLinesWithinTolerance(left, right) {
+    return left.length === right.length && left.every((line, index) => {
+        const other = right[index];
+        return line.id === other.id && line.anchors.length === other.anchors.length &&
+            line.anchors.every((anchor, anchorIndex) => anchor.every((value, axis) => Math.abs(value - other.anchors[anchorIndex][axis]) <= ARTBOARD_INTEGER_TOLERANCE));
+    });
+}
 export function trimMarksLayerEntry(name) {
     return { name, visible: true, locked: false, printable: true, childLayerCount: 0, pageItemCount: 1 };
 }
@@ -114,7 +122,7 @@ const planSchema = z.strictObject({
     const [left, top, right, bottom] = plan.artboardRect;
     if (!(left < right) || !(top > bottom))
         context.addIssue({ code: 'custom', message: 'Trim-marks plan artboard rect is degenerate.' });
-    if (!sameCanonical(plan.plannedLines, planTrimMarkLines(plan.artboardRect, plan.marks)))
+    if (!sameLinesWithinTolerance(plan.plannedLines, planTrimMarkLines(plan.artboardRect, plan.marks)))
         context.addIssue({ code: 'custom', message: 'Trim-marks plan lines must derive from the artboard rect and marks.' });
     if (plan.plannedLines.some((line) => line.anchors.some((anchor) => anchor.some((value) => Math.abs(value) > TRIM_MARKS_MAX_COORDINATE_PT)))) {
         context.addIssue({ code: 'custom', message: 'Trim-marks plan lines must stay on the canvas.' });
@@ -267,7 +275,7 @@ function trimMarksResolve(forApply) {
   if (forApply) {
     if (!layerOpsSameTarget(snapshot, params.expectedContainerBefore)) throw mutationError("preflight_failed", "Document root does not match expected_container_before.");
     if (!layerOpsSameOrder(orderBefore, params.expectedSiblingOrder)) throw mutationError("preflight_failed", "Root layer order does not match expected_sibling_order.");
-    if (!mutationSameSequence(rect, params.expectedArtboardRect)) throw mutationError("preflight_failed", "Artboard rect does not match expected_artboard_rect.");
+    if (!trimMarksSameRect(rect, params.expectedArtboardRect)) throw mutationError("preflight_failed", "Artboard rect does not match expected_artboard_rect.");
     if (blockers.length > 0) throw new Error("MCP_ERROR:" + stringifyJson({ code: "LAYER_APPLY_BLOCKED", reasonCodes: blockers, layerPath: [] }));
   }
   return { context: context, document: document, rect: rect, registration: registration, snapshot: snapshot, orderBefore: orderBefore, orderAfter: orderAfter, entry: entry,
@@ -287,7 +295,7 @@ function trimMarksRevalidate(preflight, plan) {
   catch (error) { throw mutationBeforeSideEffectError(mutationPublicMessage(error, "Trim-marks preconditions changed before apply.")); }
   if (current.document !== preflight.document || current.activeLayer !== preflight.activeLayer || !layerOpsSameTarget(current.snapshot, plan.containerBefore) ||
       !layerOpsSameOrder(current.orderBefore, plan.siblingOrderBefore) || !mutationSameSequence(current.activePath, plan.activeLayerPathBefore) ||
-      !mutationSameSequence(current.rect, plan.artboardRect)) {
+      !trimMarksSameRect(current.rect, plan.artboardRect)) {
     throw mutationBeforeSideEffectError("Root layers, active layer, or artboard changed before apply.");
   }
 }
@@ -313,6 +321,12 @@ function trimMarksApply(preflight, plan, state) {
   return { created: true };
 }
 function trimMarksNear(left, right) { return Math.abs(left - right) <= TRIM_MARKS_TOLERANCE_PT; }
+// The artboard rect read live carries host float noise that the rect in a plan (printed with 15 digits, round-tripped) does not: equal within the integer tolerance.
+function trimMarksSameRect(left, right) {
+  if (!left || !right || left.length !== 4 || right.length !== 4) return false;
+  for (var rectIndex = 0; rectIndex < 4; rectIndex++) if (!(Math.abs(left[rectIndex] - right[rectIndex]) <= ${ARTBOARD_INTEGER_TOLERANCE})) return false;
+  return true;
+}
 function trimMarksVerifyLine(line, planned, groupUuid) {
   if (String(line.typename) !== "PathItem") throw mutationError("verify_mismatch", "A created trim mark is not a path.");
   if (String(line.parent.typename) !== "GroupItem" || String(line.parent.uuid) !== groupUuid) throw mutationError("verify_mismatch", "A created trim mark is not in the created group.");

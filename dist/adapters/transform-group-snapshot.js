@@ -3,7 +3,7 @@ const point = z.tuple([z.number().finite(), z.number().finite()]);
 export const transformGroupRowsSchema = z.array(z.strictObject({
     uuid: z.string().min(1).max(255),
     parentUuid: z.string().max(255),
-    type: z.enum(['GroupItem', 'PathItem', 'CompoundPathItem', 'TextFrame', 'PlacedItem']),
+    type: z.enum(['GroupItem', 'PathItem', 'CompoundPathItem', 'TextFrame', 'PlacedItem', 'RasterItem']),
     bounds: z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]),
     position: point,
     coordinates: z.array(point).max(768),
@@ -38,7 +38,7 @@ export function groupRowsMatch(a, b) {
 }
 export const TRANSFORM_GROUP_SCRIPT = `
 function transformGroupRows(target, enclosingBlocked) {
-  var rows = [], seen = {}, characters = 0, pointCount = 0;
+  var rows = [], seen = {}, characters = 0, pointCount = 0, clippedRoot = target.clipped === true, rasterCount = 0;
   function paint(color) {
     var t = String(color.typename);
     if (t === "RGBColor") return [t, color.red, color.green, color.blue];
@@ -50,6 +50,9 @@ function transformGroupRows(target, enclosingBlocked) {
   function visit(item, parentUuid, depth) {
     if (depth > 8 || rows.length >= 128) throw mutationError("preflight_failed", "Group translation traversal limit exceeded.");
     var type = String(item.typename), uuid = item.uuid;
+    if (clippedRoot && depth > 0 && type !== "PathItem" && type !== "TextFrame" && type !== "RasterItem") {
+      throw mutationError("preflight_failed", "Clipped raster groups require direct path, point text and embedded raster children.");
+    }
     if (typeof uuid !== "string" || !uuid || seen.hasOwnProperty(uuid)) throw mutationError("preflight_failed", "Group descendant UUID is missing or duplicated.");
     // The group's own flags, its layer and its ancestors are plan blockers. Under any of them every descendant reads
     // editable false, so editable only proves a descendant when the enclosing state is clear.
@@ -63,11 +66,21 @@ function transformGroupRows(target, enclosingBlocked) {
     var attrs = {name:String(item.name),opacity:transformNumber(item.opacity,"group.opacity")};
     rows.push(row);
     if (type === "GroupItem") {
-      if (item.clipped !== false) throw mutationError("preflight_failed", "Clipped groups are outside group translation support.");
-      attrs.clipped = false;
+      if (item.clipped !== false && !(depth === 0 && clippedRoot)) throw mutationError("preflight_failed", "Nested clipped groups are outside group translation support.");
+      attrs.clipped = item.clipped;
       var members = item.pageItems;
       if (members.length < 1 || members.length > 128) throw mutationError("preflight_failed", "Group child count is unsupported.");
-      for (var i = 0; i < members.length; i++) {var member = members[i];if (member.parent === item) visit(member,uuid,depth+1);}
+      var directCount = 0, masks = 0;
+      for (var i = 0; i < members.length; i++) {var member = members[i];if (member.parent === item) {
+        if (clippedRoot) {
+          if (member.typename === "PathItem" && member.clipping === true) {
+            if (directCount !== 0 || member.closed !== true) throw mutationError("preflight_failed", "Clipped raster group requires a frontmost closed PathItem mask.");
+            masks++;
+          }
+        }
+        visit(member,uuid,depth+1);directCount++;
+      }}
+      if (clippedRoot && (masks !== 1 || rasterCount === 0)) throw mutationError("preflight_failed", "Clipped raster group requires exactly one path mask and an embedded raster.");
     } else if (type === "CompoundPathItem") {
       var paths = item.pathItems;
       if (paths.length < 1 || paths.length > 128) throw mutationError("preflight_failed", "Compound child count is unsupported.");
@@ -77,6 +90,8 @@ function transformGroupRows(target, enclosingBlocked) {
       attrs.stroke = item.stroked ? paint(item.strokeColor) : null;
       attrs.strokeWidth = transformNumber(item.strokeWidth,"group.strokeWidth");
       attrs.closed = item.closed;attrs.pointTypes = [];
+      // Retain the mask flag in CAS, verification and inverse evidence (including ordinary groups).
+      attrs.clipping = item.clipping === true;
       var points = item.pathPoints;
       pointCount += points.length;
       if (points.length < 1 || points.length > 256 || pointCount > 2048) throw mutationError("preflight_failed", "Group path point limit exceeded.");
@@ -97,6 +112,28 @@ function transformGroupRows(target, enclosingBlocked) {
       attrs.file = String(file.fsName);var matrix = item.matrix;
       attrs.matrix = [matrix.mValueA,matrix.mValueB,matrix.mValueC,matrix.mValueD];
       row.coordinates.push([transformNumber(matrix.mValueTX,"group.matrixTX"),transformNumber(matrix.mValueTY,"group.matrixTY")]);
+    } else if (type === "RasterItem") {
+      if (item.embedded !== true) throw mutationError("preflight_failed", "Group translation requires an embedded RasterItem.");
+      attrs.embedded = true;attrs.boundingBox = [];
+      var box = item.boundingBox;
+      for (var r = 0; r < 4; r++) attrs.boundingBox.push(transformNumber(box[r],"group.rasterBoundingBox"));
+      if (box[2] <= box[0] || box[1] <= box[3]) throw mutationError("preflight_failed", "Group raster intrinsic bounds are invalid.");
+      var rasterMatrix = item.matrix;
+      attrs.matrix = [transformNumber(rasterMatrix.mValueA,"group.rasterA"),transformNumber(rasterMatrix.mValueB,"group.rasterB"),
+        transformNumber(rasterMatrix.mValueC,"group.rasterC"),transformNumber(rasterMatrix.mValueD,"group.rasterD")];
+      attrs.imageColorSpace = String(item.imageColorSpace);
+      attrs.bitsPerChannel = transformNumber(item.bitsPerChannel,"group.rasterBits");
+      attrs.channels = transformNumber(item.channels,"group.rasterChannels");
+      if (attrs.bitsPerChannel !== 8 || !((attrs.imageColorSpace === "ImageColorSpace.RGB" && attrs.channels === 3) ||
+          (attrs.imageColorSpace === "ImageColorSpace.CMYK" && attrs.channels === 4))) {
+        throw mutationError("preflight_failed", "Group raster color profile is outside measured RGB/CMYK 8-bit support.");
+      }
+      attrs.blendingMode = String(item.blendingMode);
+      if (attrs.blendingMode !== "BlendModes.NORMAL") throw mutationError("preflight_failed", "Group raster blend mode is outside measured support.");
+      row.coordinates.push([transformNumber(rasterMatrix.mValueTX,"group.rasterTX"),transformNumber(rasterMatrix.mValueTY,"group.rasterTY")]);
+      var visible = item.visibleBounds;
+      row.coordinates.push(transformPoint([visible[0],visible[1]],"group.rasterVisibleTop"),transformPoint([visible[2],visible[3]],"group.rasterVisibleBottom"));
+      rasterCount++;
     } else throw mutationError("preflight_failed", "Group translation contains unsupported item: " + type);
     row.attributes = stringifyJson(attrs);
     if (row.attributes.length > 65536) throw mutationError("preflight_failed", "Group attribute evidence limit exceeded.");

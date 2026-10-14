@@ -1,3 +1,4 @@
+import { textResultBytes, textResultSizeMessage, TEXT_RESULT_ADMISSION_BYTES } from './text-result-size.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
@@ -5,18 +6,20 @@ import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
-import { POINT_TEXT_CHARACTER_SCRIPT, POINT_TEXT_MAX_CODE_UNITS, POINT_TEXT_SNAPSHOT_SCRIPT, pointTextRangeSnapshotSchema, } from './point-text-host-script.js';
+import { POINT_TEXT_CHARACTER_SCRIPT, POINT_TEXT_MAX_CODE_UNITS, POINT_TEXT_GROUP_SCRIPT, POINT_TEXT_SNAPSHOT_SCRIPT, } from './point-text-host-script.js';
+import { POINT_TEXT_MULTILINE_SCRIPT, multilineRejectionSchema, } from './point-text-multiline.js';
+import { RECORDED_MULTILINE_PROFILE, TEXT_RECORDED_MULTILINE_SCRIPT, rangeEditSnapshotSchema, recordedBreakReplacementSchema, checkRecordedMultilineReplacement, isBreakEntry } from './text-recorded-multiline-profile.js';
+import { TEXT_RECORDED_MODULE_SCRIPT, sameRecordedSnapshots } from './text-recorded-profile.js';
 import { validateClusterRange } from './point-text-cluster.js';
 import { textLookupFailureError } from './text-lookup-error.js';
 export const REPLACE_TEXT_RANGE_OPERATION = 'replace_text_range';
 export const REPLACE_TEXT_RANGE_VALIDATOR = { kind: REPLACE_TEXT_RANGE_OPERATION, version: 1 };
-const CANONICAL_VERSION = 2;
-const RESULT_SCHEMA_VERSION = 3;
+const CANONICAL_VERSION = 4;
+const RESULT_SCHEMA_VERSION = 7;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 2;
-const replacementSchema = z.string().max(POINT_TEXT_MAX_CODE_UNITS)
-    .regex(/^[^\r\n]*$/u, 'A point-text range replacement must not contain a line break.');
+const replacementSchema = recordedBreakReplacementSchema;
 const rangeRejectionSchema = z.enum([
     'offset_out_of_range',
     'range_splits_character',
@@ -25,6 +28,7 @@ const rangeRejectionSchema = z.enum([
     'result_too_long',
     'result_empty',
     'range_style_not_uniform',
+    ...multilineRejectionSchema.options,
 ]);
 const blockerSchema = z.enum([
     'document_mutation_not_allowed',
@@ -33,6 +37,7 @@ const blockerSchema = z.enum([
     'target_not_editable',
     'layer_hidden',
     'layer_locked',
+    'result_too_large',
 ]);
 const planSchema = z.strictObject({
     operation: z.literal(REPLACE_TEXT_RANGE_OPERATION),
@@ -42,8 +47,8 @@ const planSchema = z.strictObject({
     end: z.number().int().nonnegative(),
     replacement: replacementSchema,
     removed: z.string().min(1).max(POINT_TEXT_MAX_CODE_UNITS),
-    before: pointTextRangeSnapshotSchema,
-    after: pointTextRangeSnapshotSchema,
+    before: rangeEditSnapshotSchema,
+    after: rangeEditSnapshotSchema,
     applyBlockedReasonCodes: z.array(blockerSchema),
     confirmationStatus: z.enum(['required', 'confirmed']),
     applyAllowed: z.boolean(),
@@ -66,6 +71,15 @@ const planSchema = z.strictObject({
     if (plan.applyAllowed !== allowed) {
         context.addIssue({ code: 'custom', message: 'Point-text range applyAllowed must require confirmation and no blockers.' });
     }
+    if (plan.before.profile !== plan.after.profile || (plan.before.profile === RECORDED_MULTILINE_PROFILE &&
+        (plan.before.layoutBounds == null || plan.after.layoutBounds !== null))) {
+        context.addIssue({ code: 'custom', message: 'A range plan binds one profile, observed bounds before and null predicted bounds after.' });
+    }
+    if (plan.before.profile === RECORDED_MULTILINE_PROFILE) {
+        const rejected = checkTextRangeRequest(plan.before, plan.start, plan.end, plan.replacement);
+        if (rejected)
+            context.addIssue({ code: 'custom', message: `Unsupported range plan: ${JSON.stringify(rejected)}.` });
+    }
     const tail = plan.start + plan.replacement.length;
     const outsideBefore = [
         ...plan.before.characters.slice(0, plan.start),
@@ -81,7 +95,12 @@ const planSchema = z.strictObject({
     }
     const inherited = plan.before.characters[plan.start];
     const insertedStyles = plan.after.characters.slice(plan.start, tail);
-    if (inherited !== undefined && insertedStyles.some((character) => canonicalSha256({ ...character, contents: '' }) !==
+    if (plan.replacement === '\r' || plan.replacement === '\u0003') {
+        if (insertedStyles.length !== 1 || !isBreakEntry(insertedStyles[0]) || insertedStyles[0].contents !== plan.replacement) {
+            context.addIssue({ code: 'custom', message: 'A paragraph split must insert exactly one paragraph break.' });
+        }
+    }
+    else if (inherited !== undefined && insertedStyles.some((character) => canonicalSha256({ ...character, contents: '' }) !==
         canonicalSha256({ ...inherited, contents: '' }))) {
         context.addIssue({ code: 'custom', message: 'Inserted point-text characters must carry the first replaced character style.' });
     }
@@ -102,7 +121,7 @@ const indeterminateFailureSchema = z.strictObject({
 });
 const rollbackEvidence = {
     targetUuid: z.string().min(1).max(255),
-    restoredSnapshot: pointTextRangeSnapshotSchema.nullable(),
+    restoredSnapshot: rangeEditSnapshotSchema.nullable(),
 };
 const transactionSchema = z.discriminatedUnion('state', [
     z.strictObject({ state: z.literal('planned'), audit: mutationAuditSchema }),
@@ -188,7 +207,7 @@ export const replaceTextRangeResultSchema = z.union([
     z.strictObject({
         operation: z.literal(REPLACE_TEXT_RANGE_OPERATION), applied: z.literal(true),
         document: documentContextSchema, plan: planSchema,
-        postcondition: pointTextRangeSnapshotSchema, transaction: transactionSchema,
+        postcondition: rangeEditSnapshotSchema, transaction: transactionSchema,
     }),
 ]).superRefine((result, context) => {
     if (result.transaction.state === 'planned') {
@@ -206,6 +225,8 @@ export const replaceTextRangeResultSchema = z.union([
             blockers.push('layer_hidden');
         if (before.layerAncestry.some((ancestor) => ancestor.locked))
             blockers.push('layer_locked');
+        if (textResultBytes(result.plan) > TEXT_RESULT_ADMISSION_BYTES)
+            blockers.push('result_too_large');
         if (result.plan.confirmationStatus !== 'required' ||
             canonicalSha256(result.plan.applyBlockedReasonCodes) !==
                 canonicalSha256(blockers)) {
@@ -218,8 +239,9 @@ export const replaceTextRangeResultSchema = z.union([
     }
     if (result.applied) {
         if (result.transaction.state !== 'verified' ||
-            canonicalSha256(result.postcondition) !==
-                canonicalSha256(result.plan.after)) {
+            !(result.plan.before.profile === RECORDED_MULTILINE_PROFILE
+                ? sameRecordedSnapshots(result.postcondition, result.plan.after) && result.postcondition.layoutBounds != null
+                : canonicalSha256(result.postcondition) === canonicalSha256(result.plan.after))) {
             context.addIssue({ code: 'custom', message: 'A verified point-text range edit must match the exact after snapshot.' });
         }
     }
@@ -227,8 +249,9 @@ export const replaceTextRangeResultSchema = z.union([
         context.addIssue({ code: 'custom', message: 'A verified point-text range transaction must be applied.' });
     }
     if (result.transaction.state === 'rolled_back' &&
-        canonicalSha256(result.transaction.rollback.restoredSnapshot) !==
-            canonicalSha256(result.plan.before)) {
+        !(result.plan.before.profile === RECORDED_MULTILINE_PROFILE
+            ? result.transaction.rollback.restoredSnapshot?.layoutBounds != null && sameRecordedSnapshots(result.transaction.rollback.restoredSnapshot, result.plan.before)
+            : canonicalSha256(result.transaction.rollback.restoredSnapshot) === canonicalSha256(result.plan.before))) {
         context.addIssue({ code: 'custom', message: 'A rolled-back point-text range edit must prove exact before restoration.' });
     }
 });
@@ -247,8 +270,8 @@ const internalInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonInternal, apply: z.literal(false) }),
     z.strictObject({
         ...commonInternal,
-        expectedBefore: pointTextRangeSnapshotSchema,
-        confirmedAfter: pointTextRangeSnapshotSchema,
+        expectedBefore: rangeEditSnapshotSchema,
+        confirmedAfter: rangeEditSnapshotSchema,
         apply: z.literal(true),
         commandId: canonicalCommandIdSchema,
     }),
@@ -264,16 +287,16 @@ export const replaceTextRangePublicInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ ...commonPublic, apply: z.literal(false).default(false) }),
     z.strictObject({
         ...commonPublic,
-        expected_before: pointTextRangeSnapshotSchema,
-        confirmed_after: pointTextRangeSnapshotSchema,
+        expected_before: rangeEditSnapshotSchema,
+        confirmed_after: rangeEditSnapshotSchema,
         apply: z.literal(true),
         command_id: applyCommandIdSchema,
     }),
 ]);
 const inputSchema = z.strictObject({
     ...commonPublic,
-    expected_before: pointTextRangeSnapshotSchema.optional(),
-    confirmed_after: pointTextRangeSnapshotSchema.optional(),
+    expected_before: rangeEditSnapshotSchema.optional(),
+    confirmed_after: rangeEditSnapshotSchema.optional(),
     apply: z.boolean().default(false),
     command_id: applyCommandIdSchema.optional(),
 });
@@ -305,6 +328,9 @@ export function checkTextRangeRequest(before, start, end, replacement) {
     const replacementRejection = validateClusterRange(`x${replacement}x`, 1, replacement.length + 1);
     if (replacement.length > 0 && replacementRejection !== null)
         return replacementRejection;
+    const multilineRejection = checkRecordedMultilineReplacement(before, start, end, replacement);
+    if (multilineRejection !== null)
+        return multilineRejection;
     const first = before.characters[start];
     if (first === undefined)
         return { reason: 'offset_out_of_range' };
@@ -410,7 +436,11 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
 }
 export const REPLACE_TEXT_RANGE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
 ${POINT_TEXT_SNAPSHOT_SCRIPT}
+${POINT_TEXT_GROUP_SCRIPT}
 ${POINT_TEXT_CHARACTER_SCRIPT}
+${POINT_TEXT_MULTILINE_SCRIPT}
+${TEXT_RECORDED_MODULE_SCRIPT}
+${TEXT_RECORDED_MULTILINE_SCRIPT}
 
 /**
  * The range snapshot. It reuses every frame-level check the shared profile script performs, but
@@ -418,6 +448,11 @@ ${POINT_TEXT_CHARACTER_SCRIPT}
  * mixed-run frame reports only the first character.
  */
 function rangeSnapshot(document, target, expectedUuid) {
+  var snapshot = rangeSnapshotRaw(document, target, expectedUuid);
+  return snapshot.profile === RECORDED_MULTILINE_PROFILE ? snapshot : pointTextRoundSnapshot(snapshot);
+}
+
+function rangeSnapshotRaw(document, target, expectedUuid) {
   if (!target || target.typename !== "TextFrame") {
     throw mutationError("preflight_failed", "Point-text operations support TextFrame targets only.");
   }
@@ -427,9 +462,8 @@ function rangeSnapshot(document, target, expectedUuid) {
   if (typeof target.uuid !== "string" || target.uuid !== expectedUuid) {
     throw mutationError("preflight_failed", "Target native UUID is unavailable or changed.");
   }
-  if (!target.layer || target.parent !== target.layer) {
-    throw mutationError("preflight_failed", "Point-text target must be directly contained by its layer.");
-  }
+  if (recordedMultilineSelected(target)) return recordedMultilineSnapshot(document, target, expectedUuid);
+  var groups = pointTextGroupAncestry(target);
   if (!target.story || !target.story.textFrames ||
       target.story.textFrames.length !== 1 || target.story.textFrames[0] !== target) {
     throw mutationError("preflight_failed", "Point-text operations support unthreaded text only.");
@@ -446,7 +480,7 @@ function rangeSnapshot(document, target, expectedUuid) {
     throw mutationError("preflight_failed", "Target native text-run state is unavailable.");
   }
   var justificationName = pointTextSupportedJustification(textRange.paragraphAttributes.justification);
-  return {
+  return pointTextWithGroups({
     uuid: target.uuid,
     type: target.typename,
     kind: "TextType.POINTTEXT",
@@ -459,14 +493,14 @@ function rangeSnapshot(document, target, expectedUuid) {
     characters: pointTextCharacterFingerprints(target),
     frame: pointTextFrameState(target),
     layerPath: layerPath,
-    layerAncestry: pointTextAncestry(target),
+    layerAncestry: pointTextAncestryWithGroups(target, groups),
     contents: pointTextValidateContents(target.contents, "Target contents"),
     locked: target.locked,
     hidden: target.hidden,
     editable: target.editable,
     layerVisible: target.layer.visible,
     layerLocked: target.layer.locked
-  };
+  }, groups);
 }
 
 /** A character's style without its contents, so two characters can be compared for style equality. */
@@ -477,7 +511,8 @@ function rangeStyleKey(character) {
 }
 
 function rangeSame(left, right) {
-  return left && right && stringifyJson(left) === stringifyJson(right);
+  if (left && right && left.profile === RECORDED_MULTILINE_PROFILE && right.profile === RECORDED_MULTILINE_PROFILE) return styleV3Same(left, right);
+  return pointTextGroupSame(left, right);
 }
 
 function rangeWrite(target, start, end, text) {
@@ -498,6 +533,8 @@ function rangeResolve(forApply) {
   if (params.end > before.characters.length || params.start >= params.end) {
     throw mutationError("preflight_failed", "The requested point-text range is outside the target contents.");
   }
+  if (before.profile === RECORDED_MULTILINE_PROFILE) recordedMultilineAssertEdit(before, params.start, params.end, params.replacement);
+  else pointTextMultilineAssertEdit(before, params.start, params.end, params.replacement);
   // The inverse re-inherits the range-start style, so a range spanning several styles could not be
   // undone exactly. Outside the range, mixed styles remain supported.
   var firstStyle = rangeStyleKey(before.characters[params.start]);
@@ -546,10 +583,15 @@ function rangePreflight(forApply) {
  * the character that was at the range start.
  */
 function rangePredictAfter(before) {
+  if (before.profile === RECORDED_MULTILINE_PROFILE) return recordedMultilinePredictRange(before);
   var inherited = before.characters[params.start];
   var characters = [];
   for (var head = 0; head < params.start; head++) characters.push(before.characters[head]);
   for (var unit = 0; unit < params.replacement.length; unit++) {
+    if (params.replacement.charAt(unit) === "\\r") {
+      characters.push({ contents: "\\r", kind: "paragraph_break" });
+      continue;
+    }
     characters.push({
       contents: params.replacement.charAt(unit),
       font: { postScriptName: inherited.font.postScriptName, family: inherited.font.family,
@@ -574,7 +616,7 @@ function rangePredictAfter(before) {
 
 function rangePlan(preflight) {
   var removed = preflight.before.contents.substring(params.start, params.end);
-  return {
+  var plan = {
     operation: "replace_text_range", documentKey: preflight.context.key, targetUuid: params.targetUuid,
     start: params.start, end: params.end, replacement: params.replacement, removed: removed,
     before: preflight.before,
@@ -583,6 +625,7 @@ function rangePlan(preflight) {
     confirmationStatus: params.apply === true ? "confirmed" : "required",
     applyAllowed: params.apply === true && preflight.blockers.length === 0
   };
+  return textResultAdmitPlan(plan);
 }
 
 function rangeRevalidate(preflight, plan) {
@@ -643,7 +686,15 @@ function rangeRollback(state) {
   // the inserted text takes the first replaced character's style, which is the style the original text
   // there had, so the inverse restores the style along with the contents.
   var removedText = preflight.before.contents.substring(params.start, params.end);
-  try { rangeWrite(target, params.start, params.start + params.replacement.length, removedText); }
+  try {
+    if (params.replacement.length === 0 && (preflight.before.profile === RECORDED_MULTILINE_PROFILE || preflight.before.contents.indexOf("\\r") >= 0)) {
+      // Measured (#618 F0): inside multi-paragraph text a deletion is undone by rewriting the unchanged left neighbour
+      // together with the removed text; an empty-range insertion is not used there.
+      rangeWrite(target, params.start - 1, params.start, preflight.before.contents.substring(params.start - 1, params.end));
+    } else {
+      rangeWrite(target, params.start, params.start + params.replacement.length, removedText);
+    }
+  }
   catch (writeError) { return { status: "indeterminate", message: "Rollback range write is indeterminate." }; }
   var restored;
   try { restored = rangeSnapshot(preflight.document, target, params.targetUuid); }
@@ -699,8 +750,18 @@ function normalizedRequest(input) {
     if (request.apply) {
         const rejection = checkTextRangeRequest(request.expectedBefore, request.start, request.end, request.replacement);
         if (rejection !== null) {
-            throw new Error(`Point-text range request is unsupported: ${rangeRejectionSchema.parse(rejection.reason)}.`);
+            throw new Error(`Point-text range request is unsupported: ${rangeRejectionSchema.parse(rejection.reason)}. ${JSON.stringify(rejection)}`);
         }
+        if (request.expectedBefore.profile === RECORDED_MULTILINE_PROFILE &&
+            (request.expectedBefore.layoutBounds == null || request.confirmedAfter.layoutBounds !== null || request.confirmedAfter.profile !== RECORDED_MULTILINE_PROFILE)) {
+            throw new Error('A recorded-profile apply must echo the plan: expected_before with observed bounds, confirmed_after with the same profile and null bounds.');
+        }
+        const plan = { operation: REPLACE_TEXT_RANGE_OPERATION, documentKey: request.expectedDocumentKey,
+            targetUuid: request.targetUuid, start: request.start, end: request.end, replacement: request.replacement,
+            removed: request.expectedBefore.contents.slice(request.start, request.end),
+            before: request.expectedBefore, after: request.confirmedAfter };
+        if (textResultBytes(plan) > TEXT_RESULT_ADMISSION_BYTES)
+            throw new Error(textResultSizeMessage(plan));
     }
     const digestRequest = 'commandId' in request
         ? (({ commandId: _commandId, ...rest }) => rest)(request)
@@ -714,12 +775,14 @@ function normalizedRequest(input) {
 export const replaceTextRangeToolContract = {
     name: 'illustrator_replace_text_range',
     title: 'Plan or Replace a Point-Text Range',
-    description: 'Plan or replace one bounded UTF-16 range of a single-line layer-direct POINTTEXT frame, bound by '
+    description: 'Plan or replace one bounded UTF-16 range of a POINTTEXT frame (one line, or up to 32 host items separated by CR or U+0003) in a layer or in unlocked, visible groups (plain or clipped), bound by '
         + 'explicit document key and native UUID. Mixed character styles are supported and every character outside the '
         + 'range keeps its exact contents and style. Ranges that would split a surrogate pair, a combining mark, a '
-        + 'variation selector or an emoji sequence are refused, as are frames carrying manual pair kerning, contents '
+        + 'variation selector or an emoji sequence are refused, as are single-line frames carrying manual pair kerning, contents '
         + 'containing U+200D, and scripts whose cluster rules are unmeasured. Apply performs exact compare-and-set over '
-        + 'a per-character fingerprint, native read-back verification, and verified inverse rollback.',
+        + 'a per-character fingerprint, native read-back verification, and verified inverse rollback. In CR/U+0003 text, character, host paragraph and frame attributes are recorded and compared; bounds are observed. '
+        + 'The range stays inside one host item; one ordinary unit may be replaced by one CR or U+0003 to split it. Empty items, delimiter deletion and conversion are refused with delimiter kinds and positions.'
+        + ' Every frame also requires an estimated apply result <=209715 UTF-8 bytes (80% of 262144): about 200 units with short font metadata (180 with CR/U+0003), fewer with longer metadata or large enclosing groups. Split the range or frame when refused (result_too_large).',
     inputSchema,
     publicInputSchema: replaceTextRangePublicInputSchema,
     outputSchema: replaceTextRangeResponseSchema,

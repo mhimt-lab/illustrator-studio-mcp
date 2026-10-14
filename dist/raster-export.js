@@ -1,19 +1,26 @@
+import { evaluateHostVersion } from './host-version-policy.js';
+import { pathComparisonParams, sameFilePath } from './file-path.js';
+import { matchingDocumentPaths, withFilePathComparisons } from './file-path-identity.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { link, lstat, mkdir, open, readdir, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
 import jpeg from 'jpeg-js';
 import { PNG } from 'pngjs';
 import { z } from 'zod';
+import { STABLE_ILLUSTRATOR_BUNDLE_ID } from './illustrator-application.js';
+import { callTimingEnabled } from './call-timing.js';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from './command-id.js';
 import { BackupCopyError, BackupPreconditionError, copyErrorCreatedDestination, copyFileExclusive, hostDocumentIdentitySchema, inspectSourceFile, resolveBackupRoot, CTIME_ONLY_READ_ATTEMPTS, onlyCtimeDiffers, sameFileIdentity, sameFileOrSameBytes, serializeFileIdentity, verifyTrackedFile, withBackupRootScope, } from './document-backup.js';
 import { assertOutputAbsent, EXPORT_CLOSE_WORK_COPY_SCRIPT, EXPORT_HELPERS, EXPORT_HOST_TIMEOUT_MS, EXPORT_INVENTORY_SCRIPT, EXPORT_OPEN_PRE_ATTEMPT_CODES, EXPORT_OPEN_WORK_COPY_SCRIPT, ExportPreconditionError, parseExportHostError, STAGING_DIRECTORY_PREFIX, createOnceLinkAllowance, validateOutputLocation, withOutputParentScope, workCopyFileName, } from './document-export.js';
+import { ARTBOARD_INTEGER_TOLERANCE, isIntegerWithinTolerance } from './artboard-integer.js';
+import { summarizeValidationFailure } from './tool-arguments.js';
 import { documentKeyMatches } from './document-key.js';
 import { IndeterminateExecutionError } from './domain.js';
 import { canonicalSha256 } from './mutation-canonical.js';
 import { documentContextSchema } from './mutation-result-schema-core.js';
 import { atomicCreatePrivateRecord, atomicReplacePrivateRecord, readSecurePrivateRecord } from './private-record.js';
 import { temporaryTwinPattern } from './state-quarantine.js';
-import { assessRasterRecordSet, RASTER_EXPORT_KIND, RASTER_EXPORT_RECORD_SUFFIXES, RASTER_EXPORT_RECORD_VERSION, rasterExportArtifactSchema, rasterExportOptionsSchema, } from './raster-export-records.js';
+import { assessRasterRecordSet, RASTER_EXPORT_KIND, RASTER_EXPORT_RECORD_SUFFIXES, RASTER_EXPORT_RECORD_VERSION, RASTER_EXACT_PX_RECORD_VERSION, rasterExportArtifactSchema, rasterExportOptionsSchema, singleRasterExportOptionsSchema, } from './raster-export-records.js';
 import { noFollowReadFlags, noFollowNonBlockingReadFlags, noFollowDirectoryFlags, currentUid } from './platform-primitives.js';
 export const RASTER_EXPORT_TOOL = 'illustrator_export';
 export const RASTER_EXPORT_PROFILE = 'raster_export_v1';
@@ -21,32 +28,125 @@ export const RASTER_MAX_SIDE_PX = 4000;
 export const RASTER_MAX_TOTAL_PX = 12_000_000;
 export const RASTER_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MEASURED_EDGE_FRACTIONS = { 1: [0, 0.5], 2: [0, 0.25, 0.5] };
+function readMeasuredEdge(edge, fractions) {
+    if (!Number.isFinite(edge))
+        return null;
+    const magnitude = Math.abs(edge);
+    const whole = Math.floor(magnitude);
+    for (const measured of [...fractions, 1]) {
+        if (Math.abs(magnitude - whole - measured) <= ARTBOARD_INTEGER_TOLERANCE)
+            return Math.sign(edge) * (whole + measured) || 0;
+    }
+    return null;
+}
+const EDGE_NAMES = ['left', 'top', 'right', 'bottom'];
+export function artifactSizeAdmitted(actual, expected, range) {
+    if (range === undefined)
+        return actual.width === expected.width && actual.height === expected.height;
+    return actual.width >= range.width[0] && actual.width <= range.width[1] && actual.height >= range.height[0] && actual.height <= range.height[1];
+}
+export function describeExpectedSize(expected, range) {
+    if (range === undefined)
+        return `${expected.width}x${expected.height}`;
+    return `${range.width[0]}-${range.width[1]} x ${range.height[0]}-${range.height[1]} px (predicted ${expected.width}x${expected.height})`;
+}
 export const WEB_RGB_PIXEL_CONTRACT = ({ options, artboard }) => {
     const unsupported = (reason, message) => ({ status: 'unsupported', reason, message });
-    const [left, top, right, bottom] = artboard.rect;
     const fractions = MEASURED_EDGE_FRACTIONS[options.scale];
-    const unmeasured = artboard.rect.filter((edge) => !fractions.includes(Math.abs(edge % 1)));
-    if (unmeasured.length > 0) {
-        return unsupported('fractional_edge_unmeasured', `The artboard edge(s) ${JSON.stringify(unmeasured)} pt have an unmeasured fraction at ${options.scale}x; only .5 pt (1x) and .25/.5 pt (2x) are measured.`);
-    }
-    if (!Number.isInteger(artboard.origin[0]) || !Number.isInteger(artboard.origin[1])) {
-        return unsupported('artboard_ruler_origin_unmeasured', 'The artboard has a non-integer ruler origin; only integer origins are measured.');
+    const read = artboard.rect.map((edge) => readMeasuredEdge(edge, fractions));
+    const edgeWarnings = [];
+    artboard.rect.forEach((edge, position) => {
+        if (read[position] === null)
+            edgeWarnings.push({ artboardIndex: artboard.index, edge: EDGE_NAMES[position], value: edge });
+    });
+    if (!isIntegerWithinTolerance(artboard.origin[0]) || !isIntegerWithinTolerance(artboard.origin[1])) {
+        return unsupported('artboard_ruler_origin_unmeasured', `The artboard has a non-integer ruler origin [${artboard.origin[0]}, ${artboard.origin[1]}]; only integer origins (within ${ARTBOARD_INTEGER_TOLERANCE}) are measured.`);
     }
     if (options.format === 'png' && !options.transparent && options.scale === 2) {
         return unsupported('opaque_png_2x_unmeasured', 'An opaque PNG at 2x is not measured; export it at 1x or with transparency.');
     }
-    const width = (right - left) * options.scale;
-    const height = (top - bottom) * options.scale;
-    if (!(width > 0 && height > 0))
+    const [left, top, right, bottom] = artboard.rect.map((edge, position) => read[position] ?? edge);
+    const sizePtWidth = right - left;
+    const sizePtHeight = top - bottom;
+    if (!(sizePtWidth > 0 && sizePtHeight > 0))
         return unsupported('empty_artboard', 'The artboard has no area.');
-    if (!Number.isInteger(width) || !Number.isInteger(height)) {
-        return unsupported('fractional_pixel_size', `The export would be ${width}x${height} px; a non-integer pixel size has no measured rounding rule. Make the artboard width and height multiples of ${1 / options.scale} pt.`);
+    const wholeSize = isIntegerWithinTolerance(sizePtWidth) && isIntegerWithinTolerance(sizePtHeight);
+    const side = (sizePt) => {
+        if (isIntegerWithinTolerance(sizePt)) {
+            const exact = Math.round(sizePt) * options.scale;
+            return { predicted: exact, range: [exact, exact] };
+        }
+        const predicted = Math.round(sizePt) * options.scale;
+        return { predicted, range: [Math.min(predicted, Math.floor(sizePt * options.scale)), Math.max(predicted, Math.ceil(sizePt) * options.scale)] };
+    };
+    const widthSide = side(sizePtWidth);
+    const heightSide = side(sizePtHeight);
+    const width = widthSide.predicted;
+    const height = heightSide.predicted;
+    const range = { width: widthSide.range, height: heightSide.range };
+    const rangeOpen = range.width[0] !== range.width[1] || range.height[0] !== range.height[1];
+    if (!wholeSize) {
+        artboard.rect.forEach((edge, position) => {
+            const value = read[position] ?? edge;
+            if (read[position] !== null && !isIntegerWithinTolerance(value))
+                edgeWarnings.push({ artboardIndex: artboard.index, edge: EDGE_NAMES[position], value: edge });
+        });
+        edgeWarnings.sort((a, b) => EDGE_NAMES.indexOf(a.edge) - EDGE_NAMES.indexOf(b.edge));
     }
-    if (width > RASTER_MAX_SIDE_PX || height > RASTER_MAX_SIDE_PX || width * height > RASTER_MAX_TOTAL_PX) {
-        return unsupported('large_board_unmeasured', `The export would be ${width}x${height} px; only up to ${RASTER_MAX_SIDE_PX} px per side and ${RASTER_MAX_TOTAL_PX} px in total are measured.`);
+    if (range.width[1] > RASTER_MAX_SIDE_PX || range.height[1] > RASTER_MAX_SIDE_PX || range.width[1] * range.height[1] > RASTER_MAX_TOTAL_PX) {
+        return unsupported('large_board_unmeasured', `The export would be ${range.width[1]}x${range.height[1]} px; only up to ${RASTER_MAX_SIDE_PX} px per side and ${RASTER_MAX_TOTAL_PX} px in total are measured.`);
     }
-    return { status: 'supported', width, height };
+    const roundedEdges = artboard.rect.map((edge, position) => read[position] ?? edge);
+    return {
+        status: 'supported', width, height,
+        ...(rangeOpen ? { range } : {}),
+        ...(roundedEdges.some((edge, position) => edge !== artboard.rect[position]) ? { roundedEdges } : {}),
+        ...(edgeWarnings.length > 0 ? { edgeWarnings } : {}),
+    };
 };
+export function canonicalRasterScalePercent(value) {
+    const rounded = Number(value.toFixed(12));
+    return Object.is(rounded, -0) ? 0 : rounded;
+}
+export const EXACT_PX_MIN_SCALE_PERCENT = 25;
+export const EXACT_PX_MAX_SCALE_PERCENT = 400;
+export const EXACT_PX_SCALE_INTERVALS = {
+    jpeg: [[EXACT_PX_MIN_SCALE_PERCENT, EXACT_PX_MAX_SCALE_PERCENT]],
+    pngTransparent: [[EXACT_PX_MIN_SCALE_PERCENT, EXACT_PX_MAX_SCALE_PERCENT]],
+    pngOpaque: [[EXACT_PX_MIN_SCALE_PERCENT, EXACT_PX_MAX_SCALE_PERCENT]],
+};
+export function exactPixelRasterDimensions(input) {
+    const unsupported = (reason, message) => ({ status: 'unsupported', reason, message });
+    const { artboard, sizeIntent } = input;
+    const rawWidth = artboard.rect[2] - artboard.rect[0];
+    const rawHeight = artboard.rect[1] - artboard.rect[3];
+    if (!(rawWidth > 0 && rawHeight > 0))
+        return unsupported('empty_artboard', 'The artboard has no area.');
+    if (!isIntegerWithinTolerance(rawWidth) || !isIntegerWithinTolerance(rawHeight))
+        return unsupported('target_pixel_board_unmeasured', 'Exact-px export requires whole-point artboard dimensions.');
+    if (!artboard.origin.every(isIntegerWithinTolerance))
+        return unsupported('artboard_ruler_origin_unmeasured', 'Exact-px export requires an integer artboard ruler origin.');
+    const widthPt = Math.round(rawWidth), heightPt = Math.round(rawHeight);
+    const requested = sizeIntent.mode === 'width_px' ? sizeIntent.widthPx : sizeIntent.heightPx;
+    if (!Number.isInteger(requested) || requested < 1 || requested > RASTER_MAX_SIDE_PX)
+        return unsupported('target_pixel_size_invalid', 'The requested side must be an integer from 1 to 4000 px.');
+    const rawScale = requested / (sizeIntent.mode === 'width_px' ? widthPt : heightPt) * 100;
+    const derived = (sizeIntent.mode === 'width_px' ? heightPt : widthPt) * rawScale / 100;
+    if (!Number.isFinite(derived) || Math.abs(derived - Math.round(derived)) > 1e-9)
+        return unsupported('target_pixel_ratio_unmeasured', 'The other side is not an integer pixel size; no rounding rule is admitted.');
+    const width = sizeIntent.mode === 'width_px' ? requested : Math.round(derived);
+    const height = sizeIntent.mode === 'height_px' ? requested : Math.round(derived);
+    if (width < 1 || height < 1 || width > RASTER_MAX_SIDE_PX || height > RASTER_MAX_SIDE_PX || width * height > RASTER_MAX_TOTAL_PX)
+        return unsupported('large_board_unmeasured', 'The output exceeds the 4000 px side or 12000000 px total ceiling.');
+    const renderScalePercent = canonicalRasterScalePercent(rawScale);
+    const intervals = input.format === 'jpeg' ? EXACT_PX_SCALE_INTERVALS.jpeg
+        : (input.transparent === false ? EXACT_PX_SCALE_INTERVALS.pngOpaque : EXACT_PX_SCALE_INTERVALS.pngTransparent);
+    if (!Number.isFinite(renderScalePercent) || !intervals.some(([min, max]) => renderScalePercent >= min && renderScalePercent <= max)) {
+        const ranges = intervals.map(([min, max]) => `${min}–${max}%`).join(', ');
+        return unsupported(input.format === 'png' ? 'target_pixel_png_scale_unmeasured' : 'target_pixel_scale_unmeasured', `Exact-px ${input.format === 'jpeg' ? 'JPEG' : (input.transparent === false ? 'opaque PNG' : 'transparent PNG')} admits only the supported intervals ${ranges}; scales outside them are unmeasured.`);
+    }
+    return { status: 'supported', width, height, renderScalePercent };
+}
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 export const rasterExportInputSchema = z.strictObject({
     expected_document_key: z.string().min(1).max(16_384),
@@ -54,12 +154,18 @@ export const rasterExportInputSchema = z.strictObject({
     output_path: z.string().min(1).max(4_096).describe('Absolute path of a new file (.png, or .jpg/.jpeg) in an existing folder; it must not exist.'),
     artboard_index: z.number().int().nonnegative().describe('0-based index of the one artboard to export (it need not be active).'),
     scale: z.union([z.literal(1), z.literal(2)]).optional().describe('1 (default) or 2: 1 pt becomes 1 or 2 px.'),
-    transparent: z.boolean().optional().describe('PNG only; default true. false gives a white background (1x only).'),
+    width_px: z.number().int().min(1).max(4000).optional().describe('Single artboard: exact width in px, preserving aspect ratio. Not with height_px or scale; both output sides must be integer px.'),
+    height_px: z.number().int().min(1).max(4000).optional().describe('Single artboard: exact height in px. Not with width_px or scale; both output sides must be integer px.'),
+    transparent: z.boolean().optional().describe('PNG only; default true. false gives a white background (legacy 1x or measured exact-px).'),
     quality: z.number().int().min(0).max(100).optional().describe('JPEG only; default 80.'),
     apply: z.boolean().default(false),
     command_id: applyCommandIdSchema.optional(),
     confirm_export_hash: sha256Schema.optional().describe('The plan\'s planDigest, as in its nextCall arguments.'),
 }).superRefine((input, context) => {
+    if (input.width_px !== undefined && input.height_px !== undefined)
+        context.addIssue({ code: 'custom', path: ['width_px'], message: 'width_px and height_px are mutually exclusive.' });
+    if ((input.width_px !== undefined || input.height_px !== undefined) && input.scale !== undefined)
+        context.addIssue({ code: 'custom', path: ['scale'], message: 'scale cannot be combined with an exact-px side.' });
     if (input.format !== 'png' && input.transparent !== undefined)
         context.addIssue({ code: 'custom', path: ['transparent'], message: 'transparent applies to format "png" only.' });
     if (input.format !== 'jpeg' && input.quality !== undefined)
@@ -88,18 +194,62 @@ export const rasterExportRejectionSchema = z.enum([
     'artwork_not_admitted', 'edit_session_open', 'edit_session_invalid', 'artboard_out_of_range', 'source_file_unavailable',
     'export_root_unavailable', 'output_path_invalid', 'output_exists', 'output_cross_device', 'plan_changed',
     'dimension_contract_unavailable', 'command_id_conflict', 'command_id_in_use', 'export_records_invalid',
-    'artifact_unavailable', 'artifact_identity_mismatch',
+    'artifact_unavailable', 'artifact_identity_mismatch', 'too_many_artboards', 'output_dir_invalid',
+    'host_not_foreground', 'host_screen_locked', 'host_profile_unknown',
 ]);
 const contextSchema = documentContextSchema;
 const timingSchema = z.strictObject({ totalMs: z.number().nonnegative(), hostCalls: z.number().int().nonnegative(), hostMs: z.number().nonnegative() });
+const roundedEdgesSchema = z.tuple([z.number(), z.number(), z.number(), z.number()]);
+const edgeWarningSchema = z.strictObject({
+    artboardIndex: z.number().int().nonnegative(),
+    edge: z.enum(['left', 'top', 'right', 'bottom']), value: z.number(),
+});
+const edgeWarningFields = { edgeWarnings: z.array(edgeWarningSchema).optional() };
+const rangeSideSchema = z.array(z.number().int().positive()).length(2);
+const expectedRangeSchema = z.strictObject({ width: rangeSideSchema, height: rangeSideSchema });
+const expectedRangeFields = { expectedRange: expectedRangeSchema.optional() };
+const batchPlannedItemSchema = z.strictObject({
+    artboard: artboardSchema,
+    outputPath: z.string().min(1),
+    expected: z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() }),
+    ...expectedRangeFields,
+    roundedEdges: roundedEdgesSchema.optional(),
+    ...edgeWarningFields,
+});
+const batchBlockedItemSchema = z.strictObject({
+    artboardIndex: z.number().int().nonnegative(),
+    name: z.string(),
+    leaf: z.string().nullable(),
+    reason: z.string().min(1),
+    message: z.string(),
+});
 export const rasterExportResultSchema = z.discriminatedUnion('outcome', [
+    z.strictObject({
+        outcome: z.literal('planned_batch'),
+        options: rasterExportOptionsSchema,
+        items: z.array(batchPlannedItemSchema),
+        planDigest: sha256Schema,
+        nextCall: z.strictObject({ tool: z.literal(RASTER_EXPORT_TOOL), arguments: z.record(z.string(), z.unknown()) }),
+    }),
+    z.strictObject({
+        outcome: z.literal('verified_batch'),
+        exportId: z.uuid(),
+        delivery: z.enum(['original', 'replay']),
+        artifacts: z.array(rasterExportArtifactSchema.extend({ artboardIndex: z.number().int().nonnegative() })),
+        sourcePreserved: z.literal(true),
+        cleanup: z.array(z.strictObject({ path: z.string().min(1), removed: z.boolean(), reason: z.string() })),
+        timing: timingSchema,
+    }),
     z.strictObject({
         outcome: z.literal('planned'),
         document: contextSchema,
         artboard: artboardSchema,
-        options: rasterExportOptionsSchema,
+        options: singleRasterExportOptionsSchema,
         outputPath: z.string().min(1),
         expected: z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() }),
+        ...expectedRangeFields,
+        roundedEdges: roundedEdgesSchema.optional(),
+        ...edgeWarningFields,
         planDigest: sha256Schema,
         nextCall: z.strictObject({ tool: z.literal(RASTER_EXPORT_TOOL), arguments: z.record(z.string(), z.unknown()) }),
     }),
@@ -108,6 +258,7 @@ export const rasterExportResultSchema = z.discriminatedUnion('outcome', [
         reason: z.string().min(1),
         message: z.string(),
         document: contextSchema,
+        items: z.array(batchBlockedItemSchema).optional(),
     }),
     z.strictObject({
         outcome: z.literal('rejected'),
@@ -132,6 +283,7 @@ export const rasterExportResultSchema = z.discriminatedUnion('outcome', [
         reason: z.string().min(1),
         message: z.string(),
         cleanup: z.array(z.strictObject({ path: z.string().min(1), removed: z.boolean(), reason: z.string() })),
+        itemIndex: z.number().int().nonnegative().nullable().optional(),
     }),
     z.strictObject({
         outcome: z.literal('indeterminate'),
@@ -175,7 +327,7 @@ for (var rasterBoardCursor = 0; !rasterBoardsChanged && rasterBoardCursor < rast
   var rasterActual = rasterBoardsBefore[rasterBoardCursor];
   var rasterExpected = params.artboards[rasterBoardCursor];
   if (rasterActual.name !== rasterExpected.name) rasterBoardsChanged = true;
-  for (var rasterEdge = 0; rasterEdge < 4; rasterEdge++) if (rasterActual.rect[rasterEdge] !== rasterExpected.rect[rasterEdge]) rasterBoardsChanged = true;
+  for (var rasterEdge = 0; rasterEdge < 4; rasterEdge++) if (!exportEdgesEqual(rasterActual.rect[rasterEdge], rasterExpected.rect[rasterEdge])) rasterBoardsChanged = true;
 }
 if (rasterBoardsChanged) throw new Error("MCP_ERROR:" + stringifyJson({ code: "RASTER_ARTBOARDS_CHANGED", actual: rasterBoardsBefore }));
 if (new File(params.basePath).exists || new File(params.stagedPath).exists) throw new Error("MCP_ERROR:" + stringifyJson({ code: "RASTER_STAGE_NOT_EMPTY" }));
@@ -216,27 +368,57 @@ var result = {
   documentCount: app.documents.length
 };
 `;
+export const RASTER_EXACT_EXPORT_SCRIPT = RASTER_EXPORT_SCRIPT.replace('rasterOptions.horizontalScale = params.scale * 100;\nrasterOptions.verticalScale = params.scale * 100;', 'rasterOptions.horizontalScale = params.renderScalePercent;\nrasterOptions.verticalScale = params.renderScalePercent;');
 export const RASTER_RECONCILE_CLOSE_SCRIPT = `${EXPORT_HELPERS}
 var rasterReconcileMatches = exportMatchesByPath(params.sessionPaths);
-if (rasterReconcileMatches.length !== 1) throw new Error("MCP_ERROR:" + stringifyJson({ code: "RASTER_RECONCILE_NOT_UNIQUE", count: rasterReconcileMatches.length }));
+if (rasterReconcileMatches.length > 1) throw new Error("MCP_ERROR:" + stringifyJson({ code: "RASTER_RECONCILE_NOT_UNIQUE", count: rasterReconcileMatches.length }));
+if (rasterReconcileMatches.length === 0) {
+  var result = { closed: null, documents: exportRawInventory(), documentCount: app.documents.length };
+} else {
 var rasterReconcileEntry = rasterReconcileMatches[0].entry;
 var rasterReconcileBoards = exportArtboards(rasterReconcileMatches[0].doc);
 var rasterReconcileBoardsDiffer = rasterReconcileBoards.length !== params.expected.artboards.length;
 for (var rasterReconcileBoard = 0; !rasterReconcileBoardsDiffer && rasterReconcileBoard < rasterReconcileBoards.length; rasterReconcileBoard++) {
   for (var rasterReconcileEdge = 0; rasterReconcileEdge < 4; rasterReconcileEdge++) {
-    if (rasterReconcileBoards[rasterReconcileBoard].rect[rasterReconcileEdge] !== params.expected.artboards[rasterReconcileBoard].rect[rasterReconcileEdge]) rasterReconcileBoardsDiffer = true;
+    if (!exportEdgesEqual(rasterReconcileBoards[rasterReconcileBoard].rect[rasterReconcileEdge], params.expected.artboards[rasterReconcileBoard].rect[rasterReconcileEdge])) rasterReconcileBoardsDiffer = true;
   }
 }
 if (rasterReconcileEntry.path !== params.expected.path || exportKeyWithoutIndex(rasterReconcileEntry.key) !== exportKeyWithoutIndex(params.expected.key) ||
-    rasterReconcileEntry.saved !== params.expected.saved || rasterReconcileBoardsDiffer) {
+    rasterReconcileEntry.saved !== params.expected.saved || rasterReconcileEntry.fileRevision !== params.expected.fileRevision || rasterReconcileBoardsDiffer) {
   throw new Error("MCP_ERROR:" + stringifyJson({ code: "RASTER_RECONCILE_CLOSE_REFUSED", actual: rasterReconcileEntry }));
 }
 var rasterReconcileInteraction = app.userInteractionLevel;
 app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
 try { rasterReconcileMatches[0].doc.close(SaveOptions.DONOTSAVECHANGES); }
 finally { app.userInteractionLevel = rasterReconcileInteraction; }
-var result = { closed: rasterReconcileEntry, remaining: exportMatchesByPath(params.sessionPaths).length, documentCount: app.documents.length };
+var result = { closed: rasterReconcileEntry, documents: exportRawInventory(), documentCount: app.documents.length };
+}
 `;
+export async function closeRasterWorkCopy(bridge, sessionPaths, expected, lease) {
+    let matches = [];
+    const close = async (paths, binding) => await bridge.execute(withFilePathComparisons({
+        kind: 'read', script: RASTER_RECONCILE_CLOSE_SCRIPT,
+        params: pathComparisonParams({ sessionPaths: paths, expected: binding }), timeoutMs: EXPORT_HOST_TIMEOUT_MS,
+        hostGate: {
+            beforeHost: async () => {
+                if (recordSetFingerprint(await lease.records.readRasterRecordSet(lease.exportId)) !== lease.fingerprint) {
+                    throw new Error('The export records changed; nothing was closed.');
+                }
+            },
+            afterHost: async ({ data }) => { matches = await matchingDocumentPaths(data, sessionPaths); },
+        },
+    }));
+    let result = await close(sessionPaths, expected);
+    if (result.data.closed === null && matches.length === 1) {
+        const target = matches[0];
+        if (target.path !== expected.path || target.key.replace(/\|index=-?\d+\|/u, '|index=*|') !== expected.key.replace(/\|index=-?\d+\|/u, '|index=*|') ||
+            target.saved !== expected.saved || target.fileRevision !== expected.fileRevision) {
+            throw new Error('MCP_ERROR:{"code":"RASTER_RECONCILE_CLOSE_REFUSED"}');
+        }
+        result = await close([target.path], { ...expected, path: target.path, key: target.key });
+    }
+    return { remaining: matches.length, documents: matches, documentCount: result.data.documentCount };
+}
 export class RasterArtifactError extends Error {
     constructor(message) {
         super(message);
@@ -294,7 +476,7 @@ function assertWithinPixelCeiling(width, height, format) {
         throw new RasterArtifactError(`The ${format} header declares ${width}x${height} px, beyond the measured ceiling; it is not decoded.`);
     }
 }
-function fileIdentityOf(metadata) {
+export function fileIdentityOf(metadata) {
     return { dev: metadata.dev, ino: metadata.ino, size: metadata.size, mtimeNs: metadata.mtimeNs, ctimeNs: metadata.ctimeNs };
 }
 export async function inspectRasterArtifact(path, format) {
@@ -369,7 +551,7 @@ export async function inspectRasterArtifact(path, format) {
 export function rasterExtension(format) {
     return format === 'png' ? '.png' : '.jpg';
 }
-async function syncDirectory(path) {
+export async function syncDirectory(path) {
     const handle = await open(path, noFollowDirectoryFlags());
     try {
         await handle.sync();
@@ -378,7 +560,14 @@ async function syncDirectory(path) {
         await handle.close();
     }
 }
-async function hashWholeFile(path) {
+class ExactHostProfileRefusal extends Error {
+    reason;
+    constructor(reason, message) {
+        super(message);
+        this.reason = reason;
+    }
+}
+export async function hashWholeFile(path) {
     const handle = await open(path, noFollowReadFlags());
     try {
         const hash = createHash('sha256');
@@ -408,7 +597,27 @@ export class RasterExportOperation {
         const started = performance.now();
         meter.calls += 1;
         try {
-            return (await this.deps.bridge.execute(command)).data;
+            const guarded = meter.exactProfilePending ? { ...command, hostGate: { ...command.hostGate, beforeHost: async (context) => {
+                        const admission = await command.hostGate?.beforeHost?.(context);
+                        meter.exactProfilePending = false;
+                        const probe = this.deps.hostProfileProbe;
+                        if (probe === undefined)
+                            throw new ExactHostProfileRefusal('host_profile_unknown', 'Host state cannot be verified. Unlock the screen, bring Illustrator to the front, and try again.');
+                        const started = performance.now();
+                        const observed = await (probe.observeForEditSession ? probe.observeForEditSession() : probe.observe());
+                        if (callTimingEnabled())
+                            process.stderr.write(JSON.stringify({ event: 'exact_px_host_profile_observed', profile: observed.profile, durationMs: performance.now() - started }) + '\n');
+                        if (observed.lockState === 'locked')
+                            throw new ExactHostProfileRefusal('host_screen_locked', 'Unlock the screen and bring Illustrator to the front, then try again.');
+                        if (observed.lockState !== 'unlocked' || observed.profile === 'unknown')
+                            throw new ExactHostProfileRefusal('host_profile_unknown', 'Host state cannot be verified. Unlock the screen, bring Illustrator to the front, and try again.');
+                        if (observed.profile !== 'foreground')
+                            throw new ExactHostProfileRefusal('host_not_foreground', 'Bring Illustrator to the front, then try again.');
+                        return admission;
+                    } } } : command;
+            return (await (this.deps.executeHost === undefined
+                ? this.deps.bridge.execute(withFilePathComparisons(guarded))
+                : this.deps.executeHost(guarded))).data;
         }
         finally {
             meter.ms += performance.now() - started;
@@ -416,28 +625,36 @@ export class RasterExportOperation {
     }
     async run(raw) {
         const started = performance.now();
-        const meter = { calls: 0, ms: 0 };
         const input = rasterExportInputSchema.parse(raw);
-        if (!input.apply) {
+        const meter = { calls: 0, ms: 0,
+            ...(input.width_px !== undefined || input.height_px !== undefined ? { exactProfilePending: true } : {}) };
+        try {
+            if (!input.apply) {
+                const planned = await this.plan(input, meter);
+                return planned.kind === 'result' ? planned.result : this.plannedResult(planned.plan, input);
+            }
+            const exportId = input.command_id;
+            const confirm = input.confirm_export_hash;
+            const existing = await this.existingOutcome(exportId, confirm);
+            if (existing !== null)
+                return existing;
             const planned = await this.plan(input, meter);
-            return planned.kind === 'result' ? planned.result : this.plannedResult(planned.plan, input);
+            if (planned.kind === 'result') {
+                const result = planned.result;
+                if (result.outcome === 'blocked')
+                    return this.rejected('dimension_contract_unavailable', result.message, result.document);
+                return result;
+            }
+            if (planned.plan.digest !== confirm) {
+                return this.rejected('plan_changed', 'The document, file, output or options changed since the plan; plan again and use its next_call.', planned.plan.document);
+            }
+            return await this.apply(exportId, planned.plan, meter, started);
         }
-        const exportId = input.command_id;
-        const confirm = input.confirm_export_hash;
-        const existing = await this.existingOutcome(exportId, confirm);
-        if (existing !== null)
-            return existing;
-        const planned = await this.plan(input, meter);
-        if (planned.kind === 'result') {
-            const result = planned.result;
-            if (result.outcome === 'blocked')
-                return this.rejected('dimension_contract_unavailable', result.message, result.document);
-            return result;
+        catch (error) {
+            if (error instanceof ExactHostProfileRefusal)
+                return this.rejected(error.reason, error.message);
+            throw error;
         }
-        if (planned.plan.digest !== confirm) {
-            return this.rejected('plan_changed', 'The document, file, output or options changed since the plan; plan again and use its next_call.', planned.plan.document);
-        }
-        return await this.apply(exportId, planned.plan, meter, started);
     }
     rejected(reason, message, document = null) {
         return { outcome: 'rejected', reason, message, document };
@@ -448,7 +665,7 @@ export class RasterExportOperation {
             format: plan.options.format,
             output_path: input.output_path,
             artboard_index: plan.artboard.index,
-            scale: plan.options.scale,
+            ...('scale' in plan.options ? { scale: plan.options.scale } : plan.options.sizeIntent.mode === 'width_px' ? { width_px: plan.options.sizeIntent.widthPx } : { height_px: plan.options.sizeIntent.heightPx }),
             ...(plan.options.format === 'png' ? { transparent: plan.options.transparent } : { quality: plan.options.quality }),
             apply: true,
             command_id: randomUUID(),
@@ -456,7 +673,7 @@ export class RasterExportOperation {
         };
         return {
             outcome: 'planned', document: plan.document, artboard: plan.artboard, options: plan.options, outputPath: plan.output.path,
-            expected: plan.expected, planDigest: plan.digest, nextCall: { tool: RASTER_EXPORT_TOOL, arguments: args },
+            expected: plan.expected, ...(plan.expectedRange === undefined ? {} : { expectedRange: plan.expectedRange }), ...(plan.roundedEdges === undefined ? {} : { roundedEdges: plan.roundedEdges }), ...(plan.edgeWarnings === undefined ? {} : { edgeWarnings: plan.edgeWarnings }), planDigest: plan.digest, nextCall: { tool: RASTER_EXPORT_TOOL, arguments: args },
         };
     }
     async plan(input, meter) {
@@ -525,10 +742,22 @@ export class RasterExportOperation {
             }
             throw error;
         }
-        const options = rasterOptionsOf(input);
-        const dimensions = this.contract({ options, artboard: { index: artboard.index, rect: artboard.rect, origin: artboard.origin }, documentRulerOrigin: source.rulerOrigin });
+        const sizeIntent = input.width_px !== undefined ? { mode: 'width_px', widthPx: input.width_px }
+            : input.height_px !== undefined ? { mode: 'height_px', heightPx: input.height_px } : null;
+        const legacyOptions = rasterOptionsOf(input);
+        const dimensions = sizeIntent === null
+            ? this.contract({ options: legacyOptions, artboard: { index: artboard.index, rect: artboard.rect, origin: artboard.origin }, documentRulerOrigin: source.rulerOrigin })
+            : exactPixelRasterDimensions({ sizeIntent, artboard, format: input.format, ...(input.format === 'png' ? { transparent: input.transparent ?? true } : {}) });
         if (dimensions.status === 'unsupported')
             return result({ outcome: 'blocked', reason: dimensions.reason, message: dimensions.message, document });
+        const target = sizeIntent === null ? null : this.deps.bridge.applicationTarget?.();
+        if (sizeIntent !== null) {
+            const version = evaluateHostVersion('export_exact_px', document.appVersion);
+            if ((version.status !== 'measured' && version.status !== 'patch_unmeasured') || target?.channel !== 'stable' || target.bundleId !== STABLE_ILLUSTRATOR_BUNDLE_ID)
+                return result({ outcome: 'blocked', reason: 'target_pixel_host_unmeasured', message: 'Exact-px export requires the configured stable Illustrator 30.8.x bundle (measured 30.8.2; other patches are policy-admitted, unmeasured).', document });
+        }
+        const options = sizeIntent === null ? legacyOptions
+            : { ...(input.format === 'png' ? { format: 'png', transparent: input.transparent ?? true } : { format: 'jpeg', quality: input.quality ?? 80 }), sizeIntent, renderScalePercent: dimensions.renderScalePercent };
         const expected = { width: dimensions.width, height: dimensions.height };
         const digest = canonicalSha256({
             profile: RASTER_EXPORT_PROFILE,
@@ -540,8 +769,12 @@ export class RasterExportOperation {
             destination: { parent: output.parent, leaf: basename(output.path) },
             options,
             expected,
+            ...(!('range' in dimensions) || dimensions.range === undefined ? {} : { expectedRange: dimensions.range }),
         });
-        return { kind: 'plan', plan: { document, source, artboard, options, sourceFile, output, expected, digest } };
+        return { kind: 'plan', plan: { document, source, artboard, options, sourceFile, output, expected,
+                ...('range' in dimensions && dimensions.range !== undefined ? { expectedRange: dimensions.range } : {}),
+                ...('roundedEdges' in dimensions && dimensions.roundedEdges !== undefined ? { roundedEdges: dimensions.roundedEdges } : {}),
+                ...('edgeWarnings' in dimensions && dimensions.edgeWarnings !== undefined ? { edgeWarnings: dimensions.edgeWarnings } : {}), digest } };
     }
     async existingOutcome(exportId, planDigest) {
         if (await pathTaken(rasterQuarantinePaths(this.deps.exportStore.stateRootPath, exportId).manifest)) {
@@ -607,7 +840,7 @@ export class RasterExportOperation {
     async apply(exportId, plan, meter, started) {
         const store = this.deps.exportStore;
         const recordedAt = () => this.now().toISOString();
-        const common = { version: RASTER_EXPORT_RECORD_VERSION, kind: RASTER_EXPORT_KIND, exportId, planDigest: plan.digest };
+        const common = { version: 'scale' in plan.options ? RASTER_EXPORT_RECORD_VERSION : RASTER_EXACT_PX_RECORD_VERSION, kind: RASTER_EXPORT_KIND, exportId, planDigest: plan.digest };
         let stage = 'prepare';
         let prepared = false;
         let leaseHeld = false;
@@ -690,6 +923,7 @@ export class RasterExportOperation {
                                 ...common, recordType: 'session', commandId: exportId, openCommandId: commandId,
                                 documentKey: plan.document.key, sourcePath: plan.sourceFile.path, sourceSha256: plan.sourceFile.sha256,
                                 sourceIdentity: serializeFileIdentity(plan.sourceFile.identity), artboardIndex: plan.artboard.index, options: plan.options,
+                                ...('scale' in plan.options ? {} : { expected: plan.expected }),
                                 workCopyPath, workCopyIdentity: serializeFileIdentity(copy.identity), stagingDirectory, stagedBasePath: basePath,
                                 outputPath: plan.output.path, createdAt: recordedAt(),
                             });
@@ -699,7 +933,7 @@ export class RasterExportOperation {
                         },
                         afterHost: async ({ commandId, data }) => await recorded('open', commandId, async () => {
                             const result = data;
-                            if (result.opened.path !== workCopyPath || result.documentCountAfter !== result.documentCountBefore + 1 ||
+                            if ((result.opened.path === null || !sameFilePath(result.opened.path, workCopyPath)) || result.documentCountAfter !== result.documentCountBefore + 1 ||
                                 result.source.key !== plan.document.key || result.opened.key === plan.document.key) {
                                 throw new Error('Illustrator reported an unexpected document inventory after opening the work copy.');
                             }
@@ -739,10 +973,10 @@ export class RasterExportOperation {
             try {
                 const exported = await this.host(meter, {
                     kind: 'read',
-                    script: RASTER_EXPORT_SCRIPT,
+                    script: 'scale' in plan.options ? RASTER_EXPORT_SCRIPT : RASTER_EXACT_EXPORT_SCRIPT,
                     params: {
                         workCopyPath, workCopyKey: opened.opened.key, artboards: boards, artboardIndex: plan.artboard.index, basePath, stagedPath,
-                        format: plan.options.format, scale: plan.options.scale,
+                        format: plan.options.format, ...('scale' in plan.options ? { scale: plan.options.scale } : { renderScalePercent: plan.options.renderScalePercent }),
                         transparent: plan.options.format === 'png' ? plan.options.transparent : false,
                         quality: plan.options.format === 'jpeg' ? plan.options.quality : 0,
                     },
@@ -756,7 +990,7 @@ export class RasterExportOperation {
                         },
                         afterHost: async ({ commandId, data }) => await recorded('export', commandId, async () => {
                             const result = data;
-                            if (result.workCopy.path !== workCopyPath || result.activeArtboardIndex !== plan.artboard.index) {
+                            if ((result.workCopy.path === null || !sameFilePath(result.workCopy.path, workCopyPath)) || result.activeArtboardIndex !== plan.artboard.index) {
                                 throw new Error('Illustrator reported an unexpected work-copy state after the export.');
                             }
                             await assertUnchanged();
@@ -812,10 +1046,12 @@ export class RasterExportOperation {
                         beforeHost: async () => { await assertUnchanged(); },
                         afterHost: async ({ commandId, data }) => await recorded('close', commandId, async () => {
                             const result = data;
-                            if (result.documentCount !== opened.documentCountBefore || result.closedBeforeClose.path !== workCopyPath || result.source.key !== plan.document.key) {
+                            if (result.documentCount !== opened.documentCountBefore || (result.closedBeforeClose.path === null || !sameFilePath(result.closedBeforeClose.path, workCopyPath)) || result.source.key !== plan.document.key) {
                                 throw new Error('Illustrator reported an unexpected document inventory after closing the work copy.');
                             }
                             await assertUnchanged();
+                            if ((await matchingDocumentPaths(result, sessionPaths)).length !== 0)
+                                throw new Error('A session document remains open; the export evidence is kept.');
                             await store.writeRasterRecord('host_terminal', {
                                 ...common, recordType: 'host_terminal', recordedAt: recordedAt(), close: { commandId, completedInactive: true },
                                 closedBeforeClose: hostDocumentIdentitySchema.parse(result.closedBeforeClose), sourceKey: result.source.key,
@@ -859,6 +1095,7 @@ export class RasterExportOperation {
                                 ...common, recordType: 'published', recordedAt: recordedAt(), bindingDigest: set.artifact_binding.digest,
                                 hostTerminalDigest: set.host_terminal.digest, artifact: artifactRecord, outputIdentity: serializeFileIdentity(outputIdentity),
                                 sourcePath: plan.sourceFile.path, artboardIndex: plan.artboard.index, options: plan.options,
+                                ...('scale' in plan.options ? {} : { expected: plan.expected }),
                             });
                             stage = 'cleanup';
                             const entries = await this.cleanup([
@@ -903,8 +1140,8 @@ export class RasterExportOperation {
             throw error;
         }
         await syncDirectory(stagingDirectory);
-        if (artifact.width !== plan.expected.width || artifact.height !== plan.expected.height) {
-            return { failure: { stage, reason: 'dimension_mismatch', message: `The file is ${artifact.width}x${artifact.height} px; the contract expects ${plan.expected.width}x${plan.expected.height}.` } };
+        if (!artifactSizeAdmitted(artifact, plan.expected, plan.expectedRange)) {
+            return { failure: { stage, reason: 'dimension_mismatch', message: `The file is ${artifact.width}x${artifact.height} px; the contract expects ${describeExpectedSize(plan.expected, plan.expectedRange)}.` } };
         }
         return { artifact };
     }
@@ -936,7 +1173,7 @@ export class RasterExportOperation {
                 kind: 'read', script: EXPORT_INVENTORY_SCRIPT, params: { sessionPaths },
                 hostGate: {
                     afterHost: async ({ data }) => {
-                        if (data.documents.length !== 0)
+                        if ((await matchingDocumentPaths(data, sessionPaths)).length !== 0)
                             return;
                         await assertUnchanged();
                         outcome = await this.recordFailure(exportId, common, failure, owned);
@@ -950,7 +1187,7 @@ export class RasterExportOperation {
         return outcome ?? { outcome: 'indeterminate', exportId, stage: failure.stage, message: `${failure.message} A session document is open.`, commandId: null };
     }
 }
-class RasterPrepareRefusal extends Error {
+export class RasterPrepareRefusal extends Error {
     reason;
     constructor(reason, message) {
         super(message);
@@ -958,18 +1195,18 @@ class RasterPrepareRefusal extends Error {
         this.name = 'RasterPrepareRefusal';
     }
 }
-class RasterAfterHostError extends Error {
+export class RasterAfterHostError extends Error {
     step;
     commandId;
     constructor(step, commandId, written, cause) {
         super(`Illustrator completed the ${step} (command ${commandId}); the records written so far are ${written.join(', ') || 'none'}, and the rest were not written ` +
-            `(${cause instanceof Error ? cause.message : String(cause)}). The lease is kept for the export reconcile.`, { cause });
+            `(${cause instanceof z.ZodError ? summarizeValidationFailure(cause) : cause instanceof Error ? cause.message : String(cause)}). The lease is kept for the export reconcile.`, { cause });
         this.step = step;
         this.commandId = commandId;
         this.name = 'RasterAfterHostError';
     }
 }
-class RasterStateChangedError extends Error {
+export class RasterStateChangedError extends Error {
     constructor(message) {
         super(message);
         this.name = 'RasterStateChangedError';
@@ -981,7 +1218,7 @@ export function recordSetFingerprint(set) {
         return [type, read.state, read.state === 'v2' ? read.digest : read.state === 'invalid' ? read.reason : null];
     }));
 }
-async function pathTaken(path) {
+export async function pathTaken(path) {
     return await lstat(path).then(() => true, (error) => {
         if (error.code === 'ENOENT')
             return false;
@@ -1087,7 +1324,7 @@ async function ensurePrivateSubdirectory(path, parent) {
     }
     await syncDirectory(parent);
 }
-class RasterQuarantineRefusal extends Error {
+export class RasterQuarantineRefusal extends Error {
     constructor(message) {
         super(message);
         this.name = 'RasterQuarantineRefusal';
@@ -1239,16 +1476,16 @@ export function rasterWindow(set, stageHasFiles) {
         return stageHasFiles ? 'W3' : 'W2';
     return 'W1';
 }
-async function retainedEntry(path, reason) {
+export async function retainedEntry(path, reason) {
     return { path, removed: false, reason: await pathTaken(path) ? reason : 'absent' };
 }
-async function presence(paths) {
+export async function presence(paths) {
     return await Promise.all(paths.map(async (path) => {
         const present = await pathTaken(path);
         return { path, present, owned: false, reason: present ? 'retained' : 'absent' };
     }));
 }
-async function w0Residue(prepare) {
+export async function w0Residue(prepare) {
     const uid = currentUid();
     const checks = [];
     const present = async (path) => await lstat(path, { bigint: true }).catch((error) => {
@@ -1317,7 +1554,7 @@ export class RasterExportReconciler {
             return { status: 'invalid', exportId, reason: 'records without prepare' };
         const stageFiles = await readdir(prepare.stagingDirectory).then((names) => names.length > 0, () => false);
         const window = rasterWindow(set, stageFiles);
-        const common = { version: RASTER_EXPORT_RECORD_VERSION, kind: RASTER_EXPORT_KIND, exportId, planDigest: prepare.planDigest };
+        const common = { version: prepare.version, kind: RASTER_EXPORT_KIND, exportId, planDigest: prepare.planDigest };
         const sessionPaths = [prepare.workCopyPath, join(prepare.stagingDirectory, `artifact${rasterExtensionOf(set)}`), prepare.outputPath];
         const fingerprint = recordSetFingerprint(set);
         const unresolved = (reason, documents = null, residue = [], message = null) => ({
@@ -1389,16 +1626,9 @@ export class RasterExportReconciler {
                     ? 'This copy cannot be closed automatically; close it in Illustrator without saving, then run abandon.' : null);
             }
             try {
-                const closed = await this.deps.bridge.execute({
-                    kind: 'read',
-                    script: RASTER_RECONCILE_CLOSE_SCRIPT,
-                    params: { sessionPaths, expected: { path: expected.identity.path, key: expected.identity.key, saved: expected.identity.saved,
-                            artboards: expected.artboards.map((board) => ({ rect: board.rect })) } },
-                    timeoutMs: EXPORT_HOST_TIMEOUT_MS,
-                    hostGate: { beforeHost: async () => { if (!await unchanged())
-                            throw new Error('The export records changed; nothing was closed.'); } },
-                });
-                return unresolved(closed.data.remaining === 0 ? 'work_copy_closed' : 'work_copy_still_open', closed.data.remaining);
+                const closed = await closeRasterWorkCopy(this.deps.bridge, sessionPaths, { path: expected.identity.path, key: expected.identity.key, saved: expected.identity.saved, fileRevision: expected.identity.fileRevision,
+                    artboards: expected.artboards.map((board) => ({ rect: board.rect })) }, { records: this.store, exportId, fingerprint });
+                return unresolved(closed.remaining === 0 ? 'work_copy_closed' : 'work_copy_still_open', closed.remaining);
             }
             catch (error) {
                 const detail = parseExportHostError(error);
@@ -1435,10 +1665,10 @@ export class RasterExportReconciler {
             kind: 'read', script: EXPORT_INVENTORY_SCRIPT, params: { sessionPaths },
             hostGate: { afterHost: async ({ data }) => {
                     const inventory = data;
-                    await underLock(inventory.documents.length, inventory.documentCount);
+                    await underLock((await matchingDocumentPaths(inventory, sessionPaths)).length, inventory.documentCount);
                 } },
         });
-        return result.data.documents.length;
+        return (await matchingDocumentPaths(result.data, sessionPaths)).length;
     }
     async quarantineCandidateState(exportId) {
         const leasePresent = await pathTaken(this.store.rasterRecordPath(exportId, 'session'));
@@ -1564,6 +1794,7 @@ export class RasterExportReconciler {
                         ...common, recordType: 'published', recordedAt: this.now(), bindingDigest: set.artifact_binding.digest, hostTerminalDigest: set.host_terminal.digest,
                         artifact: { path: prepare.outputPath, mediaType: binding.mediaType, bytes: binding.bytes, sha256: binding.sha256, width: binding.width, height: binding.height },
                         outputIdentity: serializeFileIdentity(fileIdentityOf(output)), sourcePath: prepare.sourcePath, artboardIndex: session.artboardIndex, options: session.options,
+                        ...(session.version === 3 ? { expected: session.expected } : {}),
                     });
                     return await this.resolveWindow('W7', 'finalize', await this.store.readRasterRecordSet(exportId), prepare, common);
                 }
@@ -1630,7 +1861,7 @@ export async function linkBoundArtifact(stagedPath, outputPath, bound, parentSco
         await handle.close();
     }
 }
-async function unlinkStagedName(stagedPath, outputIdentity, parentScope) {
+export async function unlinkStagedName(stagedPath, outputIdentity, parentScope) {
     let metadata;
     try {
         metadata = await lstat(stagedPath, { bigint: true });

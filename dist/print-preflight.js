@@ -1,3 +1,4 @@
+import { PREFLIGHT_SCOPE_NOTE } from './preflight-scope-note.js';
 export const PRINT_PREFLIGHT_LIMITS = {
     pageItems: 5_000,
     images: 200,
@@ -171,6 +172,7 @@ export function createPrintPreflightResult(host, imageItems, imageComplete, cond
     ]));
     return {
         document: host.document,
+        scopeNote: PREFLIGHT_SCOPE_NOTE,
         conditions,
         verdict,
         complete,

@@ -1,3 +1,4 @@
+import { assertSnapshotResultFits, snapshotResultBytes, SNAPSHOT_RESULT_ADMISSION_BYTES, SNAPSHOT_RESULT_SIZE_SCRIPT } from './snapshot-result-size.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
@@ -5,7 +6,7 @@ import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
-import { POINT_TEXT_APPLY_BLOCKERS, POINT_TEXT_BLOCKERS_SCRIPT, POINT_TEXT_PROFILE_NAME, pointTextApplyBlockers, POINT_TEXT_SNAPSHOT_SCRIPT, pointTextSingleLineSchema, pointTextSnapshotSchema, } from './point-text-host-script.js';
+import { POINT_TEXT_APPLY_BLOCKERS, POINT_TEXT_BLOCKERS_SCRIPT, POINT_TEXT_PROFILE_NAME, pointTextApplyBlockers, POINT_TEXT_GROUP_SCRIPT, POINT_TEXT_SNAPSHOT_SCRIPT, pointTextSingleLineSchema, pointTextGroupSnapshotSchema, } from './point-text-host-script.js';
 import { textLookupFailureError } from './text-lookup-error.js';
 export const REPLACE_POINT_TEXT_BATCH_OPERATION = 'replace_point_text_batch';
 export const REPLACE_POINT_TEXT_BATCH_VALIDATOR = { kind: REPLACE_POINT_TEXT_BATCH_OPERATION, version: 1 };
@@ -13,9 +14,9 @@ export const REPLACE_POINT_TEXT_BATCH_PROFILE = POINT_TEXT_PROFILE_NAME;
 export const BATCH_MAX_TARGETS = 32;
 export const BATCH_MIN_TARGETS = 2;
 export const BATCH_MAX_TOTAL_CODE_UNITS = 4_000;
-export const replacePointTextBatchSnapshotSchema = pointTextSnapshotSchema;
+export const replacePointTextBatchSnapshotSchema = pointTextGroupSnapshotSchema;
 const CANONICAL_VERSION = 1;
-const RESULT_SCHEMA_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 3;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 2;
@@ -116,7 +117,7 @@ function normalizePublicInput(input) {
         apply: false,
     };
 }
-const blockerSchema = z.enum(POINT_TEXT_APPLY_BLOCKERS);
+const blockerSchema = z.enum([...POINT_TEXT_APPLY_BLOCKERS, 'result_too_large']);
 function unionBlockers(perTarget) {
     const present = new Set();
     for (const blockers of perTarget)
@@ -154,7 +155,10 @@ const planSchema = z.strictObject({
     if (beforeTotal > BATCH_MAX_TOTAL_CODE_UNITS || afterTotal > BATCH_MAX_TOTAL_CODE_UNITS) {
         context.addIssue({ code: 'custom', message: 'Batch plan contents exceed the measured total budget.' });
     }
-    if (!sameCanonical(plan.applyBlockedReasonCodes, unionBlockers(plan.targets.map((target) => target.applyBlockedReasonCodes)))) {
+    const blockers = unionBlockers(plan.targets.map((target) => target.applyBlockedReasonCodes));
+    if (snapshotResultBytes(plan.documentKey, plan.targets) > SNAPSHOT_RESULT_ADMISSION_BYTES)
+        blockers.push('result_too_large');
+    if (!sameCanonical(plan.applyBlockedReasonCodes, blockers)) {
         context.addIssue({ code: 'custom', message: 'Batch blockers must be the ordered union of every target blocker.' });
     }
     const allowed = plan.confirmationStatus === 'confirmed' && plan.applyBlockedReasonCodes.length === 0;
@@ -406,8 +410,10 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
     await assertOperationSafetyAdapterConformance({ registration: REPLACE_POINT_TEXT_BATCH_SAFETY, plan,
         result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
-export const REPLACE_POINT_TEXT_BATCH_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
+export const REPLACE_POINT_TEXT_BATCH_SCRIPT = `${SNAPSHOT_RESULT_SIZE_SCRIPT}
+${MUTATION_TRANSACTION_SCRIPT}
 ${POINT_TEXT_SNAPSHOT_SCRIPT}
+${POINT_TEXT_GROUP_SCRIPT}
 ${POINT_TEXT_BLOCKERS_SCRIPT}
 var BATCH_MIN_TARGETS = ${BATCH_MIN_TARGETS};
 var BATCH_MAX_TARGETS = ${BATCH_MAX_TARGETS};
@@ -472,7 +478,7 @@ function batchResolve(forApply) {
     var target = pointTextFind(document, uuid);
     if (target === null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: uuid }));
     var before;
-    try { before = pointTextSnapshot(document, target, uuid); }
+    try { before = pointTextGroupSnapshot(document, target, uuid); }
     catch (snapshotError) { throw batchTargetError(index, uuid, snapshotError); }
     var after = batchAfter(before, requested[index].replacement, index, uuid);
     beforeTotal += before.contents.length;
@@ -508,11 +514,11 @@ function batchPreflight(forApply) {
     for (var index = 0; index < resolved.entries.length; index++) {
       var entry = resolved.entries[index];
       var requested = params.targets[index];
-      if (!pointTextSame(entry.before, requested.expectedBefore)) {
+      if (!pointTextGroupSame(entry.before, requested.expectedBefore)) {
         throw mutationError("preflight_failed", "Target " + (index + 1) + " (" + entry.targetUuid +
           "): state does not match expected_before.");
       }
-      if (!pointTextSame(entry.after, requested.confirmedAfter)) {
+      if (!pointTextGroupSame(entry.after, requested.confirmedAfter)) {
         throw mutationError("preflight_failed", "Target " + (index + 1) + " (" + entry.targetUuid +
           "): confirmed_after does not match the derived replacement state.");
       }
@@ -522,12 +528,13 @@ function batchPreflight(forApply) {
 }
 
 function batchPlan(preflight) {
-  return {
+  var plan = {
     operation: "replace_point_text_batch", documentKey: preflight.context.key, targets: preflight.entries,
     applyBlockedReasonCodes: preflight.blockers,
     confirmationStatus: params.apply === true ? "confirmed" : "required",
     applyAllowed: params.apply === true && preflight.blockers.length === 0
   };
+  return snapshotResultAdmitPlan(plan, plan.targets);
 }
 
 function batchRevalidate(preflight, plan) {
@@ -540,8 +547,8 @@ function batchRevalidate(preflight, plan) {
   }
   for (var index = 0; index < current.targets.length; index++) {
     if (current.targets[index] !== preflight.targets[index] ||
-        !pointTextSame(current.entries[index].before, plan.targets[index].before) ||
-        !pointTextSame(current.entries[index].after, plan.targets[index].after)) {
+        !pointTextGroupSame(current.entries[index].before, plan.targets[index].before) ||
+        !pointTextGroupSame(current.entries[index].after, plan.targets[index].after)) {
       throw mutationBeforeSideEffectError("Target " + (index + 1) + " (" + plan.targets[index].targetUuid +
         "): target or contents changed before apply.");
     }
@@ -571,9 +578,9 @@ function batchVerify(preflight, plan) {
         "): native UUID no longer resolves to the same TextFrame.");
     }
     var snapshot;
-    try { snapshot = pointTextSnapshot(preflight.document, target, uuid); }
+    try { snapshot = pointTextGroupSnapshot(preflight.document, target, uuid); }
     catch (snapshotError) { throw batchTargetError(index, uuid, snapshotError); }
-    if (!pointTextSame(snapshot, plan.targets[index].after)) {
+    if (!pointTextGroupSame(snapshot, plan.targets[index].after)) {
       throw mutationError("verify_mismatch", "Target " + (index + 1) + " (" + uuid +
         "): postcondition does not match the plan.");
     }
@@ -592,18 +599,18 @@ function batchRollbackTarget(preflight, index) {
     if (target === null || target !== preflight.targets[index]) {
       return { outcome: "indeterminate", snapshot: null, message: "target identity is indeterminate" };
     }
-    current = pointTextSnapshot(preflight.document, target, entry.targetUuid);
+    current = pointTextGroupSnapshot(preflight.document, target, entry.targetUuid);
   } catch (error) { return { outcome: "indeterminate", snapshot: null, message: "target state is indeterminate" }; }
-  if (pointTextSame(current, entry.before)) return { outcome: "restored", snapshot: current, message: null };
-  if (!pointTextSame(current, entry.after)) {
+  if (pointTextGroupSame(current, entry.before)) return { outcome: "restored", snapshot: current, message: null };
+  if (!pointTextGroupSame(current, entry.after)) {
     return { outcome: "indeterminate", snapshot: null, message: "state is neither before nor planned after" };
   }
   try { target.contents = entry.before.contents; }
   catch (error) { return { outcome: "indeterminate", snapshot: null, message: "restore write is indeterminate" }; }
   var restored;
-  try { restored = pointTextSnapshot(preflight.document, target, entry.targetUuid); }
+  try { restored = pointTextGroupSnapshot(preflight.document, target, entry.targetUuid); }
   catch (error) { return { outcome: "indeterminate", snapshot: null, message: "restore verification is indeterminate" }; }
-  if (pointTextSame(restored, entry.before)) return { outcome: "restored", snapshot: restored, message: null };
+  if (pointTextGroupSame(restored, entry.before)) return { outcome: "restored", snapshot: restored, message: null };
   return { outcome: "outstanding", snapshot: null, observed: restored,
     message: "restore did not produce the exact before state" };
 }
@@ -691,6 +698,8 @@ export const REPLACE_POINT_TEXT_BATCH_ADAPTER_IDENTITY = mutationAdapterIdentity
 });
 function normalizedRequest(input) {
     const request = internalInputSchema.parse(input);
+    if (request.apply)
+        assertSnapshotResultFits(request.expectedDocumentKey, request.targets.map(target => ({ targetUuid: target.targetUuid, replacement: target.replacement, before: target.expectedBefore, after: target.confirmedAfter })));
     const digestRequest = 'commandId' in request
         ? (({ commandId: _commandId, ...rest }) => rest)(request)
         : request;
@@ -703,7 +712,7 @@ function normalizedRequest(input) {
 export const replacePointTextBatchToolContract = {
     name: 'illustrator_replace_point_text_batch',
     title: 'Plan or Replace Point Text in Batch',
-    description: `Plan or replace the contents of ${BATCH_MIN_TARGETS} to ${BATCH_MAX_TARGETS} distinct non-empty single-line layer-direct POINTTEXT frames in one document as one command, bound by explicit document key and native UUIDs (contents total at most ${BATCH_MAX_TOTAL_CODE_UNITS} UTF-16 code units before and after). Planning evaluates every target and writes nothing; any unsupported, stale, or blocked target rejects the whole batch before a single write. Apply performs exact per-target compare-and-set in one host call, native read-back verification of every target, and verified inverse rollback of written targets in reverse order.`,
+    description: `Plan or replace the contents of ${BATCH_MIN_TARGETS} to ${BATCH_MAX_TARGETS} distinct non-empty single-line POINTTEXT frames (in layers or unlocked, visible groups) in one document as one command, bound by explicit document key and native UUIDs (contents total at most ${BATCH_MAX_TOTAL_CODE_UNITS} UTF-16 code units before and after). Planning evaluates every target and writes nothing; any unsupported, stale, or blocked target rejects the whole batch before a single write. Apply performs exact per-target compare-and-set in one host call, native read-back verification of every target, and verified inverse rollback of written targets in reverse order. Estimated stored result must be <=209715 UTF-8 bytes (group child lists count); result_too_large requires fewer targets or smaller group evidence.`,
     inputSchema,
     publicInputSchema: replacePointTextBatchPublicInputSchema,
     outputSchema: replacePointTextBatchResponseSchema,

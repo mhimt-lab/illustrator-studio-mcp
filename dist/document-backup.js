@@ -1,15 +1,25 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, readdir, realpath, stat, unlink } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 import { z } from 'zod';
 import { documentContextSchema, documentKeyShortSchema } from './mutation-result-schema-core.js';
 import { atomicCreatePrivateRecord, readSecurePrivateRecord, unlinkPrivateRecord } from './private-record.js';
 import { ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath, validatePrivateDirectory, withPrivateDirectoryScope } from './private-state.js';
+import { StructureSnapshotTooLargeError } from './structure-diff.js';
 import { noFollowReadFlags, directoryFlags, exclusiveCreateNoFollowFlags, currentUid } from './platform-primitives.js';
 export const BACKUP_RECORD_VERSION = 1;
 export const BACKUP_RECORD_MAX_BYTES = 16_384;
 export const BACKUP_MAX_PAGE_ITEMS = 1_000;
+export const BACKUP_STREAM_MAX_PAGE_ITEMS = 20_778;
+export const LARGE_DOCUMENT_WORKAROUND = 'Workaround: copy the part to edit into a new document (illustrator_create_document) and edit it there; an unsaved document is changed without a backup.';
+export function backupTooLargeMessage(error) {
+    const counted = error instanceof StructureSnapshotTooLargeError;
+    const detail = counted
+        ? `The document has ${error.total} ${error.collection}; illustrator_create_backup accepts at most ${error.limit}.`
+        : error.message;
+    return `${detail} Nothing was copied or opened. ${LARGE_DOCUMENT_WORKAROUND}`;
+}
 export const BACKUP_STRUCTURE_TOLERANCE_PT = 0.001;
 export const BACKUP_NUMERIC_TOLERANCE = 0.0001;
 const COPY_CHUNK_BYTES = 1024 * 1024;
@@ -88,6 +98,7 @@ export const createBackupResultSchema = z.discriminatedUnion('outcome', [
             'restore_structure_mismatch',
             'restore_test_identity_mismatch',
             'source_changed',
+            'baseline_capacity_exceeded',
         ]),
         stage: backupStageSchema,
         message: z.string(),
@@ -113,8 +124,9 @@ export const createBackupResultSchema = z.discriminatedUnion('outcome', [
         sessionId: z.string().nullable(),
     }),
 ]);
-export const BACKUP_SESSION_VERSION = 1;
-export const BACKUP_SESSION_MAX_BYTES = 8_192;
+export const BACKUP_SESSION_VERSION = 2;
+export const BACKUP_SESSION_V1_MAX_BYTES = 8_192;
+export const BACKUP_SESSION_MAX_BYTES = 262_144;
 export const fileIdentitySchema = z.strictObject({
     dev: z.string().regex(/^\d+$/),
     ino: z.string().regex(/^\d+$/),
@@ -122,8 +134,7 @@ export const fileIdentitySchema = z.strictObject({
     mtimeNs: z.string().regex(/^\d+$/),
     ctimeNs: z.string().regex(/^\d+$/),
 });
-export const backupSessionSchema = z.strictObject({
-    version: z.literal(BACKUP_SESSION_VERSION),
+const backupSessionFields = {
     backupId: z.uuid(),
     documentKey: z.string().min(1),
     sourcePath: z.string().min(1),
@@ -136,7 +147,27 @@ export const backupSessionSchema = z.strictObject({
     openCommandId: z.string().min(1),
     phase: z.literal('open_pending'),
     createdAt: z.string().min(1),
-});
+};
+export const backupBaselineDocumentSchema = z.strictObject({ path: z.string().nullable(), name: z.string() });
+export const backupBaselineHostDataSchema = z.strictObject({
+    documentCount: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    documents: z.array(backupBaselineDocumentSchema),
+}).refine((data) => data.documentCount === data.documents.length, 'The baseline inventory is incomplete.');
+export const backupSessionV1Schema = z.strictObject({ version: z.literal(1), ...backupSessionFields });
+export const backupSessionV2Schema = z.strictObject({
+    version: z.literal(BACKUP_SESSION_VERSION),
+    ...backupSessionFields,
+    documentCountBefore: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    baselineDocuments: z.array(backupBaselineDocumentSchema),
+    baselineCaptureCommandId: z.string().min(1),
+}).refine((session) => session.documentCountBefore === session.baselineDocuments.length, 'The baseline inventory is incomplete.');
+export const backupSessionSchema = z.discriminatedUnion('version', [backupSessionV1Schema, backupSessionV2Schema]);
+export class BackupSessionCapacityError extends Error {
+    constructor() {
+        super(`The encoded backup baseline lease exceeds ${BACKUP_SESSION_MAX_BYTES} bytes. No restore-test copy was opened. Close unneeded documents and retry create_backup.`);
+        this.name = 'BackupSessionCapacityError';
+    }
+}
 export const hostDocumentIdentitySchema = z.strictObject({
     keyVersion: z.literal(1),
     key: z.string().min(1),
@@ -157,6 +188,8 @@ export const reconcileBackupResultSchema = z.discriminatedUnion('status', [
         restoreTestPath: z.string(),
         documentCount: z.number().int().nonnegative(),
         closedDocument: hostDocumentIdentitySchema.nullable(),
+        baseline: z.enum(['captured', 'absent']),
+        documentCountBefore: z.number().int().positive().nullable(),
     }),
     z.strictObject({
         status: z.literal('restore_test_open'),
@@ -164,6 +197,19 @@ export const reconcileBackupResultSchema = z.discriminatedUnion('status', [
         restoreTestPath: z.string(),
         documents: z.array(hostDocumentIdentitySchema),
         documentCount: z.number().int().nonnegative(),
+        baseline: z.enum(['captured', 'absent']),
+        documentCountBefore: z.number().int().positive().nullable(),
+    }),
+    z.strictObject({
+        status: z.literal('release_refused'),
+        backupId: z.string(),
+        restoreTestPath: z.string(),
+        documentCount: z.number().int().nonnegative(),
+        documentCountBefore: z.number().int().positive().nullable(),
+        baseline: z.enum(['captured', 'absent']),
+        outsideBaselineDocuments: z.array(hostDocumentIdentitySchema),
+        message: z.string(),
+        nextCall: z.strictObject({ tool: z.literal('illustrator_reconcile_backup'), arguments: z.strictObject({ backup_id: z.string(), action: z.literal('inspect') }) }),
     }),
 ]);
 export class BackupSessionGoneError extends Error {
@@ -183,6 +229,29 @@ export class BackupSessionUnresolvedError extends Error {
         this.name = 'BackupSessionUnresolvedError';
     }
 }
+export const BACKUP_CAPTURE_BASELINE_JSX = `
+var backupBaselineDocuments = [];
+for (var backupBaselineScan = 0; backupBaselineScan < app.documents.length; backupBaselineScan++) {
+  var backupBaselineDocument = app.documents[backupBaselineScan];
+  var backupBaselinePath = readDocumentPath(backupBaselineDocument).path;
+  backupBaselineDocuments.push({ path: backupBaselinePath || null, name: backupBaselineDocument.name });
+}
+result.backupBaseline = { documentCount: app.documents.length, documents: backupBaselineDocuments };
+`;
+export function documentsOutsideBackupBaseline(session, documents) {
+    if (session.version === 1)
+        return [];
+    const remaining = [...session.baselineDocuments];
+    const outside = [];
+    for (const document of documents) {
+        const index = remaining.findIndex((entry) => entry.path === document.path && (entry.path !== null || entry.name === document.name));
+        if (index === -1)
+            outside.push(document);
+        else
+            remaining.splice(index, 1);
+    }
+    return outside;
+}
 export const BACKUP_OPEN_PRE_ATTEMPT_CODES = [
     'DOCUMENT_MISMATCH',
     'DOCUMENT_NOT_SAVED',
@@ -190,12 +259,66 @@ export const BACKUP_OPEN_PRE_ATTEMPT_CODES = [
 ];
 export const BACKUP_OPEN_ALREADY_OPEN_CODE = 'BACKUP_RESTORE_TEST_ALREADY_OPEN';
 export const BACKUP_REQUIRES_SAVED_FILE_MESSAGE = 'Backup requires a saved, file-backed document with a verified file revision; unsaved documents have no file to back up.';
-export const BACKUP_OPEN_RESTORE_TEST_SCRIPT = `
+export const BACKUP_PATH_FORMS_JSX = `
+function backupPathIsReported(path, forms) {
+  for (var backupFormIndex = 0; backupFormIndex < forms.length; backupFormIndex++) {
+    if (path === forms[backupFormIndex]) return true;
+  }
+  return false;
+}
+`;
+export const BACKUP_OPEN_RESTORE_TEST_SCRIPT = `${BACKUP_PATH_FORMS_JSX}
+function backupDocumentSummary() {
+  var summary = [];
+  for (var summaryIndex = 0; summaryIndex < app.documents.length; summaryIndex++) {
+    var summaryPath = "";
+    var summarySaved = null;
+    try { summaryPath = app.documents[summaryIndex].fullName.fsName; } catch (_summaryPathError) {}
+    try { summarySaved = app.documents[summaryIndex].saved === true; } catch (_summarySavedError) {}
+    summary.push({ path: summaryPath, saved: summarySaved });
+  }
+  return summary;
+}
+/**
+ * After the open succeeded but a check failed: closes the opened copy without saving, only when it is provably the new
+ * document (the count grew by one, its path is none of the open documents' paths, it is unmodified), and reports closed:true
+ * only when every document that was open before is still there with the same path and saved state. Whether two DOM
+ * references to one document compare equal is not relied on.
+ */
+function backupCloseUnexpectedCopy(restoredDocument) {
+  var proof = { closed: false, documentCount: app.documents.length };
+  try {
+    var restoredPath = "";
+    var restoredSaved = false;
+    try { restoredPath = restoredDocument.fullName.fsName; } catch (_restoredPathError) {}
+    try { restoredSaved = restoredDocument.saved === true; } catch (_restoredSavedError) {}
+    var pathWasOpen = false;
+    for (var knownIndex = 0; knownIndex < backupBeforeSummary.length; knownIndex++) {
+      if (backupBeforeSummary[knownIndex].path === restoredPath) pathWasOpen = true;
+    }
+    if (app.documents.length !== backupCountBefore + 1 || pathWasOpen || restoredSaved !== true) return proof;
+    var closePrevious = app.userInteractionLevel;
+    app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
+    try { restoredDocument.close(SaveOptions.DONOTSAVECHANGES); }
+    finally { app.userInteractionLevel = closePrevious; }
+    var afterSummary = backupDocumentSummary();
+    proof.documentCount = afterSummary.length;
+    if (afterSummary.length !== backupBeforeSummary.length) return proof;
+    for (var checkIndex = 0; checkIndex < afterSummary.length; checkIndex++) {
+      if (afterSummary[checkIndex].path !== backupBeforeSummary[checkIndex].path || afterSummary[checkIndex].saved !== backupBeforeSummary[checkIndex].saved) return proof;
+    }
+    try { app.activeDocument = backupSourceDocument; } catch (_reactivateError) {}
+    proof.closed = true;
+  } catch (_closeError) {
+    try { proof.documentCount = app.documents.length; } catch (_countError) {}
+  }
+  return proof;
+}
 var backupCountBefore = app.documents.length;
 for (var backupScan = 0; backupScan < backupCountBefore; backupScan++) {
   var backupExistingPath = "";
   try { backupExistingPath = app.documents[backupScan].fullName.fsName; } catch (_backupPathError) {}
-  if (backupExistingPath === params.restoreTestPath) {
+  if (backupPathIsReported(backupExistingPath, params.restoreTestPathForms)) {
     throw new Error("MCP_ERROR:" + stringifyJson({ code: "BACKUP_RESTORE_TEST_ALREADY_OPEN" }));
   }
 }
@@ -208,6 +331,8 @@ if (backupSourceContext.mutationProfile !== "saved_file") {
     message: backupSourceContext.mutationBlockedReason || ${JSON.stringify(BACKUP_REQUIRES_SAVED_FILE_MESSAGE)}
   }));
 }
+var backupSourceDocument = app.activeDocument;
+var backupBeforeSummary = backupDocumentSummary();
 var backupPreviousInteraction = app.userInteractionLevel;
 app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
 var backupRestoredDocument = null;
@@ -219,11 +344,19 @@ for (var backupIndex = 0; backupIndex < app.documents.length; backupIndex++) {
 }
 if (backupRestoredIndex < 0) throw new Error("MCP_ERROR:" + stringifyJson({ code: "BACKUP_RESTORE_TEST_NOT_LISTED" }));
 var backupRestoredIdentity = getDocumentIdentity(backupRestoredDocument, backupRestoredIndex);
-if (backupRestoredIdentity.path !== params.restoreTestPath) {
-  throw new Error("MCP_ERROR:" + stringifyJson({ code: "BACKUP_RESTORE_TEST_PATH_MISMATCH", actual: backupRestoredIdentity.path }));
+if (!backupPathIsReported(backupRestoredIdentity.path, params.restoreTestPathForms)) {
+  var backupMismatchProof = backupCloseUnexpectedCopy(backupRestoredDocument);
+  throw new Error("MCP_ERROR:" + stringifyJson({
+    code: "BACKUP_RESTORE_TEST_PATH_MISMATCH", actual: backupRestoredIdentity.path,
+    closed: backupMismatchProof.closed, documentCountBefore: backupCountBefore, documentCount: backupMismatchProof.documentCount
+  }));
 }
 if (app.activeDocument !== backupRestoredDocument) {
-  throw new Error("MCP_ERROR:" + stringifyJson({ code: "BACKUP_RESTORE_TEST_NOT_ACTIVE" }));
+  var backupNotActiveProof = backupCloseUnexpectedCopy(backupRestoredDocument);
+  throw new Error("MCP_ERROR:" + stringifyJson({
+    code: "BACKUP_RESTORE_TEST_NOT_ACTIVE",
+    closed: backupNotActiveProof.closed, documentCountBefore: backupCountBefore, documentCount: backupNotActiveProof.documentCount
+  }));
 }
 var result = {
   source: backupSourceContext,
@@ -238,7 +371,7 @@ export const BACKUP_CLOSE_PRE_ATTEMPT_CODES = [
     'BACKUP_SOURCE_NOT_UNIQUE',
     'BACKUP_SOURCE_IDENTITY_MISMATCH',
 ];
-export const BACKUP_CLOSE_RESTORE_TEST_SCRIPT = `
+export const BACKUP_CLOSE_RESTORE_TEST_SCRIPT = `${BACKUP_PATH_FORMS_JSX}
 function backupKeyWithoutIndex(key) {
   return String(key).replace(/\\|index=-?\\d+\\|/, "|index=*|");
 }
@@ -246,7 +379,7 @@ var backupRestoreMatches = [];
 var backupSourceMatches = [];
 for (var backupCloseScan = 0; backupCloseScan < app.documents.length; backupCloseScan++) {
   var backupCandidateIdentity = getDocumentIdentity(app.documents[backupCloseScan], backupCloseScan);
-  if (backupCandidateIdentity.path === params.restoreTestPath) {
+  if (backupPathIsReported(backupCandidateIdentity.path, params.restoreTestPathForms)) {
     backupRestoreMatches.push({ doc: app.documents[backupCloseScan], identity: backupCandidateIdentity });
   }
   if (backupCandidateIdentity.path === params.sourcePath) {
@@ -272,10 +405,11 @@ var backupClosePreviousInteraction = app.userInteractionLevel;
 app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
 try { backupRestoreMatches[0].doc.close(SaveOptions.DONOTSAVECHANGES); }
 finally { app.userInteractionLevel = backupClosePreviousInteraction; }
+var backupCloseInventory = [];
 for (var backupVerifyScan = 0; backupVerifyScan < app.documents.length; backupVerifyScan++) {
-  var backupRemainingPath = "";
-  try { backupRemainingPath = app.documents[backupVerifyScan].fullName.fsName; } catch (_backupRemainingError) {}
-  if (backupRemainingPath === params.restoreTestPath) {
+  var backupRemainingIdentity = getDocumentIdentity(app.documents[backupVerifyScan], backupVerifyScan);
+  backupCloseInventory.push(backupRemainingIdentity);
+  if (backupPathIsReported(backupRemainingIdentity.path, params.restoreTestPathForms)) {
     throw new Error("MCP_ERROR:" + stringifyJson({ code: "BACKUP_RESTORE_TEST_STILL_OPEN" }));
   }
 }
@@ -283,25 +417,29 @@ app.activeDocument = backupSourceMatches[0].doc;
 var result = {
   restoredBeforeClose: backupRestoredBeforeClose,
   source: getDocumentContext(),
-  documentCount: app.documents.length
+  documentCount: app.documents.length,
+  documents: [],
+  allDocuments: backupCloseInventory
 };
 `;
-export const BACKUP_INVENTORY_SCRIPT = `
+export const BACKUP_INVENTORY_SCRIPT = `${BACKUP_PATH_FORMS_JSX}
 var backupInventory = [];
+var backupAllDocuments = [];
 for (var backupInventoryScan = 0; backupInventoryScan < app.documents.length; backupInventoryScan++) {
   var backupInventoryIdentity = getDocumentIdentity(app.documents[backupInventoryScan], backupInventoryScan);
-  if (backupInventoryIdentity.path === params.restoreTestPath) backupInventory.push(backupInventoryIdentity);
+  backupAllDocuments.push(backupInventoryIdentity);
+  if (backupPathIsReported(backupInventoryIdentity.path, params.restoreTestPathForms)) backupInventory.push(backupInventoryIdentity);
 }
-var result = { documents: backupInventory, documentCount: app.documents.length };
+var result = { documents: backupInventory, allDocuments: backupAllDocuments, documentCount: app.documents.length };
 `;
-export const BACKUP_RECONCILE_CLOSE_SCRIPT = `
+export const BACKUP_RECONCILE_CLOSE_SCRIPT = `${BACKUP_PATH_FORMS_JSX}
 function backupKeyWithoutIndex(key) {
   return String(key).replace(/\\|index=-?\\d+\\|/, "|index=*|");
 }
 var backupReconcileMatches = [];
 for (var backupReconcileScan = 0; backupReconcileScan < app.documents.length; backupReconcileScan++) {
   var backupReconcileIdentity = getDocumentIdentity(app.documents[backupReconcileScan], backupReconcileScan);
-  if (backupReconcileIdentity.path === params.restoreTestPath) {
+  if (backupPathIsReported(backupReconcileIdentity.path, params.restoreTestPathForms)) {
     backupReconcileMatches.push({ doc: app.documents[backupReconcileScan], identity: backupReconcileIdentity });
   }
 }
@@ -318,11 +456,13 @@ app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
 try { backupReconcileMatches[0].doc.close(SaveOptions.DONOTSAVECHANGES); }
 finally { app.userInteractionLevel = backupReconcilePreviousInteraction; }
 var backupReconcileRemaining = [];
+var backupReconcileAllDocuments = [];
 for (var backupReconcileVerify = 0; backupReconcileVerify < app.documents.length; backupReconcileVerify++) {
   var backupReconcileRemainingIdentity = getDocumentIdentity(app.documents[backupReconcileVerify], backupReconcileVerify);
-  if (backupReconcileRemainingIdentity.path === params.restoreTestPath) backupReconcileRemaining.push(backupReconcileRemainingIdentity);
+  backupReconcileAllDocuments.push(backupReconcileRemainingIdentity);
+  if (backupPathIsReported(backupReconcileRemainingIdentity.path, params.restoreTestPathForms)) backupReconcileRemaining.push(backupReconcileRemainingIdentity);
 }
-var result = { closed: backupReconcileClosed, documents: backupReconcileRemaining, documentCount: app.documents.length };
+var result = { closed: backupReconcileClosed, documents: backupReconcileRemaining, allDocuments: backupReconcileAllDocuments, documentCount: app.documents.length };
 `;
 export class BackupPreconditionError extends Error {
     reason;
@@ -767,12 +907,17 @@ export function backupFileName(backupId, sourcePath) {
     return `${backupId}-${basename(sourcePath)}`;
 }
 export function restoreTestFileName(backupId, sourcePath) {
-    return `${backupId}-restore-test-${basename(sourcePath)}`;
+    const extension = extname(sourcePath);
+    return `${backupId}-restore-test${/^\.[A-Za-z0-9]{1,8}$/u.test(extension) ? extension : '.ai'}`;
 }
+export { hostPathForms, sameFilePath } from './file-path.js';
 export class DocumentBackupStore {
     stateRoot;
     constructor(stateRoot) {
         this.stateRoot = stateRoot;
+    }
+    get stateRootPath() {
+        return this.stateRoot;
     }
     get recordDirectory() {
         return join(this.stateRoot, 'backups');
@@ -838,9 +983,9 @@ export class DocumentBackupStore {
         return join(this.recordDirectory, `${backupId}.session.json`);
     }
     async openSession(session) {
-        const contents = `${JSON.stringify(backupSessionSchema.parse(session), null, 2)}\n`;
+        const contents = `${JSON.stringify(backupSessionV2Schema.parse(session), null, 2)}\n`;
         if (Buffer.byteLength(contents) > BACKUP_SESSION_MAX_BYTES)
-            throw new Error('The backup session exceeds its size limit.');
+            throw new BackupSessionCapacityError();
         const path = this.sessionPath(session.backupId);
         await atomicCreatePrivateRecord(path, contents);
         return path;
@@ -862,7 +1007,13 @@ export class DocumentBackupStore {
             return null;
         if (record.state === 'invalid')
             throw new Error(`Backup session ${backupId} is unsafe (${record.reason}); it stays unresolved.`);
-        return backupSessionSchema.parse(JSON.parse(record.text));
+        const session = backupSessionSchema.parse(JSON.parse(record.text));
+        if (session.version === 1 && Buffer.byteLength(record.text) > BACKUP_SESSION_V1_MAX_BYTES) {
+            throw new Error(`Backup session ${backupId} exceeds its v1 size limit; it stays unresolved.`);
+        }
+        if (session.backupId !== backupId)
+            throw new Error(`Backup session ${backupId} has a different binding; it stays unresolved.`);
+        return session;
     }
     async releaseSession(backupId) {
         await unlinkPrivateRecord(this.sessionPath(backupId));

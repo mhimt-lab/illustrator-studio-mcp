@@ -1,6 +1,8 @@
+import { hostPathForms, sameFilePath } from './file-path.js';
+import { assertSameFilePathIdentity } from './file-path-identity.js';
 import { lstat } from 'node:fs/promises';
 import { z } from 'zod';
-import { aggregateItemCount, advanceItemAggregate, decideEditSessionAdmission, EditSessionRecordError, } from './edit-session.js';
+import { aggregateItemCount, advanceItemAggregate, decideEditSessionAdmission, EDIT_SESSION_CHUNKED_MAX_ITEMS, EditSessionRecordError, } from './edit-session.js';
 import { isMissingPath } from './private-state.js';
 const digestSchema = z.string().regex(/^[0-9a-f]{16}$/u);
 const rowSchema = z.strictObject({ uuid: z.string().min(1), hash: digestSchema });
@@ -82,6 +84,10 @@ export class EditSessionCoordinator {
         const invalid = entries.flatMap((entry) => entry.read.state === 'invalid' ? [{ name: entry.name, reason: entry.read.reason }] : []);
         if (invalid.length > 0 && options.strict)
             throw new EditSessionRecordInvalidError(invalid);
+        const active = entries.flatMap((entry) => entry.read.state === 'valid' && entry.read.record.state !== 'closed' ? [entry.read.record] : []);
+        const duplicates = active.filter((record, index) => active.some((other, otherIndex) => otherIndex !== index && sameFilePath(record.sourcePath, other.sourcePath)));
+        if (duplicates.length > 0)
+            throw new EditSessionRecordInvalidError(duplicates.map((record) => ({ name: record.sessionId, reason: 'duplicate_active_session' })));
         const sessions = [];
         for (const entry of entries) {
             if (entry.read.state !== 'valid' || entry.read.record.state !== 'open')
@@ -92,9 +98,22 @@ export class EditSessionCoordinator {
                 await this.store.suspend(record.sessionId, 'file_changed');
                 continue;
             }
+            const forms = hostPathForms(record.sourcePath);
+            const globalExemptPaths = [record.sourcePath];
+            for (const form of forms) {
+                if (form !== record.sourcePath && await this.inodeOf(form) !== null) {
+                    try {
+                        await assertSameFilePathIdentity(form, record.sourcePath);
+                        globalExemptPaths.push(form);
+                    }
+                    catch { }
+                }
+            }
             sessions.push({
+                ...(forms.length > 1 ? { sourcePathForms: forms } : {}),
                 sessionId: record.sessionId,
                 sourcePath: record.sourcePath,
+                globalExemptPaths,
                 sourceFileRevision: record.sourceFileRevision,
                 structureDigest: record.head.structureDigest,
                 sequence: record.head.sequence,
@@ -103,7 +122,7 @@ export class EditSessionCoordinator {
         }
         if (sessions.length === 0)
             return undefined;
-        return { hostProfile: await hostProfile(), sessions };
+        return { hostProfile: await hostProfile(), maxItems: EDIT_SESSION_CHUNKED_MAX_ITEMS, sessions };
     }
     async attested(context) {
         let envelope;

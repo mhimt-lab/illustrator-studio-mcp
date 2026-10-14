@@ -166,8 +166,10 @@ function clipIndexOf(list, value) {
   return -1;
 }
 
-function clipUnsupported(reason, uuid) {
-  return new Error("MCP_ERROR:" + stringifyJson({ code: "CLIP_UNSUPPORTED_TARGET", reason: reason, uuid: uuid }));
+function clipUnsupported(reason, uuid, facts) {
+  var detail = { code: "CLIP_UNSUPPORTED_TARGET", reason: reason, uuid: uuid };
+  if (facts && facts.length > 0) detail.facts = facts;
+  return new Error("MCP_ERROR:" + stringifyJson(detail));
 }
 
 function clipCollection(document, type) {
@@ -182,38 +184,21 @@ function clipCollection(document, type) {
   return collection;
 }
 
-/** Typed-collection lookup (getPageItemFromUuid misreports PlacedItem / CompoundPathItem as GroupItem). */
+/** The item for a UUID when it reports the given type (direct reference; the type comes from the item's own collection row). */
 function clipTyped(document, type, uuid) {
-  var collection = clipCollection(document, type);
-  var found = null;
-  var matches = 0;
-  for (var index = 0; index < collection.length; index++) {
-    var candidate = collection[index];
-    if (String(candidate.uuid) === uuid) { matches++; if (found === null) found = candidate; }
-  }
-  if (matches > 1) throw mutationError("preflight_failed", "More than one " + type + " reports the target UUID.");
-  if (found !== null && String(found.typename) !== type) {
-    throw mutationError("preflight_failed", "The resolved item does not report " + type + ".");
-  }
-  return found;
+  var resolved = resolvePageItem(document, uuid);
+  if (resolved === null || resolved.typename !== type) return null;
+  return resolved.item;
 }
 
 /** Resolves a UUID to one item of an allowed type; any other existing item is an unmeasured type. */
 function clipResolve(document, uuid, allowedTypes) {
   if (typeof uuid !== "string" || uuid.length === 0) throw mutationError("preflight_failed", "Target UUID must be a non-empty string.");
-  if (clipTyped(document, "PlacedItem", uuid) !== null || clipTyped(document, "CompoundPathItem", uuid) !== null) {
-    throw clipUnsupported("type_unmeasured", uuid);
-  }
-  var found = null;
-  for (var typeIndex = 0; typeIndex < allowedTypes.length; typeIndex++) {
-    var item = clipTyped(document, allowedTypes[typeIndex], uuid);
-    if (item === null) continue;
-    if (found !== null) throw mutationError("preflight_failed", "The target UUID resolves in more than one typed collection.");
-    found = item;
-  }
-  if (found !== null) return found;
-  if (supportedPathFind(document, uuid) !== null) throw clipUnsupported("type_unmeasured", uuid);
-  throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: uuid }));
+  var resolved = resolvePageItem(document, uuid);
+  if (resolved === null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: uuid }));
+  if (resolved.typename === "PlacedItem" || resolved.typename === "CompoundPathItem") throw clipUnsupported("type_unmeasured", uuid);
+  if (clipIndexOf(allowedTypes, resolved.typename) >= 0) return resolved.item;
+  throw clipUnsupported("type_unmeasured", uuid);
 }
 
 /** Top-level layer only (every measured operation fixture item sat on document.layers[i]). */
@@ -276,14 +261,9 @@ function clipPathSnapshot(document, target, expectedParent, admitCmyk) {
   var visibilityVariable;
   try { visibilityVariable = target.visibilityVariable; }
   catch (variableError) { throw mutationError("preflight_failed", "Clip path visibility variable state is unreadable."); }
-  if (target.guides || target.sliced || target.isIsolated || target.wrapped ||
-      String(target.artworkKnockout) !== "KnockoutState.DISABLED" ||
-      String(target.blendingMode) !== "BlendModes.NORMAL" || visibilityVariable !== null ||
-      String(target.note) !== "" || target.tags.length !== 0 || String(target.uRL) !== "" ||
-      String(target.polarity) !== "PolarityValues.POSITIVE" ||
-      !target.strokeDashes || target.strokeDashes.length !== 0) {
-    throw clipUnsupported("path_state_unmeasured", uuid);
-  }
+  var stateRefusals = supportedPathStateRefusals(target, visibilityVariable, false);
+  if (!target.strokeDashes || target.strokeDashes.length !== 0) stateRefusals.push("strokeDashes=non-empty");
+  if (stateRefusals.length > 0) throw clipUnsupported("path_state_unmeasured", uuid, stateRefusals);
   return {
     uuid: uuid,
     type: "PathItem",

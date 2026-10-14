@@ -6,7 +6,7 @@ import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema } from '../mutation-result-schema-core.js';
 import { canonicalDigest, operationSafetyPolicyToMcpAnnotations } from '../operation-safety-policy-core.js';
 import { LAYER_OPS_HOST_SCRIPT } from './layer-ops-host-script.js';
-import { classifyLayerTerminal, entryOf, layerBlockers, layerBlockerSchema, layerDocumentKeySchema, layerIdentityToken, layerPathSchema, layerSafetyAsserter, layerSafetyRegistration, layerTargetSchema, layerTransactionSchema, LAYER_OPS_MAX_SIBLINGS, reorderSibling, sameCanonical, siblingOrderSchema, } from './layer-ops-shared.js';
+import { classifyLayerTerminal, createLayerBlockerSchema, entryOf, layerBlockers, layerDocumentKeySchema, layerIdentityToken, layerPathSchema, layerSafetyAsserter, layerSafetyRegistration, layerTargetSchema, layerTransactionSchema, LAYER_OPS_MAX_SIBLINGS, reorderReferenceSiblingBlockers, REFERENCE_SIBLING_BLOCKER, reorderSibling, sameCanonical, siblingOrderSchema, } from './layer-ops-shared.js';
 export const REORDER_LAYER_OPERATION = 'reorder_layer';
 export const REORDER_LAYER_VALIDATOR = { kind: REORDER_LAYER_OPERATION, version: 1 };
 const CANONICAL_VERSION = 1;
@@ -44,7 +44,7 @@ const planSchema = z.strictObject({
     siblingOrderBefore: siblingOrderSchema,
     siblingOrderAfter: siblingOrderSchema,
     changesOrder: z.boolean(),
-    applyBlockedReasonCodes: z.array(layerBlockerSchema),
+    applyBlockedReasonCodes: z.array(createLayerBlockerSchema),
     confirmationStatus: z.enum(['required', 'confirmed']),
     applyAllowed: z.boolean(),
 }).superRefine((plan, context) => {
@@ -74,7 +74,10 @@ export const reorderLayerResultSchema = z.union([
     z.strictObject({ operation: z.literal(REORDER_LAYER_OPERATION), applied: z.literal(true), document: documentContextSchema, plan: planSchema,
         postcondition: z.strictObject({ siblingOrder: siblingOrderSchema, target: layerTargetSchema }), transaction: transactionSchema }),
 ]).superRefine((result, context) => {
-    const expectedBlockers = layerBlockers(result.transaction.state === 'planned' ? result.document.mutationAllowed : true, result.plan.targetBefore, { targetStateBlocks: true, targetIsAncestor: false });
+    const expectedBlockers = [
+        ...layerBlockers(result.transaction.state === 'planned' ? result.document.mutationAllowed : true, result.plan.targetBefore, { targetStateBlocks: true, targetIsAncestor: false }),
+        ...reorderReferenceSiblingBlockers(result.plan.siblingOrderBefore, result.plan.fromIndex, result.plan.toIndex),
+    ];
     if (result.transaction.state === 'planned') {
         if (result.plan.confirmationStatus !== 'required' || !sameCanonical(result.plan.applyBlockedReasonCodes, expectedBlockers))
             context.addIssue({ code: 'custom', message: 'Planned reorder must expose exact blockers.' });
@@ -121,10 +124,18 @@ function reorderResolve(forApply) {
   var orderBefore = layerOpsOrder(container);
   var orderAfter = layerOpsReorder(orderBefore, fromIndex, params.toIndex);
   var blockers = layerOpsBlockers(context, snapshot, true, false);
+  // #610: a locked or hidden reference sibling makes move(reference, PLACEBEFORE) throw 9024 (#582 F0); refuse before any write.
+  var reference = null;
+  if (fromIndex !== params.toIndex) {
+    var others = [];
+    for (var otherIndex = 0; otherIndex < orderBefore.length; otherIndex++) if (otherIndex !== fromIndex) others.push(orderBefore[otherIndex]);
+    reference = params.toIndex < others.length ? others[params.toIndex] : null;
+  }
+  if (reference !== null && (reference.locked === true || reference.visible !== true)) blockers.push("${REFERENCE_SIBLING_BLOCKER}");
   if (forApply) {
     if (!layerOpsSameTarget(snapshot, params.expectedBefore)) throw mutationError("preflight_failed", "Layer state does not match expected_before.");
     if (!layerOpsSameOrder(orderBefore, params.expectedSiblingOrder)) throw mutationError("preflight_failed", "Sibling order does not match expected_sibling_order.");
-    if (blockers.length > 0) throw new Error("MCP_ERROR:" + stringifyJson({ code: "LAYER_APPLY_BLOCKED", reasonCodes: blockers, layerPath: params.layerPath }));
+    if (blockers.length > 0) throw new Error("MCP_ERROR:" + stringifyJson({ code: "LAYER_APPLY_BLOCKED", reasonCodes: blockers, layerPath: params.layerPath, operation: "reorder_layer", name: reference === null ? null : reference.name }));
   }
   return { context: context, document: document, container: container, target: target, fromIndex: fromIndex, snapshot: snapshot, orderBefore: orderBefore, orderAfter: orderAfter, blockers: blockers };
 }
@@ -232,7 +243,7 @@ function normalizedRequest(input) {
 export const reorderLayerToolContract = {
     name: 'illustrator_reorder_layer',
     title: 'Plan or Reorder a Layer',
-    description: 'Plan or apply moving one layer (root-relative layer_path from illustrator_list_layers) to to_index (0 = front) among its siblings in the same parent. The plan binds the layer\'s structural snapshot (name, visible, locked, printable, sublayer and direct item counts, ancestor state) and the complete sibling order, and derives the exact after order. Apply performs compare-and-set on both, moves the layer once, verifies the whole parent collection by native read-back, and on failure moves it back and proves the exact baseline order. Locked or hidden layers and locked or hidden ancestors are refused before any write; cross-parent moves are not supported.',
+    description: 'Plan or apply moving one layer (root-relative layer_path from illustrator_list_layers) to to_index (0 = front) among its siblings in the same parent. The plan binds the layer\'s structural snapshot (name, visible, locked, printable, sublayer and direct item counts, ancestor state) and the complete sibling order, and derives the exact after order. Apply performs compare-and-set on both, moves the layer once, verifies the whole parent collection by native read-back, and on failure moves it back and proves the exact baseline order. Locked or hidden layers and locked or hidden ancestors are refused before any write, and so is a destination whose reference sibling (the layer the moved layer is placed in front of) is locked or hidden (reference_sibling_locked_or_hidden; unlock or show it, or choose another to_index such as the end; nothing is unlocked for you); cross-parent moves are not supported.',
     inputSchema,
     publicInputSchema: reorderLayerPublicInputSchema,
     outputSchema: reorderLayerResponseSchema,
@@ -266,6 +277,15 @@ export function mapLayerExecutionError(error, detail) {
         return new Error('layer_path must be a root-relative index path with 1 to 64 non-negative integers.');
     if (detail?.code === 'LAYER_PATH_NOT_FOUND')
         return new Error('layer_path does not resolve to a layer in the bound document.');
+    if (detail?.code === 'LAYER_APPLY_BLOCKED' && detail.reasonCodes?.includes(REFERENCE_SIBLING_BLOCKER)) {
+        const name = detail.name ?? '';
+        if (detail.operation === REORDER_LAYER_OPERATION) {
+            return new Error(`Layer change is blocked: ${detail.reasonCodes.join(', ')}. The reference layer "${name}" is locked or hidden, so a layer cannot be moved in front of it; unlock or show it, or choose another to_index (such as the end). `
+                + `基準のレイヤー「${name}」がロックまたは非表示のため、その直前には移動できません。そのレイヤーのロック・表示を解除するか、別の位置（末尾など）を指定してください。`);
+        }
+        return new Error(`Layer change is blocked: ${detail.reasonCodes.join(', ')}. The reference layer "${name}" is locked or hidden, so a layer cannot be added in front of it; unlock or show it, or choose another position (such as the end). `
+            + `基準のレイヤー「${name}」がロックまたは非表示のため、その直前には追加できません。そのレイヤーのロック・表示を解除するか、別の位置（末尾など）を指定してください。`);
+    }
     if (detail?.code === 'LAYER_APPLY_BLOCKED')
         return new Error(`Layer change is blocked: ${(detail.reasonCodes ?? []).join(', ') || 'unknown reason'}.`);
     return error instanceof Error ? error : new Error(String(error));

@@ -143,7 +143,7 @@ function optimizeRequireWorkCopy() {
   var optimizeEntry = optimizeMatches[0].entry;
   var optimizeExpected = params.workIdentity;
   var optimizeRasterCount = optimizeMatches[0].doc.rasterItems.length;
-  if (optimizeEntry.colorSpace !== optimizeExpected.colorSpace || optimizeEntry.artboardRects !== optimizeExpected.artboardRects ||
+  if (optimizeEntry.colorSpace !== optimizeExpected.colorSpace || !exportRectsEqual(optimizeEntry.artboardRects, optimizeExpected.artboardRects) ||
       optimizeEntry.pageItems !== optimizeExpected.pageItems || optimizeRasterCount !== optimizeExpected.rasterItems) {
     throw new Error("MCP_ERROR:" + stringifyJson({ code: "OPTIMIZE_WORK_COPY_IDENTITY_MISMATCH", actual: optimizeEntry, rasterItems: optimizeRasterCount }));
   }
@@ -154,7 +154,7 @@ function optimizeWorkIdentity(doc, index) {
   return { key: optimizeIdentity.key, path: optimizeIdentity.path, saved: optimizeIdentity.saved, fileRevision: optimizeIdentity.fileRevision };
 }
 `;
-export const IMAGE_OPTIMIZE_VERSION_GUARD = HOST_VERSION_POLICY_JSX + '\nif (!hostVersionAdmitted("optimize_images", String(app.version))) throw new Error("HOST_VERSION_REFUSED: Host version changed or consent does not match.");\n';
+export const IMAGE_OPTIMIZE_VERSION_GUARD = HOST_VERSION_POLICY_JSX + '\nif (!hostVersionAdmitted("optimize_images", String(app.version))) throw new Error("HOST_VERSION_REFUSED: Host version changed.");\n';
 export const IMAGE_OPTIMIZE_READ_SOURCE_SCRIPT = `${OPTIMIZE_HELPERS}
 var optimizeSourceContext = requireDocumentForRead(params.expectedDocumentKey);
 var optimizeSourceDocument = app.activeDocument;
@@ -323,6 +323,7 @@ app.activeDocument = optimizeCloseSource.doc;
 var result = {
   closedBeforeClose: optimizeClosedBefore,
   source: getDocumentContext(),
+  documents: exportRawInventory(),
   documentCount: app.documents.length
 };
 `;
@@ -580,6 +581,7 @@ export const imageOptimizeResultSchema = z.discriminatedUnion('outcome', [
         outcome: z.literal('failed'),
         reason: imageOptimizeFailureReasonSchema,
         stage: imageOptimizeStageSchema,
+        evidenceDirectory: z.string().optional(),
         message: z.string(),
         details: z.array(z.string()),
         files: filesSchema,

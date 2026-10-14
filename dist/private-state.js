@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, realpath, rename, rmdir } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, realpath, rename, rmdir } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { noFollowDirectoryFlags, noFollowNonBlockingReadFlags, noFollowReadFlags, currentUid, currentUidForDiagnostics, } from './platform-primitives.js';
 import { validateWindowsOutputPath, windowsPathComponentRejection } from './windows/output-path.js';
-import { judgeWindowsStateRootObservation, observeWindowsStateRoot } from './windows/state-root.js';
+import { assertWindowsPathAttributes, judgeWindowsStateRootObservation, observeWindowsStateRoot } from './windows/state-root.js';
 function hasCode(error, code) {
     return typeof error === 'object' && error !== null && 'code' in error && error.code === code;
 }
@@ -38,6 +38,7 @@ export function validatePrivateOwnerAndMode(metadata, expectedMode, description)
 const attestedStateRoots = new Map();
 const attestationsInFlight = new Map();
 const attestationFailures = new Map();
+const parentSyncFailures = new Map();
 function sameIdentity(left, right) {
     return left.dev === right.dev && left.ino === right.ino;
 }
@@ -57,8 +58,10 @@ async function assertWindowsPathComponents(path) {
         throw unsafePrivateState('the path is not inside a state root attested by this process.');
     }
     await assertAttestedRootUnchanged(root, attestedStateRoots.get(root));
+    const identity = attestedStateRoots.get(root);
+    const snapshots = [{ path: root, dev: identity.dev, ino: identity.ino }];
     if (path === root)
-        return;
+        return snapshots;
     const components = path.slice(root.length + 1).split('\\');
     if (components.some((component) => windowsPathComponentRejection(component) !== null)) {
         throw unsafePrivateState('a state path component is not a plain file name.');
@@ -70,20 +73,29 @@ async function assertWindowsPathComponents(path) {
         if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
             throw unsafePrivateState('a state directory is a link or not a directory.');
         }
+        snapshots.push({ path: current, dev: metadata.dev, ino: metadata.ino });
     }
+    return snapshots;
 }
-async function openWindowsVerified(path, flags, directory) {
-    await assertWindowsPathComponents(path);
+const imageReadComponents = new WeakMap();
+async function openWindowsVerified(path, flags, directory, image = false) {
+    const components = await assertWindowsPathComponents(path);
+    if (image)
+        await assertWindowsPathAttributes(path);
     const before = await lstat(path, { bigint: true });
     if (before.isSymbolicLink())
         throw unsafePrivateState('a state entry is a link.');
     if (directory && !before.isDirectory())
         throw unsafePrivateState('a state directory is not a directory.');
+    if (image && !before.isFile())
+        throw Object.assign(new Error('Private image is not a regular file.'), { code: 'EISDIR' });
     const handle = await open(path, flags);
     try {
         const opened = await handle.stat({ bigint: true });
         if (!sameIdentity(opened, before))
             throw unsafePrivateState('a state entry changed while it was opened.');
+        if (image)
+            imageReadComponents.set(handle, components);
         return handle;
     }
     catch (error) {
@@ -98,8 +110,21 @@ export async function openPrivateDirectory(path) {
 }
 export async function openPrivateFileForRead(path, options = {}) {
     if (isWindowsPrivateState())
-        return await openWindowsVerified(path, 'r', false);
+        return await openWindowsVerified(path, 'r', false, options.imageAttributes === true);
     return await open(path, options.nonBlocking === true ? noFollowNonBlockingReadFlags() : noFollowReadFlags());
+}
+export async function assertPrivateImageReadStable(path, handle) {
+    const components = imageReadComponents.get(handle);
+    if (!components)
+        throw unsafePrivateState('no verified image handle guard exists.');
+    await assertWindowsPathComponents(path);
+    for (const component of components) {
+        const current = await lstat(component.path, { bigint: true });
+        if (current.isSymbolicLink() || !current.isDirectory() || !sameIdentity(current, component)) {
+            throw Object.assign(unsafePrivateState('an image path component changed during read.'), { code: 'IMAGE_CHANGED_DURING_READ' });
+        }
+    }
+    await assertWindowsPathAttributes(path);
 }
 export async function createPrivateFileExclusive(path, mode = 0o600) {
     if (!isWindowsPrivateState())
@@ -137,27 +162,77 @@ async function syncWindowsDirectory(path) {
     try {
         await handle.sync();
     }
-    finally {
-        await handle.close();
+    catch (error) {
+        await handle.close().catch(() => undefined);
+        throw error;
     }
+    await handle.close();
+}
+async function rollbackWindowsStateRoot(root, initIdentity) {
+    try {
+        const before = await lstat(root, { bigint: true });
+        if (before.isDirectory() && !before.isSymbolicLink() && sameIdentity(before, initIdentity) &&
+            (await readdir(root)).length === 0) {
+            const after = await lstat(root, { bigint: true });
+            if (after.isDirectory() && !after.isSymbolicLink() && sameIdentity(after, initIdentity))
+                await rmdir(root);
+        }
+    }
+    catch {
+    }
+    try {
+        await lstat(root);
+        return true;
+    }
+    catch (error) {
+        return isMissingPath(error) ? false : 'unknown';
+    }
+}
+function windowsParentSyncError(original, rootPresent, identity) {
+    const properties = typeof original === 'object' && original !== null ? original : {};
+    const diagnostic = {
+        stage: 'parent_sync',
+        code: 'code' in properties ? properties.code : undefined,
+        syscall: 'syscall' in properties ? properties.syscall : undefined,
+        rootPresent,
+    };
+    return Object.assign(new Error(`${original instanceof Error ? original.message : String(original)}; ${JSON.stringify(diagnostic)}`, { cause: original }), properties, diagnostic, { rootIdentity: { dev: identity.dev.toString(), ino: identity.ino.toString() } });
 }
 async function createWindowsStateRoot(root) {
     const init = join(dirname(root), `${basename(root)}.init-${randomUUID()}`);
     await mkdir(init);
+    let initIdentity;
     try {
         const reasons = judgeWindowsStateRootObservation(await observeWindowsStateRoot(init, 'protect'));
         if (reasons.length > 0)
             throw unsafePrivateState(`a new state root could not be protected: ${reasons.join('; ')}.`);
+        const metadata = await lstat(init, { bigint: true });
+        if (!metadata.isDirectory() || metadata.isSymbolicLink())
+            throw unsafePrivateState('the new state root init is not a plain directory.');
+        initIdentity = { dev: metadata.dev, ino: metadata.ino };
         await rename(init, root);
     }
-    catch (error) {
-        await rmdir(init);
-        if (!hasCode(error, 'EPERM') && !hasCode(error, 'EEXIST'))
-            throw error;
-        await lstat(root);
-        return;
+    catch (originalError) {
+        await rmdir(init).catch(() => undefined);
+        if (hasCode(originalError, 'EPERM') || hasCode(originalError, 'EEXIST')) {
+            try {
+                await lstat(root);
+                return;
+            }
+            catch {
+            }
+        }
+        throw originalError;
     }
-    await syncWindowsDirectory(dirname(root));
+    try {
+        await syncWindowsDirectory(dirname(root));
+    }
+    catch (originalError) {
+        const rootPresent = await rollbackWindowsStateRoot(root, initIdentity);
+        const error = windowsParentSyncError(originalError, rootPresent, initIdentity);
+        parentSyncFailures.set(root, { stage: 'parent_sync', rootIdentity: initIdentity, error });
+        throw error;
+    }
 }
 async function attestWindowsStateRoot(root, create) {
     await assertWindowsStateRootPath(root);
@@ -205,6 +280,9 @@ async function attestWindowsStateRoot(root, create) {
 const ATTESTATION_FAILURE_HOLD_MS = 30_000;
 async function ensureWindowsStateRoot(root, create) {
     for (;;) {
+        const parentSyncFailure = parentSyncFailures.get(root);
+        if (parentSyncFailure !== undefined)
+            throw parentSyncFailure.error;
         const attested = attestedStateRoots.get(root);
         if (attested !== undefined) {
             await assertAttestedRootUnchanged(root, attested);

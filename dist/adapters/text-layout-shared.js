@@ -56,40 +56,46 @@ const textLayoutAncestorSchema = z.strictObject({
     visible: z.boolean(),
     locked: z.boolean(),
 });
-export const textLayoutSnapshotInputSchema = z.strictObject({
-    uuid: z.string().min(1).max(255),
-    type: z.literal('TextFrame'),
-    kind: z.enum(['TextType.POINTTEXT', 'TextType.AREATEXT']),
-    profile: z.literal(TEXT_LAYOUT_PROFILE_NAME),
-    frameShape: z.enum(['point_text_unthreaded', 'area_text_unthreaded']),
-    storyFrameCount: z.literal(1),
-    manualKerning: z.literal('none'),
-    tabStopCount: z.literal(0),
-    orientation: textLayoutOrientationSchema,
-    paragraphJustifications: z.array(z.enum(POINT_TEXT_JUSTIFICATIONS)).min(1).max(TEXT_LAYOUT_MAX_CODE_UNITS),
-    fit: textLayoutFitSchema.nullable(),
-    characters: z.array(textLayoutCharacterSchema).min(1).max(TEXT_LAYOUT_MAX_CODE_UNITS),
-    frame: textLayoutFrameSchema,
-    layerPath: layerPathSchema,
-    layerAncestry: z.array(textLayoutAncestorSchema).min(1).max(POINT_TEXT_MAX_LAYER_DEPTH_LIMIT),
-    contents: z.string().min(1).max(TEXT_LAYOUT_MAX_CODE_UNITS),
-    locked: z.boolean(),
-    hidden: z.boolean(),
-    editable: z.boolean(),
-    layerVisible: z.boolean(),
-    layerLocked: z.boolean(),
-});
-export const textLayoutSnapshotSchema = textLayoutSnapshotInputSchema.superRefine((snapshot, context) => {
-    const point = snapshot.kind === 'TextType.POINTTEXT';
-    if (point !== (snapshot.frameShape === 'point_text_unthreaded') || point !== (snapshot.fit === null) ||
-        point !== (snapshot.frame.anchor !== null) || point === (snapshot.frame.geometricBounds !== null)) {
-        context.addIssue({ code: 'custom', message: 'A text-layout snapshot must be consistently point text or area text.' });
-    }
-    if (snapshot.characters.length !== snapshot.contents.length ||
-        snapshot.characters.some((character, index) => character.contents !== snapshot.contents.charAt(index))) {
-        context.addIssue({ code: 'custom', message: 'A text-layout snapshot must fingerprint every UTF-16 code unit of its contents.' });
-    }
-});
+export function textLayoutSnapshotSchemasFor(justifications) {
+    const input = z.strictObject({
+        uuid: z.string().min(1).max(255),
+        type: z.literal('TextFrame'),
+        kind: z.enum(['TextType.POINTTEXT', 'TextType.AREATEXT']),
+        profile: z.literal(TEXT_LAYOUT_PROFILE_NAME),
+        frameShape: z.enum(['point_text_unthreaded', 'area_text_unthreaded']),
+        storyFrameCount: z.literal(1),
+        manualKerning: z.literal('none'),
+        tabStopCount: z.literal(0),
+        orientation: textLayoutOrientationSchema,
+        paragraphJustifications: z.array(z.enum(justifications)).min(1).max(TEXT_LAYOUT_MAX_CODE_UNITS),
+        fit: textLayoutFitSchema.nullable(),
+        characters: z.array(textLayoutCharacterSchema).min(1).max(TEXT_LAYOUT_MAX_CODE_UNITS),
+        frame: textLayoutFrameSchema,
+        layerPath: layerPathSchema,
+        layerAncestry: z.array(textLayoutAncestorSchema).min(1).max(POINT_TEXT_MAX_LAYER_DEPTH_LIMIT),
+        contents: z.string().min(1).max(TEXT_LAYOUT_MAX_CODE_UNITS),
+        locked: z.boolean(),
+        hidden: z.boolean(),
+        editable: z.boolean(),
+        layerVisible: z.boolean(),
+        layerLocked: z.boolean(),
+    });
+    const snapshot = input.superRefine((value, context) => {
+        const point = value.kind === 'TextType.POINTTEXT';
+        if (point !== (value.frameShape === 'point_text_unthreaded') || point !== (value.fit === null) ||
+            point !== (value.frame.anchor !== null) || point === (value.frame.geometricBounds !== null)) {
+            context.addIssue({ code: 'custom', message: 'A text-layout snapshot must be consistently point text or area text.' });
+        }
+        if (value.characters.length !== value.contents.length ||
+            value.characters.some((character, index) => character.contents !== value.contents.charAt(index))) {
+            context.addIssue({ code: 'custom', message: 'A text-layout snapshot must fingerprint every UTF-16 code unit of its contents.' });
+        }
+    });
+    return { input, snapshot };
+}
+const defaultSnapshotSchemas = textLayoutSnapshotSchemasFor(POINT_TEXT_JUSTIFICATIONS);
+export const textLayoutSnapshotInputSchema = defaultSnapshotSchemas.input;
+export const textLayoutSnapshotSchema = defaultSnapshotSchemas.snapshot;
 export function sameCanonical(left, right) {
     return canonicalSha256(left) === canonicalSha256(right);
 }
@@ -190,7 +196,20 @@ function textLayoutCharacters(target) {
 }
 
 /** Every paragraph is checked against the pinned table; a whole-range read would report only the first. */
-function textLayoutParagraphs(target) {
+/**
+ * The paragraph alignment name, from the caller's measured set. Without a set the point-text default applies, so an
+ * operation that did not measure more keeps refusing everything but left, centre and right.
+ */
+function textLayoutJustification(value, allowed) {
+  if (!allowed) return pointTextSupportedJustification(value);
+  var name = String(value);
+  for (var index = 0; index < allowed.length; index++) {
+    if (allowed[index] === name) return name;
+  }
+  throw mutationError("preflight_failed", "Text-layout operations support only the measured paragraph alignments.");
+}
+
+function textLayoutParagraphs(target, allowedJustifications) {
   var paragraphs;
   try { paragraphs = target.paragraphs; }
   catch (paragraphsError) { throw mutationError("preflight_failed", "Target paragraphs are unavailable."); }
@@ -216,7 +235,7 @@ function textLayoutParagraphs(target) {
       throw mutationError("preflight_failed", "Target tab stops are unavailable.");
     }
     if (tabStops.length !== 0) throw mutationError("preflight_failed", "Text-layout operations do not support tab stops.");
-    justifications.push(pointTextSupportedJustification(attributes.justification));
+    justifications.push(textLayoutJustification(attributes.justification, allowedJustifications));
   }
   return justifications;
 }
@@ -283,7 +302,7 @@ function textLayoutContents(target, point) {
  * The complete snapshot. It throws only when the target is outside the profile; an area frame that
  * overflows is reported through \`fit\`, so verification and rollback can still read it.
  */
-function textLayoutSnapshot(document, target, expectedUuid) {
+function textLayoutSnapshot(document, target, expectedUuid, allowedJustifications) {
   if (!target || target.typename !== "TextFrame") {
     throw mutationError("preflight_failed", "Text-layout operations support TextFrame targets only.");
   }
@@ -329,7 +348,7 @@ function textLayoutSnapshot(document, target, expectedUuid) {
     manualKerning: "none",
     tabStopCount: 0,
     orientation: textLayoutOrientation(target),
-    paragraphJustifications: textLayoutParagraphs(target),
+    paragraphJustifications: textLayoutParagraphs(target, allowedJustifications),
     fit: fit,
     characters: characters,
     frame: textLayoutFrameState(target, point),
@@ -380,27 +399,29 @@ function textLayoutCopy(value) {
 
 /**
  * The snapshot with the fields an operation may write, and their layout consequences, blanked. Rollback
- * writes an inverse only when the current state differs from before in nothing else.
+ * writes an inverse only when the current state differs from before in nothing else. \`mask.fit\` blanks only
+ * the area fit proof (a range write such as no-break can overflow the frame); the frame is never masked by it.
  */
 function textLayoutMasked(snapshot, mask) {
   var copy = textLayoutCopy(snapshot);
   if (mask.orientation) {
     copy.orientation = null; copy.fit = null; copy.frame.anchor = null; copy.frame.matrix = null;
   }
+  if (mask.fit) copy.fit = null;
   for (var index = mask.start; index < mask.end; index++) {
     for (var field = 0; field < mask.characterFields.length; field++) copy.characters[index][mask.characterFields[field]] = null;
   }
   return copy;
 }
 
-function textLayoutResolve(forApply) {
+function textLayoutResolve(forApply, allowedJustifications) {
   var context = forApply ? requireDocument(params.expectedDocumentKey) : requireDocumentForRead(params.expectedDocumentKey);
   var document = app.activeDocument;
   var target = pointTextFind(document, params.targetUuid);
   if (target === null) {
     throw mutationError("preflight_failed", stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: params.targetUuid }));
   }
-  var before = textLayoutSnapshot(document, target, params.targetUuid);
+  var before = textLayoutSnapshot(document, target, params.targetUuid, allowedJustifications);
   var blockers = pointTextBlockers(context, before);
   if (forApply && blockers.length > 0) {
     throw mutationBeforeSideEffectError(stringifyJson({ code: "TEXT_LAYOUT_APPLY_BLOCKED",
@@ -423,11 +444,11 @@ const indeterminateFailureSchema = z.strictObject({
     reasonCode: z.literal('apply_indeterminate'),
     message: z.string().min(1).max(500),
 });
-const rollbackEvidence = {
-    targetUuid: z.string().min(1).max(255),
-    restoredSnapshot: textLayoutSnapshotSchema.nullable(),
-};
-export function textLayoutTransactionSchema(label) {
+export function textLayoutTransactionSchema(label, snapshotSchema = textLayoutSnapshotSchema) {
+    const rollbackEvidence = {
+        targetUuid: z.string().min(1).max(255),
+        restoredSnapshot: snapshotSchema.nullable(),
+    };
     return z.discriminatedUnion('state', [
         z.strictObject({ state: z.literal('planned'), audit: mutationAuditSchema }),
         z.strictObject({ state: z.literal('verified'), audit: mutationAuditSchema }),

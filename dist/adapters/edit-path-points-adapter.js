@@ -1,4 +1,3 @@
-import { hostVersionConsentSchema } from '../host-version-consent.js';
 import { hostVersionPublicFields, hostVersionInternalFields, normalizeHostVersionConsent } from '../host-version-consent.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
@@ -125,7 +124,6 @@ function normalizePublicInput(input) {
     return value.apply ? { ...common, confirmedAfter: value.confirmed_after, apply: true, commandId: value.command_id } : { ...common, apply: false };
 }
 const planSchema = z.strictObject({
-    hostVersionConsent: hostVersionConsentSchema,
     operation: z.literal(EDIT_PATH_POINTS_OPERATION),
     documentKey: documentKeySchema,
     targetUuid: uuidSchema,
@@ -208,12 +206,12 @@ export const editPathPointsResultSchema = z.union([
 ]).superRefine((result, context) => {
     if (result.transaction.state === 'planned') {
         if (result.plan.confirmationStatus !== 'required' ||
-            !sameCanonical(result.plan.applyBlockedReasonCodes, pathEditBlockers(result.document.mutationAllowed, result.document.appVersion, result.plan.before, result.plan.hostVersionConsent))) {
+            !sameCanonical(result.plan.applyBlockedReasonCodes, pathEditBlockers(result.document.mutationAllowed, result.document.appVersion, result.plan.before))) {
             context.addIssue({ code: 'custom', message: 'Planned path edit must expose exact blockers.' });
         }
     }
     else if (result.plan.confirmationStatus !== 'confirmed' || result.plan.applyBlockedReasonCodes.length !== 0 || !result.plan.applyAllowed ||
-        pathEditBlockers(true, result.document.appVersion, result.plan.before, result.plan.hostVersionConsent).length !== 0) {
+        pathEditBlockers(true, result.document.appVersion, result.plan.before).length !== 0) {
         context.addIssue({ code: 'custom', message: 'Applied path edit attempt must derive from an allowed confirmed plan.' });
     }
     if (result.applied) {
@@ -377,8 +375,6 @@ function pathEditPlan(preflight) {
   var plan = { operation: "edit_path_points", documentKey: preflight.context.key, targetUuid: params.targetUuid, edit: params.edit,
     before: preflight.before, after: preflight.after, applyBlockedReasonCodes: preflight.blockers,
     confirmationStatus: params.apply === true ? "confirmed" : "required", applyAllowed: params.apply === true && preflight.blockers.length === 0 };
-  var consent = hostVersionConsent(params);
-  if (consent !== null) plan.hostVersionConsent = consent;
   return plan;
 }
 
@@ -484,7 +480,7 @@ function normalizedRequest(input) {
 export const editPathPointsToolContract = {
     name: 'illustrator_edit_path_points',
     title: 'Plan or Edit Path Points',
-    description: `Plan or apply one measured point edit to one PathItem bound by document key, native UUID, and expected_path (the closed flag and every point from illustrator_get_path_points; 0.01 pt tolerance). edit.kind is move_anchor, set_left_direction, or set_right_direction (corner points only), append_point (adds a corner point at the end), remove_point (at least ${PATH_EDIT_MIN_POINTS} points remain), or set_closed. Coordinates are points in Illustrator document coordinates, the same space as geometricBounds. The plan returns the full before and after path and blockers (locked or hidden target or layer; unmeasured Illustrator version — only ${describeHostVersionScope('edit_path_points')}). Apply echoes plan.after.path as confirmed_after, requires the unlocked foreground host, verifies the whole path by native read-back, and on failure restores the exact before path with the measured inverse. Group members, CompoundPathItem members, clipping paths, guides, and paths with more than ${PATH_EDIT_MAX_POINTS} points are refused. Changing a point type is not offered: on the measured host a SMOOTH write reads back SMOOTH in the same call but CORNER in the next call.`,
+    description: `Plan or apply one measured point edit to one PathItem bound by document key, native UUID, and expected_path (the closed flag and every point from illustrator_get_path_points; 0.01 pt tolerance). edit.kind is move_anchor, set_left_direction, or set_right_direction (corner points only), append_point (adds a corner point at the end), remove_point (at least ${PATH_EDIT_MIN_POINTS} points remain), or set_closed. Coordinates are points in Illustrator document coordinates, the same space as geometricBounds. The plan returns the full before and after path and blockers (locked or hidden target or layer; blocked or unreadable Illustrator version; measured on ${describeHostVersionScope('edit_path_points')}). Apply echoes plan.after.path as confirmed_after, requires the unlocked foreground host, verifies the whole path by native read-back, and on failure restores the exact before path with the measured inverse. Group members, CompoundPathItem members, clipping paths, guides, and paths with more than ${PATH_EDIT_MAX_POINTS} points are refused. Changing a point type is not offered: on the measured host a SMOOTH write reads back SMOOTH in the same call but CORNER in the next call.`,
     inputSchema,
     publicInputSchema: editPathPointsPublicInputSchema,
     outputSchema: editPathPointsResponseSchema,

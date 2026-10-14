@@ -1,3 +1,4 @@
+import { PREFLIGHT_SCOPE_NOTE } from './preflight-scope-note.js';
 export const DESIGN_ANALYSIS_LIMITS = {
     textFrameDetailReads: 200,
     lineHeightLines: 100,
@@ -130,6 +131,9 @@ export function createDesignTokens(input) {
     let unavailableAttributes = 0;
     let textFrames = 0;
     let textFramesDetailed = 0;
+    let textFramesUnreadable = 0;
+    const unreadableTextFrames = input.unreadableTextFrames ?? [];
+    const unreadableUuids = new Set(unreadableTextFrames.map((frame) => frame.uuid));
     const lineHeights = [];
     const lineHeight = (uuid) => {
         const unavailable = (reason) => ({ textFrameUuid: uuid, status: 'unavailable', reason,
@@ -250,6 +254,8 @@ export function createDesignTokens(input) {
             const details = textDetails.get(item.uuid);
             if (details === undefined) {
                 addItemAppearance(item, true);
+                if (unreadableUuids.has(item.uuid))
+                    textFramesUnreadable += 1;
                 continue;
             }
             textFramesDetailed += 1;
@@ -264,8 +270,10 @@ export function createDesignTokens(input) {
         }
         addItemAppearance(item, false);
     }
-    if (textFrames > textFramesDetailed)
+    if (textFrames > textFramesDetailed + textFramesUnreadable)
         incomplete.add('text_frame_detail_limit');
+    if (unreadableTextFrames.length > 0)
+        incomplete.add('text_frame_unreadable');
     if (unavailableAttributes > 0)
         incomplete.add('attribute_unavailable');
     const swatchNamesByKey = new Map();
@@ -339,6 +347,7 @@ export function createDesignTokens(input) {
             swatches: swatches.swatchCount,
             unavailableAttributes,
         },
+        unreadableTextFrames: unreadableTextFrames.map((frame) => ({ uuid: frame.uuid, name: frame.name, attributes: [...frame.attributes] })),
         complete: incomplete.size === 0,
         incompleteReasons: [...incomplete].sort(compareStrings),
         limitations,
@@ -464,12 +473,15 @@ export function checkTextConsistency(snapshot) {
     const variants = new Map();
     let textFrames = 0;
     let scannedTextFrames = 0;
+    const unreadableTextFrames = [];
     for (const item of snapshot.items) {
         if (item.type !== 'TextFrame')
             continue;
         textFrames += 1;
         if (item.text === null || item.text.status !== 'available') {
             incomplete.add('text_unavailable');
+            if (unreadableTextFrames.length < DESIGN_ANALYSIS_LIMITS.textFrameDetailReads)
+                unreadableTextFrames.push({ uuid: item.uuid, name: item.name });
             continue;
         }
         scannedTextFrames += 1;
@@ -567,10 +579,12 @@ export function checkTextConsistency(snapshot) {
         incomplete.add('findings_truncated');
     return {
         document: snapshot.document,
+        scopeNote: PREFLIGHT_SCOPE_NOTE,
         textFrames,
         scannedTextFrames,
         findings: findings.slice(0, DESIGN_ANALYSIS_LIMITS.findings),
         findingCount,
+        unreadableTextFrames,
         complete: incomplete.size === 0,
         incompleteReasons: [...incomplete].sort(compareStrings),
     };

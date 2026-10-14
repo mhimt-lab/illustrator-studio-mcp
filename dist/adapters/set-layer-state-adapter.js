@@ -274,7 +274,7 @@ function normalizedRequest(input) {
 export const setLayerStateToolContract = {
     name: 'illustrator_set_layer_state',
     title: 'Plan or Set Layer Name and Flags',
-    description: 'Plan or apply a rename and/or visible / locked / printable changes on one layer (root-relative layer_path from illustrator_list_layers). The plan binds the layer\'s structural snapshot and the complete sibling order, lists the keys that actually change, and derives the exact after state. Apply performs compare-and-set on both, writes one property per changed key, verifies the layer and its whole parent collection by native read-back (names must read back exactly), and on failure writes the before values back and proves the exact baseline. A locked or hidden ancestor is refused before any write; the layer\'s own lock or visibility does not block (unlocking or showing a layer is a supported change). Names must be 1-255 characters without leading/trailing whitespace or control characters.',
+    description: 'Plan/apply name/visible/locked/printable on layer_path. CAS binds structure and full sibling order; native verify and inverse require exact baseline. Hidden/locked ancestors refuse; own flags may change. Names: 1-255, unpadded, no controls.',
     inputSchema,
     publicInputSchema: setLayerStatePublicInputSchema,
     outputSchema: setLayerStateResponseSchema,

@@ -2,6 +2,7 @@
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { createRequire } from 'node:module';
 import { defaultStateRoot, FileCommandStore } from './command-store.js';
+import { ReleaseBarrierStore } from './release-barrier.js';
 import { CursorSigner } from './cursor.js';
 import { IllustratorOperationsCore } from './illustrator-operations-core.js';
 import { OsascriptBridge } from './osascript-bridge.js';
@@ -12,12 +13,15 @@ import { DocumentBackupStore } from './document-backup.js';
 import { DocumentExportStore } from './document-export.js';
 import { RecipeStore } from './recipe-store.js';
 import { SipsImageFileInspector } from './image-file-inspector.js';
-import { expectedIllustratorBundleId, OsascriptHostProfileProbe } from './host-profile.js';
+import { expectedIllustratorBundleId, OsascriptHostApplicationActivator, OsascriptHostProfileProbe } from './host-profile.js';
 import { doctorExitCode, formatDoctorReport, runDoctor } from './doctor.js';
 import { HTTP_ENV, resolveStreamableHttpConfig, startStreamableHttpServer } from './http-transport.js';
 import { StdioProtocolVersionGate } from './stdio-version-gate.js';
 import { CallTimingTransport, callTimingEnabled } from './call-timing.js';
 import { resolveIllustratorApplication, STABLE_ILLUSTRATOR_APPLICATION } from './illustrator-application.js';
+import { buildWindowsReadOperations } from './windows/read-operations.js';
+import { parseWindowsCandidateMutations, WINDOWS_CANDIDATE_MUTATIONS_ENV } from './windows/mutation-publication.js';
+import { formatSetupCommand, SETUP_USAGE } from './setup-command.js';
 async function runDoctorCommand(args) {
     const unknown = args.filter((argument) => argument !== '--json');
     if (unknown.length > 0)
@@ -28,15 +32,23 @@ async function runDoctorCommand(args) {
 }
 const packageVersion = createRequire(import.meta.url)('../package.json').version;
 const USAGE = [
-    'Usage: illustrator-studio-mcp [http | doctor [--json] | --version | --help]',
+    `Usage: illustrator-studio-mcp [http | doctor [--json] | ${SETUP_USAGE} | --version | --help]`,
     '',
     'Starts the Illustrator Studio MCP server on stdio. No API key is required.',
     '"http" serves the same tools over stateless Streamable HTTP on 127.0.0.1 only;',
     `  it requires ${HTTP_ENV.token} (>= 32 chars) and reads ${HTTP_ENV.port},`,
     `  ${HTTP_ENV.allowedOrigins}. See docs/setup.md.`,
     '"doctor [--json]" prints environment diagnostics without starting the server.',
-    `Optional environment: ILLUSTRATOR_APPLICATION (default "${STABLE_ILLUSTRATOR_APPLICATION}"; a LaunchServices`,
-    '  name is refused while stable and Beta run together), ILLUSTRATOR_STUDIO_MCP_STATE_DIR.',
+    '"setup" prints exact-version client commands without reading or changing settings or contacting Illustrator.',
+    ...(process.platform === 'win32' ? [
+        'Windows: read tools only; mutations not available on Windows yet.',
+        `Opt-in candidate (live P0 pending, not published by default): ${WINDOWS_CANDIDATE_MUTATIONS_ENV}=create_rectangle.`,
+        'Illustrator must already be running alone. ILLUSTRATOR_APPLICATION must be Illustrator.Application.',
+        'Optional environment: ILLUSTRATOR_STUDIO_MCP_STATE_DIR (attested private local NTFS directory).',
+    ] : [
+        `Optional environment: ILLUSTRATOR_APPLICATION (default "${STABLE_ILLUSTRATOR_APPLICATION}"; a LaunchServices`,
+        '  name is refused while stable and Beta run together), ILLUSTRATOR_STUDIO_MCP_STATE_DIR.',
+    ]),
 ].join('\n');
 function handleCliFlags(argv) {
     if (argv.length === 0)
@@ -52,23 +64,29 @@ function handleCliFlags(argv) {
     throw new Error(`Unknown arguments: ${argv.join(' ')}\n${USAGE}`);
 }
 function buildOperations() {
+    if (process.platform === 'win32') {
+        const publication = parseWindowsCandidateMutations(process.env);
+        return { ...buildWindowsReadOperations(undefined, publication), windowsMutationTools: publication.tools };
+    }
     const stateRoot = defaultStateRoot();
     const mutationAdapters = defaultMutationOperationRegistry();
     const application = resolveIllustratorApplication({ env: process.env.ILLUSTRATOR_APPLICATION });
     for (const warning of application.warnings)
         process.stderr.write(`illustrator-studio-mcp: warning: ${warning}\n`);
-    const bridge = new OsascriptBridge(application.application, new FileCommandStore(stateRoot, { registry: mutationAdapters }), undefined, mutationAdapters);
-    const operations = new IllustratorOperationsCore(bridge, new CursorSigner(stateRoot), mutationAdapters, new M6P0RecipeAuthorityStore(stateRoot), new SipsImageFileInspector(), new DocumentBackupStore(stateRoot), new RecipeStore(stateRoot), new DocumentExportStore(stateRoot), new OsascriptHostProfileProbe(expectedIllustratorBundleId(application.application)));
+    const commandStore = new FileCommandStore(stateRoot, { registry: mutationAdapters });
+    const barrierStore = new ReleaseBarrierStore(stateRoot, { legacySources: () => bridge.legacyBarrierSources() });
+    const bridge = new OsascriptBridge(application.application, commandStore, undefined, mutationAdapters, undefined, undefined, { barrierStore });
+    const operations = new IllustratorOperationsCore(bridge, new CursorSigner(stateRoot), mutationAdapters, new M6P0RecipeAuthorityStore(stateRoot), new SipsImageFileInspector(), new DocumentBackupStore(stateRoot), new RecipeStore(stateRoot), new DocumentExportStore(stateRoot), new OsascriptHostProfileProbe(expectedIllustratorBundleId(application.application)), undefined, undefined, undefined, undefined, undefined, undefined, undefined, new OsascriptHostApplicationActivator(expectedIllustratorBundleId(application.application)));
     return { operations, mutationAdapters };
 }
 async function runHttpCommand(args) {
     if (args.length > 0)
         throw new Error(`Unknown http option: ${args.join(' ')}. Usage: illustrator-studio-mcp http`);
     const config = resolveStreamableHttpConfig(process.env);
-    const { operations, mutationAdapters } = buildOperations();
+    const { operations, mutationAdapters, windowsMutationTools } = buildOperations();
     const server = await startStreamableHttpServer({
         config,
-        createMcpServer: () => createServer(operations, mutationAdapters),
+        createMcpServer: () => createServer(operations, mutationAdapters, { windowsReadOnly: process.platform === 'win32', ...(windowsMutationTools ? { windowsMutationTools } : {}) }),
         onRejected: (rejection) => {
             process.stderr.write(`illustrator-studio-mcp: http request rejected status=${rejection.status} reason=${rejection.reason}\n`);
         },
@@ -89,21 +107,25 @@ async function runHttpCommand(args) {
 }
 async function main() {
     const [subcommand, ...rest] = process.argv.slice(2);
+    if (subcommand === 'setup') {
+        process.stdout.write(formatSetupCommand(packageVersion, rest));
+        return;
+    }
     if (subcommand === 'doctor') {
         await runDoctorCommand(rest);
         return;
     }
     if (subcommand !== 'http' && handleCliFlags(process.argv.slice(2)))
         return;
-    if (process.platform !== 'darwin') {
-        throw new Error('The initial bridge supports macOS only.');
+    if (process.platform !== 'darwin' && process.platform !== 'win32') {
+        throw new Error('The bridge supports macOS and Windows (read-only).');
     }
     if (subcommand === 'http') {
         await runHttpCommand(rest);
         return;
     }
-    const { operations, mutationAdapters } = buildOperations();
-    serveStdio(() => createServer(operations, mutationAdapters), {
+    const { operations, mutationAdapters, windowsMutationTools } = buildOperations();
+    serveStdio(() => createServer(operations, mutationAdapters, { windowsReadOnly: process.platform === 'win32', ...(windowsMutationTools ? { windowsMutationTools } : {}) }), {
         transport: callTimingEnabled()
             ? new CallTimingTransport(new StdioProtocolVersionGate(new StdioServerTransport()))
             : new StdioProtocolVersionGate(new StdioServerTransport()),

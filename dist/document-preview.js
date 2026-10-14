@@ -4,10 +4,11 @@ import { dirname } from 'node:path';
 import { z } from 'zod';
 import { createStagingDirectory } from './document-export.js';
 import { DocumentMismatchError, IndeterminateExecutionError } from './domain.js';
+import { ARTBOARD_INTEGER_TOLERANCE } from './artboard-integer.js';
 import { HOST_VERSION_POLICY_JSX } from './host-version-policy.js';
 import { documentContextSchema } from './mutation-result-schema-core.js';
 import { ensurePrivateDirectory, ensurePrivateStateRoot, isWindowsPrivateState } from './private-state.js';
-import { decodePng, inspectSupportedPng, readStableImage, VISUAL_DIFF_MAX_FILE_BYTES } from './visual-diff.js';
+import { decodePng, inspectSupportedPng, privatePreviewReadGate, readStableImage, VISUAL_DIFF_MAX_FILE_BYTES } from './visual-diff.js';
 export const PREVIEW_RESOLUTION_PPI = 72;
 export const PREVIEW_MAX_SIDE_PT = 2048;
 export const PREVIEW_HOST_TIMEOUT_MS = 60_000;
@@ -45,6 +46,7 @@ export const previewResultSchema = z.strictObject({
         antiAliasing: z.literal(true),
         transparentBackground: z.literal(true),
     }),
+    focus: z.strictObject({ activated: z.boolean(), previousFrontmost: z.string() }),
     verification: z.strictObject({
         savedBefore: z.literal(false),
         savedAfter: z.literal(false),
@@ -102,8 +104,9 @@ var previewClip = [params.bounds[0], params.bounds[1], params.bounds[2], params.
 var previewArtboard = -1;
 for (var previewIndex = 0; previewIndex < previewDocument.artboards.length; previewIndex++) {
   var previewRect = previewDocument.artboards[previewIndex].artboardRect;
-  if (previewClip[0] >= previewRect[0] && previewClip[1] <= previewRect[1] &&
-      previewClip[2] <= previewRect[2] && previewClip[3] >= previewRect[3]) { previewArtboard = previewIndex; break; }
+  // A clip on the artboard edge within the integer tolerance is on it (an artboard edge carries host float noise).
+  if (previewClip[0] >= previewRect[0] - ${ARTBOARD_INTEGER_TOLERANCE} && previewClip[1] <= previewRect[1] + ${ARTBOARD_INTEGER_TOLERANCE} &&
+      previewClip[2] <= previewRect[2] + ${ARTBOARD_INTEGER_TOLERANCE} && previewClip[3] >= previewRect[3] - ${ARTBOARD_INTEGER_TOLERANCE}) { previewArtboard = previewIndex; break; }
 }
 if (previewArtboard < 0) previewReject("PREVIEW_RANGE_OUTSIDE_ARTBOARD", "The range must lie entirely inside one artboard.");
 var previewFile = new File(params.outputPath);
@@ -173,13 +176,47 @@ async function removeStaging(directory, file) {
         return false;
     }
 }
+function profileRefusal(observation, hint) {
+    const detail = `(${describeProfile(observation)}); nothing was captured.`;
+    if (observation.profile === 'locked') {
+        return new PreviewRejectedError('PREVIEW_SCREEN_LOCKED', `The screen is locked. Unlock it (this tool never unlocks or activates while locked) ${detail}`);
+    }
+    if (observation.profile === 'unknown') {
+        return new PreviewRejectedError('PREVIEW_HOST_PROFILE_UNKNOWN', `The screen lock state or the frontmost application could not be determined, so nothing was changed ${detail}`);
+    }
+    return new PreviewRejectedError('PREVIEW_ILLUSTRATOR_NOT_FRONTMOST', `Illustrator is not frontmost. ${hint} ${detail}`);
+}
 export async function capturePreview(deps, input) {
     const bounds = previewBoundsSchema.parse(input.bounds);
     const width = (bounds[2] - bounds[0]) * PREVIEW_RESOLUTION_PPI / 72;
     const height = (bounds[1] - bounds[3]) * PREVIEW_RESOLUTION_PPI / 72;
-    const profileBefore = await deps.hostProfileProbe.observe();
+    const activateIfNeeded = input.activateIfNeeded === true;
+    let profileBefore = await deps.hostProfileProbe.observe();
+    const previousFrontmost = profileBefore.frontmostBundleId ?? 'unknown';
+    let activated = false;
     if (profileBefore.profile !== 'foreground') {
-        throw new PreviewRejectedError('PREVIEW_UNSUPPORTED_HOST_PROFILE', `Preview is supported only with the screen unlocked and Illustrator frontmost (${describeProfile(profileBefore)}); nothing was captured.`);
+        const hint = 'Retry with activate_if_needed=true to let this call bring the configured Illustrator application to the front. ' +
+            'That changes only application focus; it does not select another document or save the document.';
+        if (profileBefore.profile !== 'background' || !activateIfNeeded)
+            throw profileRefusal(profileBefore, hint);
+        const activator = deps.activator ?? null;
+        if (activator === null) {
+            throw new PreviewRejectedError('PREVIEW_ACTIVATION_UNSUPPORTED', 'activate_if_needed is not available on this platform; bring Illustrator to the front yourself. Nothing was captured.');
+        }
+        try {
+            await activator.activateExpectedApplication();
+        }
+        catch (error) {
+            throw new PreviewRejectedError('PREVIEW_ACTIVATION_FAILED', `Activating Illustrator failed: ${error instanceof Error ? error.message : String(error)}. Nothing was captured.`);
+        }
+        activated = true;
+        profileBefore = await deps.hostProfileProbe.observe();
+        if (profileBefore.profile !== 'foreground') {
+            if (profileBefore.profile === 'background') {
+                throw new PreviewRejectedError('PREVIEW_ACTIVATION_FAILED', `Illustrator was asked to come to the front but is still not frontmost (${describeProfile(profileBefore)}); nothing was captured.`);
+            }
+            throw profileRefusal(profileBefore, '');
+        }
     }
     let staging;
     try {
@@ -193,6 +230,7 @@ export async function capturePreview(deps, input) {
     }
     const stagedPath = staging.stagedPath;
     let host;
+    let privateSource;
     try {
         host = (await deps.bridge.execute({
             kind: 'read',
@@ -205,6 +243,7 @@ export async function capturePreview(deps, input) {
                 savedRefusalMessage: SAVED_REFUSAL_MESSAGE,
             },
             timeoutMs: PREVIEW_HOST_TIMEOUT_MS,
+            ...(isWindowsPrivateState() ? { hostGate: privatePreviewReadGate(stagedPath, (data) => { const capture = data; return capture.captureError === null && capture.outputExists; }, (source) => { privateSource = source; }) } : {}),
         })).data;
     }
     catch (error) {
@@ -238,7 +277,9 @@ export async function capturePreview(deps, input) {
         }
         let source;
         try {
-            source = await readStableImage(stagedPath, 'preview');
+            if (isWindowsPrivateState() && privateSource === undefined)
+                throw new Error('Bridge did not verify private preview readback under its lock.');
+            source = isWindowsPrivateState() ? privateSource : await readStableImage(stagedPath, 'preview');
             const dimensions = inspectSupportedPng(source.bytes, 'preview');
             if (dimensions.width !== width || dimensions.height !== height) {
                 throw new Error(`the capture is ${dimensions.width}x${dimensions.height} px, expected ${width}x${height} px`);
@@ -275,6 +316,7 @@ export async function capturePreview(deps, input) {
                 hostProfileBefore: profileBefore.profile,
                 hostProfileAfter: profileAfter.profile,
             },
+            focus: { activated, previousFrontmost },
             timing: { hostCaptureMs: Math.max(0, Math.round(host.captureMs)) },
             staging: { removed },
             evidenceClass: 'host_rendered_range_capture',

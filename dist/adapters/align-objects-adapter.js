@@ -5,19 +5,37 @@ import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
-import { snapshotsWithinTolerance, TRANSFORM_BOUNDS_TOLERANCE_PT, TRANSFORM_OBJECT_MODULE_SCRIPT, transformPathSnapshotSchema as transformObjectSnapshotSchema, } from './transform-object-adapter.js';
+import { snapshotsWithinTolerance, TRANSFORM_BOUNDS_TOLERANCE_PT, TRANSFORM_OBJECT_MODULE_SCRIPT, transformPathSnapshotSchema, } from './transform-object-adapter.js';
+import { TRANSFORM_TEXT_MAX_CHARACTERS, TRANSFORM_TEXT_MAX_EVIDENCE_UNITS, TRANSFORM_TEXT_SCRIPT, translateTextFrame } from './transform-text-snapshot.js';
 export const ALIGN_OBJECTS_OPERATION = 'align_objects';
 export const ALIGN_OBJECTS_VALIDATOR = { kind: ALIGN_OBJECTS_OPERATION, version: 1 };
 export const ALIGN_MIN_TARGETS = 2;
 export const ALIGN_MIN_DISTRIBUTE_TARGETS = 3;
 export const ALIGN_MAX_TARGETS = 16;
 export const ALIGN_PRECISION_DIGITS = 6;
+export const ALIGN_GAP_CALC_TOLERANCE_PT = 1e-6;
+export const ALIGN_GAP_VERIFY_TOLERANCE_PT = 2 * TRANSFORM_BOUNDS_TOLERANCE_PT;
 const CANONICAL_VERSION = 2;
-const RESULT_SCHEMA_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 3;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
 const uuidSchema = z.string().min(1).max(255);
+const pointSchema = z.tuple([z.number().finite(), z.number().finite()]);
+const alignTextFrameSchema = z.strictObject({
+    kind: z.literal('point'), orientation: z.literal('horizontal'),
+    characterCount: z.number().int().min(1).max(TRANSFORM_TEXT_MAX_CHARACTERS),
+    anchor: pointSchema, matrixTranslation: pointSchema,
+    attributes: z.string().min(2).max(TRANSFORM_TEXT_MAX_EVIDENCE_UNITS),
+});
+const transformObjectSnapshotSchema = transformPathSnapshotSchema.omit({ nestedGroup: true }).extend({
+    type: z.enum(['PathItem', 'TextFrame']),
+    textFrame: alignTextFrameSchema.optional(),
+}).superRefine((snapshot, context) => {
+    if (snapshot.type === 'TextFrame' ? snapshot.textFrame === undefined || snapshot.pathGeometry !== null || snapshot.stroke !== null : snapshot.textFrame !== undefined) {
+        context.addIssue({ code: 'custom', message: 'Only TextFrame snapshots carry text evidence, and they require it.' });
+    }
+});
 const documentKeySchema = z.string().min(1).max(16_384);
 export const ALIGN_AXES = ['left', 'center_x', 'right', 'top', 'center_y', 'bottom'];
 export const DISTRIBUTE_AXES = ['x', 'y'];
@@ -53,7 +71,7 @@ const alignLayoutSchema = z.strictObject({
         context.addIssue({ code: 'custom', message: 'Aligning to the first target takes no artboard index.' });
     }
 });
-const distributeLayoutSchema = z.strictObject({ kind: z.literal('distribute'), axis: z.enum(DISTRIBUTE_AXES) });
+const distributeLayoutSchema = z.strictObject({ kind: z.literal('distribute'), axis: z.enum(DISTRIBUTE_AXES), spacing: z.literal('gaps').optional() });
 export const alignLayoutUnionSchema = z.discriminatedUnion('kind', [alignLayoutSchema, distributeLayoutSchema]);
 function refineTargets(targets, layout, context) {
     const uuids = targets.map((target) => target.targetUuid);
@@ -87,14 +105,15 @@ const publicAlignLayoutSchema = z.strictObject({
         context.addIssue({ code: 'custom', message: 'Aligning to the first target takes no artboard index.' });
     }
 });
-const publicLayoutSchema = z.discriminatedUnion('kind', [publicAlignLayoutSchema, distributeLayoutSchema]);
+const publicDistributeLayoutSchema = z.strictObject({ kind: z.literal('distribute'), axis: z.enum(DISTRIBUTE_AXES), spacing: z.enum(['centers', 'gaps']).optional() });
+const publicLayoutSchema = z.discriminatedUnion('kind', [publicAlignLayoutSchema, publicDistributeLayoutSchema]);
 const publicPlanTargetSchema = z.strictObject({ target_uuid: uuidSchema });
 const publicApplyTargetSchema = z.strictObject({
     target_uuid: uuidSchema, expected_before: transformObjectSnapshotSchema, confirmed_after: transformObjectSnapshotSchema,
 });
 function normalizeLayout(layout) {
     if (layout.kind === 'distribute')
-        return layout;
+        return layout.spacing === 'gaps' ? { kind: 'distribute', axis: layout.axis, spacing: 'gaps' } : { kind: 'distribute', axis: layout.axis };
     return { kind: 'align', axis: layout.axis, reference: layout.reference,
         ...(layout.artboard_index === undefined ? {} : { artboardIndex: layout.artboard_index }) };
 }
@@ -110,7 +129,7 @@ export const alignObjectsPublicInputSchema = z.discriminatedUnion('apply', [
 const inputSchema = z.strictObject({
     expected_document_key: documentKeySchema,
     layout: z.strictObject({ kind: z.enum(['align', 'distribute']), axis: z.string().min(1).max(16),
-        reference: z.enum(['first', 'artboard']).optional(), artboard_index: z.number().int().safe().nonnegative().optional() }),
+        reference: z.enum(['first', 'artboard']).optional(), spacing: z.enum(['centers', 'gaps']).optional(), artboard_index: z.number().int().safe().nonnegative().optional() }),
     targets: z.array(z.strictObject({ target_uuid: uuidSchema, expected_before: transformObjectSnapshotSchema.optional(),
         confirmed_after: transformObjectSnapshotSchema.optional() })).min(ALIGN_MIN_TARGETS).max(ALIGN_MAX_TARGETS),
     apply: z.boolean().default(false),
@@ -145,7 +164,39 @@ function normalizePublicInput(input) {
     }
     return { expectedDocumentKey: value.expected_document_key, layout, targets: value.targets.map((target) => ({ targetUuid: target.target_uuid })), apply: false };
 }
-export function deriveAlignDeltas(layout, befores, artboardBounds) {
+export function deriveGapDistribution(axis, befores) {
+    const horizontal = axis === 'x';
+    const rows = befores.map((before, index) => {
+        const bounds = before.geometricBounds;
+        const start = horizontal ? bounds[0] : -bounds[1];
+        const end = horizontal ? bounds[2] : -bounds[3];
+        return { index, uuid: before.uuid, start, end, size: end - start };
+    }).sort((left, right) => left.start - right.start || left.index - right.index);
+    const first = rows[0];
+    const last = rows[rows.length - 1];
+    const outerSpan = last.end - first.start;
+    let sizeSum = 0;
+    for (const row of rows)
+        sizeSum += row.size;
+    const rawGap = (outerSpan - sizeSum) / (rows.length - 1);
+    if (rawGap < -ALIGN_GAP_CALC_TOLERANCE_PT) {
+        throw new Error(`negative_gap: the targets are wider than the span between the fixed outer targets by ${round(-rawGap)} pt.`);
+    }
+    const gap = rawGap < 0 ? 0 : rawGap;
+    const deltas = befores.map(() => ({ deltaX: 0, deltaY: 0 }));
+    let cursor = first.end;
+    for (let position = 1; position < rows.length; position += 1) {
+        const row = rows[position];
+        const start = cursor + gap;
+        cursor = start + row.size;
+        if (position === rows.length - 1)
+            continue;
+        const delta = round(horizontal ? start - row.start : -(start - row.start));
+        deltas[row.index] = horizontal ? { deltaX: delta, deltaY: 0 } : { deltaX: 0, deltaY: delta };
+    }
+    return { deltas, distribution: { order: rows.map((row) => row.uuid), gap: round(gap) } };
+}
+export function deriveAlignPlan(layout, befores, artboardBounds) {
     if (layout.kind === 'align') {
         const horizontal = isHorizontal(layout.axis);
         let reference;
@@ -156,11 +207,13 @@ export function deriveAlignDeltas(layout, befores, artboardBounds) {
                 throw new Error('Aligning to the artboard needs artboard bounds.');
             reference = boundsEdge(artboardBounds, layout.axis);
         }
-        return befores.map((before) => {
-            const delta = round(reference - boundsEdge(before.geometricBounds, layout.axis));
-            return horizontal ? { deltaX: delta, deltaY: 0 } : { deltaX: 0, deltaY: delta };
-        });
+        return { distribution: null, deltas: befores.map((before) => {
+                const delta = round(reference - boundsEdge(before.geometricBounds, layout.axis));
+                return horizontal ? { deltaX: delta, deltaY: 0 } : { deltaX: 0, deltaY: delta };
+            }) };
     }
+    if (layout.spacing === 'gaps')
+        return deriveGapDistribution(layout.axis, befores);
     const axis = layout.axis === 'x' ? 'center_x' : 'center_y';
     const order = befores.map((before, index) => ({ index, centre: boundsEdge(before.geometricBounds, axis) }))
         .sort((left, right) => left.centre - right.centre || left.index - right.index);
@@ -172,12 +225,40 @@ export function deriveAlignDeltas(layout, befores, artboardBounds) {
         const delta = position === 0 || position === order.length - 1 ? 0 : round(first + step * position - entry.centre);
         deltas[entry.index] = layout.axis === 'x' ? { deltaX: delta, deltaY: 0 } : { deltaX: 0, deltaY: delta };
     });
-    return deltas;
+    return { deltas, distribution: null };
+}
+export function deriveAlignDeltas(layout, befores, artboardBounds) {
+    return deriveAlignPlan(layout, befores, artboardBounds).deltas;
+}
+function inAlignProfile(snapshot) {
+    return snapshot.pathGeometry === null && snapshot.stroke === null;
+}
+export function verifyAlignGaps(axis, distribution, befores, afters) {
+    const horizontal = axis === 'x';
+    const index = new Map(befores.map((before, position) => [before.uuid, position]));
+    const slots = distribution.order.map((uuid) => index.get(uuid));
+    if (slots.some((slot) => slot === undefined) || new Set(slots).size !== befores.length)
+        return false;
+    const edge = (snapshot) => horizontal ? { start: snapshot.geometricBounds[0], end: snapshot.geometricBounds[2] }
+        : { start: -snapshot.geometricBounds[1], end: -snapshot.geometricBounds[3] };
+    const ordered = slots.map((slot) => afters[slot]);
+    for (const position of [0, ordered.length - 1]) {
+        const fixed = befores[slots[position]];
+        if (ordered[position].geometricBounds.some((value, boundsIndex) => Math.abs(value - fixed.geometricBounds[boundsIndex]) > TRANSFORM_BOUNDS_TOLERANCE_PT))
+            return false;
+    }
+    for (let position = 1; position < ordered.length; position += 1) {
+        const actual = edge(ordered[position]).start - edge(ordered[position - 1]).end;
+        if (actual < -ALIGN_GAP_VERIFY_TOLERANCE_PT || Math.abs(actual - distribution.gap) > ALIGN_GAP_VERIFY_TOLERANCE_PT)
+            return false;
+    }
+    return true;
 }
 function translatedSnapshot(before, deltaX, deltaY) {
-    return { ...before,
+    const moved = { ...before,
         geometricBounds: [before.geometricBounds[0] + deltaX, before.geometricBounds[1] + deltaY, before.geometricBounds[2] + deltaX, before.geometricBounds[3] + deltaY],
         position: [before.position[0] + deltaX, before.position[1] + deltaY] };
+    return before.textFrame === undefined ? moved : { ...moved, textFrame: translateTextFrame(before.textFrame, deltaX, deltaY) };
 }
 const blockerSchema = z.enum(['document_mutation_not_allowed', 'target_locked', 'target_hidden', 'target_not_editable', 'layer_hidden', 'layer_locked',
     'ancestor_hidden', 'ancestor_locked']);
@@ -218,12 +299,14 @@ const planTargetSchema = z.strictObject({
     applyBlockedReasonCodes: z.array(blockerSchema),
 });
 const boundsSchema = z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]);
+const gapEvidenceSchema = z.strictObject({ order: z.array(uuidSchema).max(ALIGN_MAX_TARGETS), gap: z.number().finite() });
 const planSchema = z.strictObject({
     operation: z.literal(ALIGN_OBJECTS_OPERATION),
     documentKey: documentKeySchema,
     layout: alignLayoutUnionSchema,
     artboardBounds: boundsSchema.nullable(),
     targets: z.array(planTargetSchema).min(ALIGN_MIN_TARGETS).max(ALIGN_MAX_TARGETS),
+    distribution: gapEvidenceSchema.optional(),
     applyBlockedReasonCodes: z.array(blockerSchema),
     confirmationStatus: z.enum(['required', 'confirmed']),
     applyAllowed: z.boolean(),
@@ -237,17 +320,24 @@ const planSchema = z.strictObject({
     if ((plan.layout.kind === 'align' && plan.layout.reference === 'artboard') !== (plan.artboardBounds !== null)) {
         context.addIssue({ code: 'custom', message: 'Align plan artboard bounds must be present exactly for the artboard reference.' });
     }
-    let deltas = [];
+    let derived;
     try {
-        deltas = deriveAlignDeltas(plan.layout, plan.targets.map((target) => target.before), plan.artboardBounds);
+        derived = deriveAlignPlan(plan.layout, plan.targets.map((target) => target.before), plan.artboardBounds);
     }
     catch {
         context.addIssue({ code: 'custom', message: 'Align plan deltas cannot be derived.' });
         return;
     }
+    const deltas = derived.deltas;
+    if (!sameCanonical(plan.distribution ?? null, derived.distribution)) {
+        context.addIssue({ code: 'custom', message: 'Align plan gap evidence must be present exactly for gap distribution and equal the derived gaps.' });
+    }
+    if (new Set(plan.targets.map((target) => target.before.type)).size > 1) {
+        context.addIssue({ code: 'custom', message: 'Align plan targets must be all PathItems or all point text frames.' });
+    }
     plan.targets.forEach((target, index) => {
-        if (target.targetUuid !== target.before.uuid || target.before.type !== 'PathItem' || target.before.pathGeometry !== null || target.before.stroke !== null) {
-            context.addIssue({ code: 'custom', message: 'Align plan target must be a translate-profile PathItem snapshot bound to its UUID.' });
+        if (target.targetUuid !== target.before.uuid || !inAlignProfile(target.before)) {
+            context.addIssue({ code: 'custom', message: 'Align plan target must be a translate-profile layer-direct PathItem or horizontal point text snapshot bound to its UUID.' });
         }
         if (!sameCanonical(target.delta, deltas[index]) || target.moves !== (target.delta.deltaX !== 0 || target.delta.deltaY !== 0)) {
             context.addIssue({ code: 'custom', message: 'Align plan delta must equal the delta derived from the before states.' });
@@ -361,6 +451,10 @@ export const alignObjectsResultSchema = z.union([
             result.plan.targets.every((target, index) => snapshotsWithinTolerance(result.postcondition[index], target.after));
         if (!matches)
             context.addIssue({ code: 'custom', message: 'Verified align must match every planned after snapshot in order.' });
+        else if (result.plan.distribution !== undefined && result.plan.layout.kind === 'distribute' &&
+            !verifyAlignGaps(result.plan.layout.axis, result.plan.distribution, result.plan.targets.map((target) => target.before), result.postcondition)) {
+            context.addIssue({ code: 'custom', message: 'Verified gap distribution must read back with equal gaps and fixed outer targets.' });
+        }
     }
     else if (result.transaction.state === 'verified') {
         context.addIssue({ code: 'custom', message: 'A verified align transaction must be applied.' });
@@ -448,10 +542,13 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
 }
 export const ALIGN_OBJECTS_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
 ${TRANSFORM_OBJECT_MODULE_SCRIPT}
+${TRANSFORM_TEXT_SCRIPT}
 var ALIGN_MIN_TARGETS = ${ALIGN_MIN_TARGETS};
 var ALIGN_MIN_DISTRIBUTE_TARGETS = ${ALIGN_MIN_DISTRIBUTE_TARGETS};
 var ALIGN_MAX_TARGETS = ${ALIGN_MAX_TARGETS};
 var ALIGN_PRECISION_DIGITS = ${ALIGN_PRECISION_DIGITS};
+var ALIGN_GAP_CALC_TOLERANCE_PT = ${ALIGN_GAP_CALC_TOLERANCE_PT};
+var ALIGN_GAP_VERIFY_TOLERANCE_PT = ${ALIGN_GAP_VERIFY_TOLERANCE_PT};
 var ALIGN_AXES = ${JSON.stringify(ALIGN_AXES)};
 var ALIGN_BLOCKER_ORDER = ${JSON.stringify(BLOCKER_ORDER)};
 
@@ -464,7 +561,42 @@ function alignEdge(bounds, axis) {
   if (axis === "top") return bounds[1]; if (axis === "bottom") return bounds[3]; return (bounds[1] + bounds[3]) / 2;
 }
 function alignIsHorizontal(axis) { return axis === "left" || axis === "center_x" || axis === "right"; }
-function alignDeltas(layout, befores, artboardBounds) {
+/** Mirrors deriveGapDistribution: same expressions in the same order, y negated so both axes share one arithmetic. */
+function alignGapDistribution(axis, befores) {
+  var horizontal = axis === "x";
+  var rows = [];
+  for (var i = 0; i < befores.length; i++) {
+    var bounds = befores[i].geometricBounds;
+    var start = horizontal ? bounds[0] : -bounds[1];
+    var end = horizontal ? bounds[2] : -bounds[3];
+    rows.push({ index: i, uuid: befores[i].uuid, start: start, end: end, size: end - start });
+  }
+  rows.sort(function (l, r) { return (l.start - r.start) || (l.index - r.index); });
+  var first = rows[0], last = rows[rows.length - 1];
+  var outerSpan = last.end - first.start;
+  var sizeSum = 0;
+  for (var s = 0; s < rows.length; s++) sizeSum += rows[s].size;
+  var rawGap = (outerSpan - sizeSum) / (rows.length - 1);
+  if (rawGap < -ALIGN_GAP_CALC_TOLERANCE_PT) {
+    throw mutationError("preflight_failed", "negative_gap: the targets are wider than the span between the fixed outer targets by " + alignRound(-rawGap) + " pt.");
+  }
+  var gap = rawGap < 0 ? 0 : rawGap;
+  var deltas = [], order = [];
+  for (var d = 0; d < befores.length; d++) deltas.push({ deltaX: 0, deltaY: 0 });
+  for (var o = 0; o < rows.length; o++) order.push(rows[o].uuid);
+  var cursor = first.end;
+  for (var p = 1; p < rows.length; p++) {
+    var row = rows[p];
+    var rowStart = cursor + gap;
+    cursor = rowStart + row.size;
+    if (p === rows.length - 1) continue;
+    var delta = alignRound(horizontal ? rowStart - row.start : -(rowStart - row.start));
+    deltas[row.index] = horizontal ? { deltaX: delta, deltaY: 0 } : { deltaX: 0, deltaY: delta };
+  }
+  return { deltas: deltas, distribution: { order: order, gap: alignRound(gap) } };
+}
+/** Mirrors deriveAlignPlan; distribution is null except for gap distribution. */
+function alignDerive(layout, befores, artboardBounds) {
   var deltas = [];
   if (layout.kind === "align") {
     var horizontal = alignIsHorizontal(layout.axis);
@@ -473,19 +605,44 @@ function alignDeltas(layout, befores, artboardBounds) {
       var delta = alignRound(reference - alignEdge(befores[i].geometricBounds, layout.axis));
       deltas.push(horizontal ? { deltaX: delta, deltaY: 0 } : { deltaX: 0, deltaY: delta });
     }
-    return deltas;
+    return { deltas: deltas, distribution: null };
   }
+  if (layout.spacing === "gaps") return alignGapDistribution(layout.axis, befores);
   var axis = layout.axis === "x" ? "center_x" : "center_y";
   var order = [];
   for (var j = 0; j < befores.length; j++) order.push({ index: j, centre: alignEdge(befores[j].geometricBounds, axis) });
   order.sort(function (l, r) { return (l.centre - r.centre) || (l.index - r.index); });
-  var first = order[0].centre, last = order[order.length - 1].centre, step = (last - first) / (order.length - 1);
+  var firstCentre = order[0].centre, lastCentre = order[order.length - 1].centre, step = (lastCentre - firstCentre) / (order.length - 1);
   for (var d = 0; d < befores.length; d++) deltas.push({ deltaX: 0, deltaY: 0 });
   for (var p = 0; p < order.length; p++) {
-    var value = (p === 0 || p === order.length - 1) ? 0 : alignRound(first + step * p - order[p].centre);
+    var value = (p === 0 || p === order.length - 1) ? 0 : alignRound(firstCentre + step * p - order[p].centre);
     deltas[order[p].index] = layout.axis === "x" ? { deltaX: value, deltaY: 0 } : { deltaX: 0, deltaY: value };
   }
-  return deltas;
+  return { deltas: deltas, distribution: null };
+}
+/** Read-back gaps against the plan: outer targets unmoved, every adjacent gap within the verify tolerance. */
+function alignGapsHold(axis, distribution, befores, afters) {
+  var horizontal = axis === "x";
+  var slots = [], seen = {};
+  for (var i = 0; i < distribution.order.length; i++) {
+    var slot = -1;
+    for (var b = 0; b < befores.length; b++) if (befores[b].uuid === distribution.order[i]) slot = b;
+    if (slot < 0 || seen["s:" + slot] === true) return false;
+    seen["s:" + slot] = true;
+    slots.push(slot);
+  }
+  if (slots.length !== befores.length) return false;
+  var fixedPositions = [0, slots.length - 1];
+  for (var f = 0; f < fixedPositions.length; f++) {
+    var fixed = befores[slots[fixedPositions[f]]].geometricBounds, moved = afters[slots[fixedPositions[f]]].geometricBounds;
+    for (var k = 0; k < 4; k++) if (Math.abs(moved[k] - fixed[k]) > TRANSFORM_TOLERANCE_PT) return false;
+  }
+  for (var p = 1; p < slots.length; p++) {
+    var previous = afters[slots[p - 1]].geometricBounds, current = afters[slots[p]].geometricBounds;
+    var actual = horizontal ? current[0] - previous[2] : -current[1] - -previous[3];
+    if (actual < -ALIGN_GAP_VERIFY_TOLERANCE_PT || Math.abs(actual - distribution.gap) > ALIGN_GAP_VERIFY_TOLERANCE_PT) return false;
+  }
+  return true;
 }
 function alignUnionBlockers(perTarget) {
   var present = {};
@@ -549,6 +706,7 @@ function alignResolve(forApply) {
   var seen = {};
   var steps = [];
   var befores = [];
+  var profileType = null;
   for (var index = 0; index < requested.length; index++) {
     var request = requested[index];
     if (typeof request.targetUuid !== "string" || request.targetUuid.length === 0 || seen["u:" + request.targetUuid] === true) {
@@ -558,20 +716,35 @@ function alignResolve(forApply) {
     var step = { index: index, request: request, params: alignStepParams(batchParams, request, { deltaX: 0, deltaY: 0 }) };
     var target = transformFindTarget(document, request.targetUuid);
     if (target === null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: request.targetUuid }));
-    // Measured profile only: a standalone PathItem directly on its layer. Compound paths, clipping paths,
-    // guides, sliced or isolated items and group members are unmeasured for alignment and fail closed.
-    if (String(target.typename) !== "PathItem" || !target.layer || target.parent !== target.layer ||
-        target.clipping === true || target.guides === true || target.sliced === true || target.isIsolated === true || target.wrapped === true) {
-      throw mutationError("preflight_failed", alignStepLabel(step) + ": align supports standalone layer-direct PathItems only.");
+    // Measured profiles only, never mixed: a standalone PathItem, or horizontal point text, directly on its layer.
+    // Compound paths, clipping paths, guides, sliced or isolated items, group members and every other text kind
+    // are unmeasured for alignment and fail closed.
+    var typename = String(target.typename);
+    var layerDirect = !!target.layer && target.parent === target.layer;
+    if (typename === "PathItem") {
+      if (!layerDirect || target.clipping === true || target.guides === true || target.sliced === true || target.isIsolated === true || target.wrapped === true) {
+        throw mutationError("preflight_failed", alignStepLabel(step) + ": align supports standalone layer-direct PathItems only.");
+      }
+    } else if (typename === "TextFrame") {
+      if (!layerDirect) throw mutationError("preflight_failed", alignStepLabel(step) + ": align supports layer-direct horizontal point text only.");
+    } else {
+      throw mutationError("preflight_failed", alignStepLabel(step) + ": align supports layer-direct PathItems or horizontal point text only.");
     }
     var before;
     try { before = withStepParams(step, function () { return transformSnapshot(document, target); }); }
     catch (snapshotError) { throw alignStepError(step, snapshotError); }
+    if (before.nestedGroup !== undefined) throw mutationError("preflight_failed", alignStepLabel(step) + ": align does not support group members.");
+    if (typename === "TextFrame" && (!before.textFrame || before.textFrame.kind !== "point" || before.textFrame.orientation !== "horizontal")) {
+      throw mutationError("preflight_failed", alignStepLabel(step) + ": align supports layer-direct horizontal point text only.");
+    }
+    if (profileType === null) profileType = typename;
+    else if (profileType !== typename) throw mutationError("preflight_failed", alignStepLabel(step) + ": align cannot mix PathItems and text frames.");
     step.target = target;
     steps.push(step);
     befores.push(before);
   }
-  var deltas = alignDeltas(layout, befores, artboardBounds);
+  var derived = alignDerive(layout, befores, artboardBounds);
+  var deltas = derived.deltas;
   var entries = [];
   var perTargetBlockers = [];
   for (var s = 0; s < steps.length; s++) {
@@ -603,7 +776,7 @@ function alignResolve(forApply) {
     for (var b = 0; b < entries.length; b++) if (entries[b].blockers.length > 0) blockedUuids.push(entries[b].step.request.targetUuid);
     throw new Error("MCP_ERROR:" + stringifyJson({ code: "ALIGN_APPLY_BLOCKED", reasonCodes: union, uuids: blockedUuids }));
   }
-  return { context: context, document: document, layout: layout, artboardBounds: artboardBounds, entries: entries, blockers: union };
+  return { context: context, document: document, layout: layout, artboardBounds: artboardBounds, distribution: derived.distribution, entries: entries, blockers: union };
 }
 
 function alignPlan(preflight) {
@@ -612,9 +785,11 @@ function alignPlan(preflight) {
     var entry = preflight.entries[i];
     targets.push({ targetUuid: entry.step.request.targetUuid, delta: entry.delta, moves: entry.moves, before: entry.before, after: entry.after, applyBlockedReasonCodes: entry.blockers });
   }
-  return { operation: "align_objects", documentKey: preflight.context.key, layout: preflight.layout, artboardBounds: preflight.artboardBounds, targets: targets,
+  var plan = { operation: "align_objects", documentKey: preflight.context.key, layout: preflight.layout, artboardBounds: preflight.artboardBounds, targets: targets,
     applyBlockedReasonCodes: preflight.blockers, confirmationStatus: params.apply === true ? "confirmed" : "required",
     applyAllowed: params.apply === true && preflight.blockers.length === 0 };
+  if (preflight.distribution !== null) plan.distribution = preflight.distribution;
+  return plan;
 }
 
 function alignRevalidate(preflight, plan) {
@@ -669,6 +844,11 @@ function alignVerify(preflight, plan) {
       });
     } catch (verifyError) { throw alignStepError(entry.step, verifyError); }
     actual.push(snapshot);
+  }
+  if (plan.distribution) {
+    var planned = [];
+    for (var g = 0; g < plan.targets.length; g++) planned.push(plan.targets[g].before);
+    if (!alignGapsHold(plan.layout.axis, plan.distribution, planned, actual)) throw mutationError("verify_mismatch", "gap distribution does not read back with equal gaps and fixed outer targets.");
   }
   return actual;
 }
@@ -760,7 +940,7 @@ function normalizedRequest(input) {
 export const alignObjectsToolContract = {
     name: 'illustrator_align_objects',
     title: 'Plan or Align / Distribute Objects',
-    description: `Plan or apply an alignment of ${ALIGN_MIN_TARGETS}-${ALIGN_MAX_TARGETS} distinct PathItems to the first target or the artboard on one axis (left, center_x, right, top, center_y, bottom), or an even distribution of ${ALIGN_MIN_DISTRIBUTE_TARGETS}-${ALIGN_MAX_TARGETS} PathItems by geometric centre along x or y with the outermost two fixed. Deltas are derived from geometricBounds (stroke excluded). Planning writes nothing; apply performs per-target compare-and-set, one translate per moving target in one host call, native read-back verification of every target, and verified inverse rollback of attempted moves in reverse order.`,
+    description: `Plan or apply an alignment of ${ALIGN_MIN_TARGETS}-${ALIGN_MAX_TARGETS} distinct PathItems or horizontal point-text frames (not mixed) to the first target or the artboard on one axis (left, center_x, right, top, center_y, bottom), or an even distribution of ${ALIGN_MIN_DISTRIBUTE_TARGETS}-${ALIGN_MAX_TARGETS} by geometric centre along x or y with the outermost two fixed (spacing "gaps": equal edge-to-edge gaps). Deltas are derived from geometricBounds (stroke excluded). Planning writes nothing; apply compares-and-sets each target, translates the moving ones in one host call, verifies every target by native read-back, and restores attempted moves in reverse order on failure.`,
     inputSchema,
     publicInputSchema: alignObjectsPublicInputSchema,
     outputSchema: alignObjectsResponseSchema,

@@ -2,11 +2,11 @@
 
 [日本語](compatibility.md) | **English**
 
-**Public Beta 0.1.0-beta.5.** Keep stable Illustrator in the foreground and the screen unlocked. Transport checks and end-to-end artwork checks through an AI app are separate evidence.
+**Public Beta 0.1.0-beta.6.** Keep stable Illustrator in the foreground and the screen unlocked. Transport checks and end-to-end artwork checks through an AI app are separate evidence.
 
 ## AI clients
 
-The table below records historical beta.4 checks. It does not report verification of the beta.5 distribution.
+The table below records historical beta.4 checks. It does not report verification of the beta.6 distribution.
 
 | Client | Connection | Historical checks on beta.4 | Status |
 | --- | --- | --- | --- |
@@ -25,8 +25,8 @@ Configuration alone, transport discovery, or success in another app does not est
 Operations were measured individually on stable Illustrator 30.8.x. Principal paths were checked on 30.8.1, macOS 27.0, foreground and unlocked. Dedicated SDK-driven RGB and CMYK sessions each completed 103 consecutive changes and 108 changes including recovery. These are separate from the client-specific checks above.
 
 - Supported inputs for shapes, text, placed images, layers, and other operations have individual measurements. The [tool catalog](tools.en.md) lists available functions; it does not promise live coverage of every input.
-- Sessions cover 36 of 40 editing operations; delete, embed, vector import and artboard updates are excluded. The prerequisite backup is limited to 1,000 items, so the effective session ceiling is also 1,000. One live run took about 18.3 s for a 1,000-item backup (about 11.5 s for 600 items).
-- CMYK stacking supports `front` only; compound-path creation is unsupported. Intermittent invalid group references remain unresolved; restart is not a guaranteed repair. Long document-key records and existing stroked text have known limits too.
+- In sessions, delete, embed, vector import, artboard updates, in-document trim marks, barcodes, QR codes and stroke styles are excluded. Backups were measured up to 20,778 items (documents above 1,000 items are compared in full as a stream, 12–15 s per pass at 20,778 items), and sessions up to 3,000 items per scan and 20,779 items with chunked scans. Larger documents are refused.
+- In CMYK documents, compound-path creation is unsupported. Intermittent invalid group references remain unresolved; restart is not a guaranteed repair. Long document-key records and existing stroked text have known limits too.
 - Do not generalize to background/locked operation, arbitrary artwork, or long-running production.
 
 ## Verification and limitations
@@ -39,7 +39,7 @@ These are bounded tests through a dedicated connection program. They do not esta
 | --- | --- |
 | Reading groups | Known intermittent issue: a group reference can become unreadable, and the operation then stops on the safe side (fails closed). The cause is unresolved; restarting Illustrator is not an established repair |
 | Long document identifiers | Long information identifying a document, including its path, can make a saved execution record unreadable. Replay and recovery are not guaranteed for arbitrary documents |
-| Continuous editing | With a verified backup and exclusive document use, 36 editing operations are supported. Delete, embed, vector import and artboard updates are excluded. The backup a session needs stops at 1,000 items (one 1,000-item live run took about 18.3 s), so that is the effective session ceiling. Performance, finished-record retention, and recovery usability remain unfinished |
+| Continuous editing | With a verified backup and exclusive document use, most editing operations are supported. Delete, embed, vector import, artboard updates, in-document trim marks, barcodes, QR codes and stroke styles are excluded. Backups were measured up to 20,778 items and sessions up to 20,779 items with chunked scans; larger documents are refused. Performance, finished-record retention, and recovery usability remain unfinished |
 | Stroke after saving text | Newly created point text acquiring a stroke after save was corrected and rechecked in RGB/CMYK. Existing stroked text remains unsupported |
 | Character-style restoration | An incorrect restoration result was corrected. Forcing a failure through the actual tool and completing live rollback remains unverified |
 | Unsupported work | Path text, paragraph-style mutation, ungrouping, missing-link repair, and outlining in the original document, among other limits |
@@ -50,10 +50,10 @@ If a response stops, do not bypass it by sending the edit as a new request or de
 
 | Area | Details |
 | --- | --- |
-| In scope | Reading and inspection; non-destructive edits of supported shapes, text, and images (including CMYK documents); continuous editing of saved files (edit sessions, experimental); backup and overwrite save; outlined AI/PDF export; PNG/JPEG export of one artboard (RGB documents, scale 1 or 2, never overwriting an existing file); placing, relinking, embedding (JPEG/PNG in RGB documents only), and optimizing images; stdio transport (MCP 2026-07-28) |
+| In scope | Reading and inspection; non-destructive edits of supported shapes, text, and images (including CMYK documents); continuous editing of saved files (edit sessions, experimental); backup and overwrite save; outlined AI/PDF export; PDF export with trim marks and bleed; PNG/JPEG export of one artboard (RGB documents, scale 1 or 2 or an exact pixel size, never overwriting an existing file); placing, relinking, embedding (JPEG/PNG in RGB documents only), and optimizing images; EAN-13, EAN-8 and ITF-14 barcodes and QR codes; rendering artboards to compare before and after, and extracting all text; stdio transport (MCP 2026-07-28) |
 | Out of scope | SVG export, artboard removal, fractional-point artboard updates, paragraph styles, MCP Tasks, Windows, deleting several objects at once (one object per delete), missing-link repair, ungrouping |
 | Streamable HTTP | Covered by automated tests and client connection checks only. No Illustrator operation over HTTP has been recorded. Loopback (`127.0.0.1`) only; not for external exposure |
-| CMYK documents | Stacking-order changes support bring-to-front (`front`) only. Creating compound paths is not supported (refused) |
+| CMYK documents | Creating compound paths is not supported (refused) |
 | Known intermittent issue | Reading groups can intermittently lose the reference to an item. The operation then stops on the safe side (fails closed) instead of guessing. It is not hidden by retries, and restarting Illustrator is not guaranteed to fix it |
 | CI | Before publication, the release candidate source must pass the full test suite on macOS CI and locally |
 
@@ -69,3 +69,5 @@ HTTP is restricted to `127.0.0.1`. Tokens need at least 32 characters; only expl
 ## Beta and Stable
 
 Beta is for trials within measured conditions and known limits. Stable requires separate acceptance for sustained use, recovery, updates, record retention, performance, and support. Built JavaScript is shipped without post-processing. Replaying unresolved commands from an older version is not guaranteed safe. See [recovery](runbook.en.md).
+
+QR Code is a registered trademark of DENSO WAVE INCORPORATED in Japan and in other countries.

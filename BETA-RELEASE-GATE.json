@@ -2,68 +2,68 @@
   "schema": 1,
   "decision": "ready",
   "reviewer": "mhimt",
-  "version": "0.1.0-beta.5",
-  "candidateSha256": "e861d8b5660ed61c095ea9c24788cea264dc080b14e3a3069b88a3fb991ea72f",
-  "packageSha256": "e9626ce135f1884e94d13aaae1feae11c9f97bbf2fc6dc493ac5bd095e10c1d6",
-  "mcpbSha256": "adc11fbfa7c2ec41c31eb5f4c7f5ea957cae79d9b67a77803db0194ecc69f85e",
+  "version": "0.1.0-beta.6",
+  "candidateSha256": "c83dc7396fc684660b95473aa8c64fff27fd88112e884c4458a70426b2e131c8",
+  "packageSha256": "543096d7a7e2ad172713a0cda0256e72ce0b54a2d28d18d90326f0f34eb30abb",
+  "mcpbSha256": "ea838bea92f25a244428f50febe72ab5aa9b787e73cd3eca0c44cd665d94ecea",
   "distTag": "beta",
   "prerelease": true,
   "checks": {
     "lint": {
       "status": "pass",
-      "evidenceSha256": "e68db6be6183c0b93a277953dc569cb91c989ffcd553750eedfa33581210e5e6"
+      "evidenceSha256": "1f2df2218b6388973c822839b8ec253da57c67b2a69f6c45105f08749990f834"
     },
     "build": {
       "status": "pass",
-      "evidenceSha256": "ea99dedb685d560d7b2862cad34ad529c3834c62a91ee2828aabb7c8566b6078"
+      "evidenceSha256": "af8c67be2cccdd1dddff031abe366a15b8ca056d8ae8e11d59f2c1b1a4f3fd3b"
     },
     "tests": {
       "status": "pass",
-      "evidenceSha256": "c6ca4f7d7add7370f1a8c6d0f5a38b9e4f8caae0b6456a9af5a56d48c9c57075"
+      "evidenceSha256": "a1821756b8ff9d6eb6a061dadcbca5db24846767aa2da17282693c82c7aa36f7"
     },
     "publicAudit": {
       "status": "pass",
-      "evidenceSha256": "3b9717a0bd5f1d0aa3b777724e9e7e5573402878138d62cab837595602d7bc57"
+      "evidenceSha256": "253da5d970470ee2621d9dbdae8e7b72e6de22429645788bb319786d10e4ca5e"
     },
     "packageReproducibility": {
       "status": "pass",
-      "evidenceSha256": "a67c797374ed84793137780accc40e457a287d7ca23e3660cde021f5f791f081"
+      "evidenceSha256": "667f9d263c41422afbf39a40eef927448410958c3c50937835ca6c2d62c20feb"
     },
     "isolatedInstall": {
       "status": "pass",
-      "evidenceSha256": "8ca2521e75960eaed03ec47513687a5d39206ff6aca458a3023dbf35f0dbe569"
+      "evidenceSha256": "66c31d82ead3481ed21d7698d1880b65daec41b2635def6536cddea9f6f10c55"
     },
     "doctor": {
       "status": "pass",
-      "evidenceSha256": "8e405109f5acd7d306058e6bef209823592e2fb7934988be1919b14ba2d90852"
+      "evidenceSha256": "a670b8ee869efae41f666ba526ea024d67e7e5a664d9a40969383ec60d7ec36f"
     },
     "stdio": {
       "status": "pass",
-      "evidenceSha256": "aba9c65e9ec4468863566413d0f78a2ec6572519cdced5e057269effee5faeef"
+      "evidenceSha256": "bb9bad929abb5a2c387b1d63d3d5995f7c73b77cb9f6e3d8707fcac2215067e9"
     },
     "liveEvidence": {
       "status": "pass",
-      "evidenceSha256": "57d61300b712ad6a7f64a01e7e30038d3cdd833135d0e682995fd5b8bfe8aedb"
+      "evidenceSha256": "70276d3bedbc06264cbdb7f1120af8c6324312635da268129997155568f6a3e5"
     },
     "rightsReview": {
       "status": "pass",
-      "evidenceSha256": "0b017727fee2209a9cb10766cb84e0d87a19ca210100948603aabaf87cf04bad"
+      "evidenceSha256": "968cc187e9a154c11236688a1cf2f95db9c1e7cbe2a6a61b8ba2ca02b49a7e9a"
     },
     "privateReporting": {
       "status": "pass",
-      "evidenceSha256": "f17f1ae5f0035ce95ecfcca19c24b785b91f3ccb0b3f9cec9354dea4f69d4ecc"
+      "evidenceSha256": "1685cbad65512df6d15265e64c283116178c4734d90e3c92e7cf6126456280eb"
     },
     "claudeCode": {
       "status": "pass",
-      "evidenceSha256": "801050c7cf55b2d406ca3ae6446e0574e06c0fbaceceb4d52687aaf83cfa66f6"
+      "evidenceSha256": "a98a4d389666e95e1d36fb28ca51cb1d1a136d8a018d761fedac27a11438d74d"
     },
     "claudeDesktop": {
       "status": "pass",
-      "evidenceSha256": "8c42594982622f5bd90f35af11db690b77af419b6324e1413e3b5750da03c4c0"
+      "evidenceSha256": "f265b2d12fe3daf82b94f506457c3322a89042bfc805027cb617655cd41bd0ec"
     },
     "codexCli": {
       "status": "pass",
-      "evidenceSha256": "1c0432384f53806f26e8181949dd7d15e817a227e2e130084ec32cf45b539dff"
+      "evidenceSha256": "1bc4a210e320780016dfce56f2deb9e22499c6d669d958d2c1bb2efc6e4bc9b1"
     }
   }
 }

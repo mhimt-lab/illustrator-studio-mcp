@@ -4,11 +4,12 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { defaultStateRoot } from './command-store.js';
 import { InvalidCursorError } from './domain.js';
-import { createPrivateFileExclusive, ensurePrivateStateRoot, isMissingPath, openPrivateDirectory, openPrivateFileForRead, unsafePrivateState, validatePrivateOwnerAndMode, validatePrivateStateRoot, } from './private-state.js';
+import { createPrivateFileExclusive, ensurePrivateStateRoot, isMissingPath, isWindowsPrivateState, openPrivateDirectory, openPrivateFileForRead, unsafePrivateState, validatePrivateOwnerAndMode, validatePrivateStateRoot, } from './private-state.js';
 const CURSOR_FORMAT = 'v1';
 const KEY_BYTES = 32;
 const KEY_FILE = 'cursor-signing-key.v1';
 const STATE_FILE = 'cursor-signing-state.v1';
+const READY_FILE = 'cursor-signing-ready.v1';
 const KEY_RECORD_MAGIC = Buffer.from('ISMCP-CURSOR-SIGNING-KEY\0', 'ascii');
 const KEY_RECORD_VERSION = 1;
 const KEY_RECORD_HEADER_BYTES = KEY_RECORD_MAGIC.length + 3;
@@ -132,10 +133,12 @@ export class CursorSigner {
     stateRoot;
     keyPath;
     statePath;
+    readyPath;
     constructor(stateRoot = defaultStateRoot()) {
         this.stateRoot = stateRoot;
         this.keyPath = join(stateRoot, KEY_FILE);
         this.statePath = join(stateRoot, STATE_FILE);
+        this.readyPath = join(stateRoot, READY_FILE);
     }
     async sign(payload) {
         const encodedPayload = Buffer.from(canonicalJson(payload), 'utf8').toString('base64url');
@@ -159,7 +162,7 @@ export class CursorSigner {
             const payload = JSON.parse(payloadBytes.toString('utf8'));
             if (canonicalJson(payload) !== payloadBytes.toString('utf8'))
                 throw new InvalidCursorError();
-            if (typeof payload !== 'object' || payload === null || !('version' in payload) || payload.version !== 1) {
+            if (typeof payload !== 'object' || payload === null || !('version' in payload) || (payload.version !== 1 && payload.version !== 2)) {
                 throw new InvalidCursorError();
             }
             return payload;
@@ -179,7 +182,7 @@ export class CursorSigner {
         catch (error) {
             if (!isMissingPath(error))
                 throw error;
-            if (await this.pathExists(this.keyPath)) {
+            if (await this.pathExists(this.keyPath) || (isWindowsPrivateState() && await this.pathExists(this.readyPath))) {
                 try {
                     state = await this.readState();
                 }
@@ -226,6 +229,8 @@ export class CursorSigner {
         return await this.readBoundKey(state);
     }
     async initializeClaimedKey(initializationId) {
+        if (isWindowsPrivateState())
+            return await this.initializeWindowsKey(initializationId);
         const temporaryPath = join(this.stateRoot, `.${KEY_FILE}.${randomUUID()}.tmp`);
         const handle = await createPrivateFileExclusive(temporaryPath);
         const record = encodeKeyRecord(randomBytes(KEY_BYTES));
@@ -259,6 +264,10 @@ export class CursorSigner {
         return decodeKeyRecord(record);
     }
     async publishInitialState(initializationId) {
+        if (isWindowsPrivateState())
+            return await this.publishWindowsRecord(this.statePath, encodeStateRecord({
+                state: STATE_INITIALIZING, initializationId, keyDigest: Buffer.alloc(STATE_KEY_DIGEST_BYTES),
+            }), true);
         const temporaryPath = join(this.stateRoot, `.${STATE_FILE}.${randomUUID()}.tmp`);
         await this.writePrivateRecord(temporaryPath, encodeStateRecord({
             state: STATE_INITIALIZING,
@@ -331,6 +340,13 @@ export class CursorSigner {
         if (!timingSafeEqual(state.keyDigest, digest)) {
             throw unsafePrivateState('the signing key does not match the durable initialization state.');
         }
+        if (isWindowsPrivateState()) {
+            const current = await this.readState();
+            if (current.state !== STATE_READY || !current.initializationId.equals(state.initializationId) ||
+                !current.keyDigest.equals(digest))
+                throw unsafePrivateState('the signing binding changed during use.');
+            await this.syncStateRoot();
+        }
         return key;
     }
     async readKey() {
@@ -338,7 +354,93 @@ export class CursorSigner {
         return { key: decodeKeyRecord(record), digest: createHash('sha256').update(record).digest() };
     }
     async readState() {
+        if (isWindowsPrivateState())
+            return await this.readWindowsState();
         return decodeStateRecord(await this.readPrivateRecord(this.statePath, 'signing-state'));
+    }
+    async readWindowsState() {
+        const claim = decodeStateRecord(await this.readPrivateRecord(this.statePath, 'signing-state'));
+        let ready;
+        try {
+            ready = decodeStateRecord(await this.readPrivateRecord(this.readyPath, 'ready-state'));
+        }
+        catch (error) {
+            if (isMissingPath(error))
+                return claim;
+            throw error;
+        }
+        if (claim.state !== STATE_INITIALIZING || ready.state !== STATE_READY ||
+            !claim.initializationId.equals(ready.initializationId)) {
+            throw unsafePrivateState('the immutable claim and ready-state binding is ambiguous or mismatched.');
+        }
+        return ready;
+    }
+    async initializeWindowsKey(initializationId) {
+        const claim = await this.readState();
+        if (claim.state !== STATE_INITIALIZING || !claim.initializationId.equals(initializationId) ||
+            await this.pathExists(this.keyPath) || await this.pathExists(this.readyPath)) {
+            throw unsafePrivateState('claimed first initialization no longer owns an empty key/ready target.');
+        }
+        const record = encodeKeyRecord(randomBytes(KEY_BYTES));
+        await this.publishWindowsRecord(this.keyPath, record, false);
+        const currentClaim = await this.readState();
+        if (currentClaim.state !== STATE_INITIALIZING || !currentClaim.initializationId.equals(initializationId)) {
+            throw unsafePrivateState('the initialization claim changed before ready publication.');
+        }
+        const keyDigest = createHash('sha256').update(record).digest();
+        const publishedKey = await this.readKey();
+        if (!publishedKey.digest.equals(keyDigest))
+            throw unsafePrivateState('the published key changed before ready publication.');
+        await this.publishWindowsRecord(this.readyPath, encodeStateRecord({ state: STATE_READY, initializationId, keyDigest }), false);
+        return await this.readBoundKey(await this.readState());
+    }
+    async publishWindowsRecord(target, record, allowExistingClaim) {
+        const temporaryPath = join(this.stateRoot, `.${target === this.keyPath ? KEY_FILE : target === this.readyPath ? READY_FILE : STATE_FILE}.${randomUUID()}.tmp`);
+        await this.writePrivateRecord(temporaryPath, record);
+        const identity = await lstat(temporaryPath, { bigint: true });
+        let won = true;
+        try {
+            await link(temporaryPath, target);
+        }
+        catch (error) {
+            if (!allowExistingClaim || !(typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST'))
+                throw error;
+            won = false;
+        }
+        await this.syncStateRoot();
+        const published = await this.readPrivateRecord(target, 'published signing record');
+        if (won && !published.equals(record))
+            throw unsafePrivateState('published signing bytes do not match the publisher.');
+        if (!won)
+            decodeStateRecord(published);
+        const named = await lstat(temporaryPath, { bigint: true });
+        if (named.isSymbolicLink() || !named.isFile() || named.dev !== identity.dev || named.ino !== identity.ino ||
+            !(await this.readPrivateRecord(temporaryPath, 'owned publication temp')).equals(record)) {
+            throw unsafePrivateState('the owned publication temp changed; it was retained.');
+        }
+        await unlink(temporaryPath);
+        await this.syncStateRoot();
+        return won;
+    }
+    async inspectWindowsSigningState() {
+        await validatePrivateStateRoot(this.stateRoot);
+        const missingKey = !await this.pathExists(this.keyPath);
+        const missingReady = !await this.pathExists(this.readyPath);
+        if (!await this.pathExists(this.statePath)) {
+            if (!missingKey || !missingReady)
+                throw unsafePrivateState('signing artifacts exist without their claim.');
+            return { state: 'uninitialized', claimId: null, ageMs: null, missingKey, missingReady };
+        }
+        const claim = decodeStateRecord(await this.readPrivateRecord(this.statePath, 'signing-state'));
+        const metadata = await lstat(this.statePath);
+        const state = await this.readWindowsState();
+        if (state.state === STATE_READY) {
+            const key = await this.readKey();
+            if (!key.digest.equals(state.keyDigest))
+                throw unsafePrivateState('the diagnosed key does not match the ready binding.');
+        }
+        return { state: state.state === STATE_READY ? 'ready' : 'initializing', claimId: claim.initializationId.toString('hex'),
+            ageMs: Math.max(0, Date.now() - metadata.mtimeMs), missingKey, missingReady };
     }
     async readPrivateRecord(path, description) {
         const metadata = await lstat(path);

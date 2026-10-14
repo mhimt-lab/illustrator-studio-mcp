@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { RECTANGLE_BOUNDS_PRECISION_DIGITS, RECTANGLE_BOUNDS_TOLERANCE_PT, } from './domain.js';
 import { boundsSchema, documentContextSchema, layerPathSchema, layerStructuralReasonSchema, mutationAuditSchema, } from '../../mutation-result-schema-core.js';
+import { auditConsistentWithTerminal } from '../../mutation-audit-consistency.js';
 import { creationAppearanceMatches, creationAppearanceSchema, creationAppearanceStateSchema } from '../create-appearance.js';
 export function normalizeRectangleDistance(value) {
     return Number(value.toFixed(RECTANGLE_BOUNDS_PRECISION_DIGITS));
@@ -135,7 +136,7 @@ const verifyFailureSchema = z.strictObject({
     message: z.string().min(1).max(500),
 });
 const mutationFailureSchema = z.discriminatedUnion('phase', [applyFailureSchema, verifyFailureSchema]);
-const mutationTransactionSchema = z.discriminatedUnion('state', [
+export const mutationTransactionSchema = z.discriminatedUnion('state', [
     z.strictObject({ state: z.literal('planned'), audit: mutationAuditSchema }),
     z.strictObject({ state: z.literal('verified'), audit: mutationAuditSchema }),
     z.strictObject({
@@ -184,116 +185,8 @@ const mutationTransactionSchema = z.discriminatedUnion('state', [
         audit: mutationAuditSchema,
     }),
 ]).superRefine((transaction, context) => {
-    const compact = transaction.audit.map((event) => [
-        event.phase,
-        event.event,
-        'reasonCode' in event ? event.reasonCode : null,
-    ]);
-    const expectedPrefix = [
-        ['preflight', 'started', null],
-        ['preflight', 'succeeded', null],
-        ['plan', 'started', null],
-        ['plan', 'succeeded', null],
-    ];
-    let expected;
-    if (transaction.state === 'planned') {
-        expected = [
-            ...expectedPrefix,
-            ['apply', 'skipped', 'not_requested'],
-            ['verify', 'skipped', 'not_requested'],
-            ['rollback', 'skipped', 'not_requested'],
-        ];
-    }
-    else if (transaction.state === 'verified') {
-        expected = [
-            ...expectedPrefix,
-            ['apply', 'started', null],
-            ['apply', 'attempted', null],
-            ['apply', 'succeeded', null],
-            ['verify', 'started', null],
-            ['verify', 'succeeded', null],
-            ['rollback', 'skipped', 'not_required'],
-        ];
-    }
-    else if (transaction.state === 'apply_failed') {
-        expected = [
-            ...expectedPrefix,
-            ['apply', 'started', null],
-            ['apply', 'failed', 'apply_failed'],
-            ['verify', 'skipped', 'not_required'],
-            ['rollback', 'skipped', 'not_required'],
-        ];
-    }
-    else if (transaction.state === 'apply_indeterminate') {
-        expected = [
-            ...expectedPrefix,
-            ['apply', 'started', null],
-            ['apply', 'attempted', null],
-            ['apply', 'failed', 'apply_indeterminate'],
-        ];
-    }
-    else {
-        const failureEvents = transaction.failure.phase === 'apply'
-            ? [
-                ['apply', 'started', null],
-                ['apply', 'attempted', null],
-                ['apply', 'failed', 'apply_failed'],
-                ['verify', 'skipped', 'not_required'],
-            ]
-            : [
-                ['apply', 'started', null],
-                ['apply', 'attempted', null],
-                ['apply', 'succeeded', null],
-                ['verify', 'started', null],
-                ['verify', 'failed', 'verify_mismatch'],
-            ];
-        const rollbackResult = transaction.state === 'rolled_back'
-            ? ['rollback', 'succeeded', null]
-            : ['rollback', 'failed', transaction.state === 'rollback_failed'
-                    ? 'rollback_failed'
-                    : 'rollback_indeterminate'];
-        expected = [...expectedPrefix, ...failureEvents, ['rollback', 'started', null], rollbackResult];
-    }
-    if (compact.length !== expected.length || compact.some((entry, index) => entry[0] !== expected[index]?.[0] || entry[1] !== expected[index]?.[1] || entry[2] !== expected[index]?.[2])) {
-        context.addIssue({ code: 'custom', message: 'Mutation audit sequence does not match transaction state.', path: ['audit'] });
-    }
-    for (let index = 0; index < transaction.audit.length; index++) {
-        if (transaction.audit[index]?.sequence !== index) {
-            context.addIssue({ code: 'custom', message: 'Mutation audit sequence numbers must be contiguous.', path: ['audit', index, 'sequence'] });
-        }
-    }
-    if ('failure' in transaction) {
-        const matchingFailureEvents = transaction.audit.filter((event) => event.event === 'failed' &&
-            event.phase === transaction.failure.phase && event.reasonCode === transaction.failure.reasonCode);
-        const matchingFailure = matchingFailureEvents[0];
-        if (matchingFailureEvents.length !== 1 || matchingFailure?.event !== 'failed' ||
-            matchingFailure.message !== transaction.failure.message) {
-            context.addIssue({
-                code: 'custom',
-                message: 'Transaction failure summary must exactly match its audit failure event.',
-                path: ['failure', 'message'],
-            });
-        }
-    }
-    if (transaction.state === 'rollback_failed' || transaction.state === 'rollback_indeterminate') {
-        const matchingRollbackEvents = transaction.audit.filter((event) => event.event === 'failed' &&
-            event.phase === 'rollback' && event.reasonCode === transaction.rollback.reasonCode);
-        const matchingRollback = matchingRollbackEvents[0];
-        if (matchingRollbackEvents.length !== 1 || matchingRollback?.event !== 'failed' ||
-            matchingRollback.message !== transaction.rollback.message) {
-            context.addIssue({
-                code: 'custom',
-                message: 'Rollback summary must exactly match its audit failure event.',
-                path: ['rollback', 'message'],
-            });
-        }
-    }
-    if (transaction.state === 'apply_indeterminate' && transaction.rollback.message !== transaction.failure.message) {
-        context.addIssue({
-            code: 'custom',
-            message: 'Indeterminate apply summaries must describe the same identity-unavailable outcome.',
-            path: ['rollback', 'message'],
-        });
+    for (const issue of auditConsistentWithTerminal(transaction)) {
+        context.addIssue({ code: 'custom', message: issue.message, path: issue.path });
     }
 });
 const verifiedRectangleResultSchema = z.strictObject({

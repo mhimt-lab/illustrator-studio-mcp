@@ -1,5 +1,5 @@
-function row(kind, measured) {
-    return Object.freeze({ kind, measured: Object.freeze([...measured]), unmeasured: kind === 'read' ? 'admit' : 'consent' });
+function row(kind, measured, unmeasured = 'admit') {
+    return Object.freeze({ kind, measured: Object.freeze([...measured]), unmeasured });
 }
 export const HOST_VERSION_POLICY = Object.freeze({
     operations: Object.freeze({
@@ -13,6 +13,7 @@ export const HOST_VERSION_POLICY = Object.freeze({
         capture_preview: row('read', ['30.8.1']),
         optimize_images: row('mutation', ['30.8.1']),
         line_height_read: row('read', ['30.8.1']),
+        export_exact_px: row('mutation', ['30.8.2'], 'refuse'),
     }),
     blocked: Object.freeze([
         Object.freeze({ operation: 'spot_rollback', version: '30.8.0' }),
@@ -43,18 +44,15 @@ export function evaluateHostVersion(operation, version) {
     }
     return sameMinor === null ? { app, measured: latest, status: 'unmeasured' } : { app, measured: sameMinor, status: 'patch_unmeasured' };
 }
-export function hostVersionAdmitted(operation, version, consent) {
+export function hostVersionAdmitted(operation, version) {
     const { status } = evaluateHostVersion(operation, version);
     if (status === 'blocked' || status === 'unreadable')
         return false;
     if (HOST_VERSION_POLICY.operations[operation].kind === 'read')
         return true;
-    if (consent?.acceptUnmeasuredHostVersion !== undefined &&
-        (consent.hostVersionChannel !== 'stable' || consent.acceptUnmeasuredHostVersion !== version))
-        return false;
     if (status === 'measured' || status === 'patch_unmeasured')
         return true;
-    return consent?.hostVersionChannel === 'stable' && consent.acceptUnmeasuredHostVersion === version;
+    return HOST_VERSION_POLICY.operations[operation].unmeasured === 'admit';
 }
 export const HOST_VERSION_POLICY_JSX = `
 var HOST_VERSION_POLICY = ${JSON.stringify(HOST_VERSION_POLICY)};
@@ -80,25 +78,36 @@ function hostVersionEvaluate(operation, version) {
   }
   return sameMinor === null ? { app: app, measured: latest, status: "unmeasured" } : { app: app, measured: sameMinor, status: "patch_unmeasured" };
 }
-function hostVersionConsent(input) {
-  if (!input || input.acceptUnmeasuredHostVersion === undefined) return null;
-  return { acceptUnmeasuredHostVersion: input.acceptUnmeasuredHostVersion, hostVersionChannel: input.hostVersionChannel };
+function hostVersionBackupPathMatches(actual, expected) {
+  if (actual === expected) return true;
+  var forms = params.hostFilePathForms;
+  if (!forms || !Object.prototype.hasOwnProperty.call(forms, expected)) return false;
+  var candidates = forms[expected];
+  for (var index = 0; index < candidates.length; index++) if (actual === candidates[index]) return true;
+  return false;
 }
-function hostVersionAdmitted(operation, version, consent) {
-  var status = hostVersionEvaluate(operation, version).status;
+function hostVersionAdmitted(operation, version) {
+  var evaluation = hostVersionEvaluate(operation, version);
+  var status = evaluation.status;
   if (status === "blocked" || status === "unreadable") return false;
   if (HOST_VERSION_POLICY.operations[operation].kind === "read") return true;
-  if (consent === undefined && typeof params !== "undefined") consent = params;
-  if (consent && consent.acceptUnmeasuredHostVersion !== undefined &&
-      (consent.hostVersionChannel !== "stable" || consent.acceptUnmeasuredHostVersion !== version)) return false;
-  if (status === "measured" || status === "patch_unmeasured") return true;
-  if (!consent || consent.hostVersionChannel !== "stable" || consent.acceptUnmeasuredHostVersion !== version) return false;
+  if (status === "measured") return true;
+  if (status === "unmeasured" && HOST_VERSION_POLICY.operations[operation].unmeasured !== "admit") return false;
+  if (typeof params !== "undefined" && params.apply === true) {
+    // An unmeasured version or patch is admitted on the stable channel only. Node passes the configured target's
+    // channel in every apply (public input cannot); a missing value is not stable.
+    if (params.hostVersionChannel !== "stable") {
+      var channelCode = status === "patch_unmeasured" ? "HOST_VERSION_PATCH_CHANNEL_UNMEASURED" : "HOST_VERSION_CHANNEL_UNMEASURED";
+      throw new Error("MCP_ERROR:" + stringifyJson({ code: channelCode, message: "Illustrator " + String(version) + " is not a measured version, and unmeasured versions are admitted only on the stable channel. Nothing was changed." }));
+    }
+  }
+  if (status === "patch_unmeasured") return true;
   if (operation !== "optimize_images" && typeof params !== "undefined" && params.apply === true) {
     var context = getDocumentContext();
     if (context.path !== null) {
       var backup = params.hostVersionBackup;
-      if (!backup || backup.sourcePath !== context.path || backup.sourceFileRevision !== context.fileRevision || backup.backupId !== params.backupId) {
-        throw new Error("MCP_ERROR:" + stringifyJson({ code: "HOST_VERSION_BACKUP_REQUIRED", message: "A verified backup of this document file is required." }));
+      if (!backup || !hostVersionBackupPathMatches(context.path, backup.sourcePath) || backup.sourceFileRevision !== context.fileRevision || backup.backupId !== params.backupId) {
+        throw new Error("MCP_ERROR:" + stringifyJson({ code: "HOST_VERSION_BACKUP_REQUIRED", message: "A verified backup of this document file is required for an unmeasured Illustrator version." }));
       }
     }
   }

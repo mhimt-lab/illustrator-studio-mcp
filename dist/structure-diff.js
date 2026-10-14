@@ -62,8 +62,14 @@ export class StructureSnapshotDocumentMismatchError extends Error {
     }
 }
 export class StructureSnapshotTooLargeError extends Error {
+    collection;
+    total;
+    limit;
     constructor(collection, total, limit) {
         super(`The document has ${total} ${collection}; structure snapshots support at most ${limit}. Larger documents are unsupported for structural diff.`);
+        this.collection = collection;
+        this.total = total;
+        this.limit = limit;
         this.name = 'StructureSnapshotTooLargeError';
     }
 }

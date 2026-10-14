@@ -1,3 +1,4 @@
+import { HOST_FILE_PATH_HELPERS, sameFilePath } from '../file-path.js';
 import { realpath } from 'node:fs/promises';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
@@ -134,7 +135,9 @@ export async function admitSource(source, inspector) {
 }
 export async function admitSourceWithColorSpace(source, inspector) {
     const admission = await admitSourceInspection(source, inspector);
-    return admission.status === 'admitted' ? { admission: admission.value, colorSpace: admission.colorSpace } : { admission: admission.value, colorSpace: null };
+    return admission.status === 'admitted'
+        ? { admission: admission.value, colorSpace: admission.colorSpace, icc: admission.icc }
+        : { admission: admission.value, colorSpace: null, icc: null };
 }
 async function admitSourceInspection(source, inspector) {
     const blocked = (value) => ({ status: 'blocked', value });
@@ -169,7 +172,7 @@ async function admitSourceInspection(source, inspector) {
     }
     const pixels = inspection.metadata.pixels;
     const ppi = inspection.metadata.nativePpi;
-    return { status: 'admitted', colorSpace: inspection.metadata.colorSpace, value: {
+    return { status: 'admitted', colorSpace: inspection.metadata.colorSpace, icc: inspection.metadata.icc, value: {
             status: 'admitted', resolvedPath, bytes: inspection.file.bytes, modifiedAt: inspection.file.modifiedAt,
             sha256: inspection.file.sha256, format: format.value,
             pixels: pixels.status === 'available' ? { width: pixels.value.width, height: pixels.value.height } : null,
@@ -421,7 +424,7 @@ export const placeImageResultSchema = z.union([
         const admission = result.plan.admission;
         if (Math.abs(result.created.position[0] - result.plan.position[0]) > PLACE_IMAGE_TOLERANCE_PT ||
             Math.abs(result.created.position[1] - result.plan.position[1]) > PLACE_IMAGE_TOLERANCE_PT ||
-            (admission.status === 'admitted' && result.created.filePath !== admission.resolvedPath) ||
+            (admission.status === 'admitted' && !sameFilePath(result.created.filePath, admission.resolvedPath)) ||
             (result.plan.name !== null && result.created.name !== result.plan.name) ||
             (result.plan.size !== null && (Math.abs(result.created.width - result.plan.size.width) > PLACE_IMAGE_TOLERANCE_PT ||
                 Math.abs(result.created.height - result.plan.size.height) > PLACE_IMAGE_TOLERANCE_PT))) {
@@ -523,7 +526,8 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
         throw new Error('Image placement terminal result requires attestation.');
     await assertOperationSafetyAdapterConformance({ registration: PLACE_IMAGE_SAFETY, plan, result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
-export const PLACE_IMAGE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
+export const PLACE_IMAGE_SCRIPT = `${HOST_FILE_PATH_HELPERS}
+${MUTATION_TRANSACTION_SCRIPT}
 ${PLACE_FIT_SCRIPT}
 var PLACE_IMAGE_MAX_DIRECT_ITEMS = ${PLACE_IMAGE_MAX_DIRECT_ITEMS};
 var PLACE_IMAGE_MAX_LAYER_DEPTH = ${PLACE_IMAGE_MAX_LAYER_DEPTH};
@@ -665,14 +669,10 @@ function placeArtboardRect(document, artboardIndex) {
   return bounds;
 }
 
-/** Measured: PlacedItem UUIDs resolve through the native placedItems collection, not getPageItemFromUuid. */
+/** A PlacedItem resolves by direct native UUID reference, with the type taken from the item's own collection row. */
 function placeFind(document, uuid) {
-  var collection = document.placedItems;
-  if (!collection || typeof collection.length !== "number") throw mutationError("preflight_failed", "The document placed-item collection is unavailable.");
-  for (var index = 0; index < collection.length; index++) {
-    if (String(collection[index].uuid) === uuid) return collection[index];
-  }
-  return null;
+  var resolved = resolvePageItem(document, uuid);
+  return resolved !== null && resolved.typename === "PlacedItem" ? resolved.item : null;
 }
 
 /** Host-side confirmation of the admitted file identity: existence and byte length at this moment. */
@@ -813,7 +813,7 @@ function placeVerify(preflight, plan, state) {
     throw mutationError("verify_mismatch", "The placed image is not the only new front item of its layer.");
   }
   var read = placeReadItem(item);
-  if (read.filePath !== params.admission.resolvedPath) throw mutationError("verify_mismatch", "The placed image links a different file than the admitted source.");
+  if (!hostFilePathMatches(read.filePath, params.admission.resolvedPath)) throw mutationError("verify_mismatch", "The placed image links a different file than the admitted source.");
   if (Math.abs(read.position[0] - plan.position[0]) > PLACE_IMAGE_TOLERANCE_PT || Math.abs(read.position[1] - plan.position[1]) > PLACE_IMAGE_TOLERANCE_PT) {
     throw mutationError("verify_mismatch", "The placed image position does not match the plan.");
   }

@@ -4,7 +4,7 @@ const SCHEMA_KEYWORDS = new Set(['items', 'additionalItems', 'additionalProperti
 const SCHEMA_ARRAY_KEYWORDS = new Set(['anyOf', 'oneOf', 'allOf', 'prefixItems', 'items']);
 const SCHEMA_MAP_KEYWORDS = new Set(['properties', 'patternProperties', 'definitions', '$defs', 'dependencies', 'dependentSchemas']);
 export const MIN_DEDUPLICATED_SCHEMA_BYTES = 48;
-const DEFINITION_PREFIX = 'S';
+const DEFINITION_PREFIX = '';
 const LOCAL_DEFINITION_REF = /^#\/(?:definitions|\$defs)\/[^/~]+$/;
 const DIALECT_2020_12 = 'https://json-schema.org/draft/2020-12/schema';
 function definitionsKeyword(schema) {
@@ -41,10 +41,11 @@ function collectRefs(schema, refs) {
         refs.push(schema.$ref);
     forEachSchemaChild(schema, (child) => { collectRefs(child, refs); });
 }
-export function deduplicateJsonSchema(schema) {
+export function deduplicateJsonSchema(schema, minimumBytes = MIN_DEDUPLICATED_SCHEMA_BYTES) {
     const root = structuredClone(schema);
     const keyword = definitionsKeyword(root);
     const refPrefix = `#/${keyword}/`;
+    const shortestRefBytes = Buffer.byteLength(JSON.stringify({ $ref: `${refPrefix}${DEFINITION_PREFIX}1` }));
     const existingRefs = [];
     collectRefs(root, existingRefs);
     if (existingRefs.some((ref) => !ref.startsWith(refPrefix) || !LOCAL_DEFINITION_REF.test(ref)))
@@ -83,7 +84,7 @@ export function deduplicateJsonSchema(schema) {
             let name;
             do {
                 counter += 1;
-                name = `${DEFINITION_PREFIX}${counter}`;
+                name = `${DEFINITION_PREFIX}${counter.toString(36)}`;
             } while (usedNames.has(name));
             usedNames.add(name);
             return name;
@@ -93,9 +94,16 @@ export function deduplicateJsonSchema(schema) {
         const id = nodeId.get(node);
         if (!isRoot && definitionNames.has(id))
             return { $ref: `${refPrefix}${definitionNames.get(id)}` };
-        forEachSchemaChild(node, (child, replace) => { replace(rewrite(child, false)); });
-        if (isRoot || (occurrences.get(id) ?? 0) < 2 || (nodeBytes.get(id) ?? 0) < MIN_DEDUPLICATED_SCHEMA_BYTES)
+        if (minimumBytes < MIN_DEDUPLICATED_SCHEMA_BYTES && (nodeBytes.get(id) ?? 0) <= shortestRefBytes)
             return node;
+        forEachSchemaChild(node, (child, replace) => { replace(rewrite(child, false)); });
+        if (isRoot || (occurrences.get(id) ?? 0) < 2 || (nodeBytes.get(id) ?? 0) < minimumBytes)
+            return node;
+        if (minimumBytes < MIN_DEDUPLICATED_SCHEMA_BYTES) {
+            const bodyBytes = Buffer.byteLength(JSON.stringify(node));
+            if ((occurrences.get(id) ?? 0) * (bodyBytes - shortestRefBytes) <= bodyBytes + 6)
+                return node;
+        }
         const name = nextName();
         definitionNames.set(id, name);
         definitions[name] = node;
@@ -108,13 +116,13 @@ export function deduplicateJsonSchema(schema) {
         if (isObject(body))
             existingDefinitions[name] = rewrite(body, false);
     }
-    inlineSingleUseDefinitions(rewritten, definitions, existingDefinitions, refPrefix);
+    inlineUnprofitableDefinitions(rewritten, definitions, existingDefinitions, refPrefix, minimumBytes < MIN_DEDUPLICATED_SCHEMA_BYTES);
     const table = { ...existingDefinitions, ...definitions };
     if (Object.keys(table).length === 0)
         return rewritten;
     return { ...rewritten, [keyword]: table };
 }
-function inlineSingleUseDefinitions(root, definitions, existing, refPrefix) {
+function inlineUnprofitableDefinitions(root, definitions, existing, refPrefix, checkSize) {
     for (;;) {
         const refs = [];
         collectRefs(root, refs);
@@ -127,11 +135,22 @@ function inlineSingleUseDefinitions(root, definitions, existing, refPrefix) {
         const counts = new Map();
         for (const ref of refs)
             counts.set(ref, (counts.get(ref) ?? 0) + 1);
-        const single = Object.keys(definitions).filter((name) => (counts.get(`${refPrefix}${name}`) ?? 0) <= 1);
-        if (single.length === 0)
+        const inline = Object.keys(definitions).filter((name) => {
+            const ref = `${refPrefix}${name}`;
+            const count = counts.get(ref) ?? 0;
+            if (count <= 1)
+                return true;
+            if (!checkSize)
+                return false;
+            const bodyBytes = Buffer.byteLength(JSON.stringify(definitions[name]));
+            const refBytes = Buffer.byteLength(JSON.stringify({ $ref: ref }));
+            const entryBytes = Buffer.byteLength(JSON.stringify({ [name]: definitions[name] })) - 1;
+            return count * (bodyBytes - refBytes) <= entryBytes;
+        });
+        if (inline.length === 0)
             return;
-        const bodies = new Map(single.map((name) => [`${refPrefix}${name}`, definitions[name]]));
-        for (const name of single)
+        const bodies = new Map(inline.map((name) => [`${refPrefix}${name}`, definitions[name]]));
+        for (const name of inline)
             delete definitions[name];
         const substitute = (node) => {
             if (typeof node.$ref === 'string' && Object.keys(node).length === 1 && bodies.has(node.$ref)) {
@@ -149,6 +168,7 @@ function inlineSingleUseDefinitions(root, definitions, existing, refPrefix) {
     }
 }
 export const PUBLISHED_DEPTH_KEY = 'x-published-depth';
+export const PUBLISHED_AS_KEY = 'x-published-as';
 const SUMMARY_KEYWORDS = ['type', 'const', 'enum', 'description'];
 const CONDITIONAL_KEYWORDS = ['if', 'then', 'else'];
 export function truncateJsonSchema(schema, maxDepth) {
@@ -235,16 +255,45 @@ export function withoutDescriptions(schema) {
     forEachSchemaChild(schema, (child) => { withoutDescriptions(child); });
     return schema;
 }
+export const COMPACT_DATE_TIME_PATTERN = '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?(?:Z|[+-]\\d{2}:\\d{2})$';
+export function compactDateTimePatterns(schema) {
+    if (schema.format === 'date-time' && typeof schema.pattern === 'string')
+        schema.pattern = COMPACT_DATE_TIME_PATTERN;
+    forEachSchemaChild(schema, (child) => { compactDateTimePatterns(child); });
+    return schema;
+}
 function hasPublishedDepthMarker(schema) {
     return JSON.stringify(schema).includes(`"${PUBLISHED_DEPTH_KEY}"`);
 }
+export function applyPublishedAs(schema) {
+    if (!JSON.stringify(schema).includes(`"${PUBLISHED_AS_KEY}"`))
+        return schema;
+    const replace = (node) => {
+        const replacement = node[PUBLISHED_AS_KEY];
+        if (replacement !== undefined) {
+            if (!isObject(replacement))
+                throw new Error(`${PUBLISHED_AS_KEY} must be a JSON Schema object.`);
+            return structuredClone(replacement);
+        }
+        forEachSchemaChild(node, (child, swap) => { swap(replace(child)); });
+        return node;
+    };
+    return replace(structuredClone(schema));
+}
 export function publishToolDefinition(tool) {
-    let inputSchema = tool.inputSchema;
+    let inputSchema = applyPublishedAs(tool.inputSchema);
     if (hasPublishedDepthMarker(inputSchema))
         inputSchema = truncateJsonSchema(inputSchema, Number.POSITIVE_INFINITY);
-    const published = { ...tool, inputSchema: deduplicateJsonSchema(inputSchema) };
+    const originalInput = deduplicateJsonSchema(inputSchema);
+    const compactInput = deduplicateJsonSchema(inputSchema, 0);
+    const published = { ...tool, inputSchema: Buffer.byteLength(JSON.stringify(compactInput)) < Buffer.byteLength(JSON.stringify(originalInput))
+            ? compactInput : originalInput };
     if (tool.outputSchema !== undefined) {
-        published.outputSchema = withoutDescriptions(deduplicateJsonSchema(tool.outputSchema));
+        const outputSchema = compactDateTimePatterns(structuredClone(applyPublishedAs(tool.outputSchema)));
+        const originalOutput = withoutDescriptions(deduplicateJsonSchema(outputSchema));
+        const compactOutput = deduplicateJsonSchema(withoutDescriptions(structuredClone(outputSchema)), 0);
+        published.outputSchema = Buffer.byteLength(JSON.stringify(compactOutput)) < Buffer.byteLength(JSON.stringify(originalOutput))
+            ? compactOutput : originalOutput;
     }
     return published;
 }

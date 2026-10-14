@@ -2,12 +2,15 @@ import { constants } from 'node:fs';
 import { access, lstat, readdir } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { defaultStateRoot } from './command-store.js';
+import { CursorSigner } from './cursor.js';
 import { appleScriptApplicationReference, BETA_ILLUSTRATOR_APPLICATION, detectRunningIllustratorBundles, illustratorApplicationTarget, resolveIllustratorApplication, runningIllustratorChannelBundleIds, spotlightQueryForApplication, STABLE_ILLUSTRATOR_APPLICATION, } from './illustrator-application.js';
 import { defaultCommandRunner, describeCommandOutcome } from './command-runner.js';
+import { ReleaseBarrierStore } from './release-barrier.js';
 import { summarizeEditSessionRecords } from './edit-session.js';
 import { inFileProviderDomain, summarizeSaveAsRecords } from './save-as-session.js';
 import { isWindowsPrivateState, validatePrivateStateRoot } from './private-state.js';
 import { quarantineArea } from './state-quarantine.js';
+import { probeWindowsAttach, windowsCommandRunner, WINDOWS_ILLUSTRATOR_APPLICATION, WINDOWS_READ_ONLY_NOTICE } from './windows/com-transport.js';
 export { spotlightQueryForApplication } from './illustrator-application.js';
 export const DOCTOR_REPORT_VERSION = 1;
 export const MINIMUM_NODE_MAJOR = 20;
@@ -21,10 +24,12 @@ export function defaultDoctorEnvironment() {
     return {
         platform: process.platform,
         nodeVersion: process.versions.node,
-        application: resolveIllustratorApplication({ env: process.env.ILLUSTRATOR_APPLICATION }).application,
+        application: process.platform === 'win32'
+            ? process.env.ILLUSTRATOR_APPLICATION?.trim() || WINDOWS_ILLUSTRATOR_APPLICATION
+            : resolveIllustratorApplication({ env: process.env.ILLUSTRATOR_APPLICATION }).application,
         stateRoot: defaultStateRoot(),
         uid: typeof process.getuid === 'function' ? process.getuid() : undefined,
-        runCommand: defaultCommandRunner,
+        runCommand: process.platform === 'win32' ? windowsCommandRunner : defaultCommandRunner,
     };
 }
 function errorMessage(error) {
@@ -364,6 +369,8 @@ export async function checkStateRoot(environment) {
     }
     try {
         await validatePrivateStateRoot(root);
+        if (isWindowsPrivateState())
+            evidence.attestation = 'owner-only protected DACL; fixed NTFS; no reparse or cloud entries';
     }
     catch (error) {
         return {
@@ -382,6 +389,22 @@ export async function checkStateRoot(environment) {
         };
     }
     const records = await Promise.all(SIGNING_RECORD_FILES.map((file) => describeSigningRecord(join(root, file), environment.uid)));
+    if (isWindowsPrivateState()) {
+        try {
+            const signing = await new CursorSigner(root).inspectWindowsSigningState();
+            Object.assign(evidence, { cursorSigningState: signing.state, cursorClaimId: signing.claimId,
+                cursorClaimAgeMs: signing.ageMs, cursorMissingKey: signing.missingKey, cursorMissingReady: signing.missingReady });
+            if (signing.state === 'initializing')
+                return {
+                    id: 'state_root', status: 'fail', evidence,
+                    summary: 'Cursor initialization is incomplete; the claim will not be taken over or repaired automatically.',
+                    recommendation: recovery,
+                };
+        }
+        catch (error) {
+            return { id: 'state_root', status: 'fail', evidence, summary: errorMessage(error), recommendation: recovery };
+        }
+    }
     const presentCount = records.filter((record) => record.present).length;
     evidence.signingRecordsPresent = presentCount;
     const problems = records.flatMap((record, index) => record.present && record.problem !== null ? [`${SIGNING_RECORD_FILES[index]} ${record.problem}`] : []);
@@ -408,6 +431,29 @@ export async function checkStateRoot(environment) {
         lockPresent = false;
     }
     evidence.activeCommandLockPresent = lockPresent;
+    let barriersInvalid = false;
+    try {
+        const barriers = new ReleaseBarrierStore(root);
+        const listing = await barriers.list({ uncapped: true });
+        evidence.releaseBarrierLayout = listing.layout;
+        evidence.releaseBarrierIntegrity = listing.invalid;
+        evidence.releaseBarrierPaths = listing.paths.length;
+        evidence.releaseBarrierGlobal = listing.global !== null;
+        if (listing.global !== null)
+            evidence.releaseBarrierGlobalGuidance = 'Save or close the open saved documents, then read illustrator_list_documents: the global barrier clears once every readable saved document is clean.';
+        evidence.releaseBarrierRecords = [...listing.paths, ...(listing.global === null ? [] : [listing.global])]
+            .map((record) => JSON.stringify({ scope: record.scope, sourcePath: record.sourcePath, fileRevision: record.fileRevision, source: record.source, commandId: record.commandId }));
+        evidence.releaseBarrierEntries = await readdir(barriers.directory).catch((error) => {
+            if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT')
+                return [];
+            throw error;
+        });
+        barriersInvalid = listing.invalid !== null;
+    }
+    catch (error) {
+        barriersInvalid = true;
+        evidence.releaseBarrierError = errorMessage(error);
+    }
     let editSessionsInvalid = 0;
     try {
         const sessions = await summarizeEditSessionRecords(root);
@@ -442,13 +488,16 @@ export async function checkStateRoot(environment) {
         }
     }
     return {
-        id: 'state_root', status: 'pass', evidence,
-        summary: presentCount === 0
-            ? 'State root is private (0700), writable, and not yet initialized for cursor signing.'
-            : 'State root is private (0700), writable, and holds a complete cursor signing record pair.',
+        id: 'state_root', status: barriersInvalid ? 'fail' : 'pass', evidence,
+        summary: isWindowsPrivateState()
+            ? 'State root attestation passed: owner-only protected DACL, writable; init leftovers are reported separately.'
+            : presentCount === 0
+                ? 'State root is private (0700), writable, and not yet initialized for cursor signing.'
+                : 'State root is private (0700), writable, and holds a complete cursor signing record pair.',
         ...(lockPresent ? { recommendation: 'An active-command lock exists. If no server is running, reconcile the recorded command with illustrator_reconcile before new mutations.' } : {}),
         ...(!lockPresent && editSessionsInvalid > 0 ? { recommendation: `${editSessionsInvalid} edit session record(s) under edit-sessions/ are unreadable and are left as is; they refuse every new edit session.` } : {}),
         ...(!lockPresent && editSessionsInvalid === 0 && saveAsSessions > 0 ? { recommendation: `${saveAsSessions} save-as session(s) are unresolved and block mutations; run illustrator_reconcile_save_as for each save_as_id under exports/.` } : {}),
+        ...(barriersInvalid ? { recommendation: 'Release-barrier evidence is unreadable or inconsistent. Inspect release-barriers/ manually; doctor retains every record and temporary twin.' } : {}),
     };
 }
 export function resolveBundleByAppleEventVersion(bundleCheck, bundles, appleEvent) {
@@ -473,6 +522,24 @@ export function resolveBundleByAppleEventVersion(bundleCheck, bundles, appleEven
 export async function runDoctor(environment = defaultDoctorEnvironment()) {
     const checks = [];
     checks.push(checkNodeRuntime(environment.nodeVersion));
+    if (environment.platform === 'win32') {
+        checks.push({ id: 'windows_platform', status: 'pass', evidence: { platform: 'win32' }, summary: 'Windows read-only transport selected.' });
+        const host = await probeWindowsAttach(environment.runCommand);
+        checks.push({ id: 'powershell_sta', status: host ? 'pass' : 'indeterminate',
+            evidence: { powerShellVersion: host?.powerShellVersion ?? null, apartmentState: host?.apartmentState ?? null },
+            summary: host ? 'Windows PowerShell 5.1 / STA verified.' : 'Windows PowerShell 5.1 / STA or process enumeration could not be verified.' });
+        const configured = environment.application === WINDOWS_ILLUSTRATOR_APPLICATION;
+        checks.push({ id: 'com_read_only', status: configured && host?.attachAvailable ? 'pass' : 'fail',
+            evidence: { progId: environment.application, processCount: host?.processCount ?? null,
+                attachAvailable: host?.attachAvailable ?? false, version: host?.version ?? null },
+            summary: configured && host?.attachAvailable ? 'Attached to the single running Illustrator; Version read only.'
+                : 'Illustrator attach unavailable or target unsupported; concurrent instances are refused and Illustrator is never launched.',
+            ...(!(configured && host?.attachAvailable) ? { recommendation: 'Use Illustrator.Application and start exactly one Illustrator instance.' } : {}) });
+        checks.push({ id: 'windows_mutations', status: 'skip', evidence: { mutationsAvailable: false }, summary: WINDOWS_READ_ONLY_NOTICE });
+        checks.push(await checkStateRoot(environment));
+        return { version: DOCTOR_REPORT_VERSION, generatedAt: new Date().toISOString(), application: environment.application,
+            stateRoot: environment.stateRoot, checks, ok: checks.every((check) => check.status === 'pass' || check.status === 'skip') };
+    }
     const platform = await checkMacosPlatform(environment);
     checks.push(platform);
     let running = false;

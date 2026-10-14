@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { TEXT_RESULT_ADMISSION_BYTES, TEXT_RESULT_SIZE_SCRIPT, textResultBytes, textResultSizeMessage } from './text-result-size.js';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
@@ -6,18 +7,23 @@ import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema } from '../mutation-result-schema-core.js';
 import { canonicalDigest, operationSafetyPolicyToMcpAnnotations } from '../operation-safety-policy-core.js';
 import { AREA_TEXT_SNAPSHOT_SCRIPT } from './area-text-host-script.js';
-import { PLAIN_POINT_TEXT_V1, POINT_TEXT_BLOCKERS_SCRIPT, POINT_TEXT_SNAPSHOT_SCRIPT, pointTextApplyBlockers, } from './point-text-host-script.js';
-import { classifyTextLayoutTerminal, mapTextLayoutError, sameCanonical, TEXT_LAYOUT_SNAPSHOT_SCRIPT, textLayoutBlockerSchema, textLayoutOrientationSchema, textLayoutSafetyAsserter, textLayoutSafetyRegistration, textLayoutSnapshotInputSchema, textLayoutSnapshotSchema, textLayoutTransactionSchema, } from './text-layout-shared.js';
+import { PLAIN_POINT_TEXT_V1, POINT_TEXT_BLOCKERS_SCRIPT, POINT_TEXT_JUSTIFICATIONS, POINT_TEXT_SNAPSHOT_SCRIPT, pointTextApplyBlockers, } from './point-text-host-script.js';
+import { decodeTextLayoutRuns, encodeTextLayoutRuns, TEXT_LAYOUT_RUNS_SCRIPT, textLayoutRunSchemasFor } from './text-layout-runs.js';
+import { classifyTextLayoutTerminal, mapTextLayoutError, sameCanonical, TEXT_LAYOUT_SNAPSHOT_SCRIPT, textLayoutBlockerSchema, textLayoutOrientationSchema, textLayoutSafetyAsserter, textLayoutSafetyRegistration, textLayoutTransactionSchema, } from './text-layout-shared.js';
 export const SET_TEXT_ORIENTATION_OPERATION = 'set_text_orientation';
 export const SET_TEXT_ORIENTATION_VALIDATOR = { kind: SET_TEXT_ORIENTATION_OPERATION, version: 1 };
-const CANONICAL_VERSION = 1;
-const RESULT_SCHEMA_VERSION = 1;
+const CANONICAL_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 3;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 2;
 export const TEXT_LEADING_MAX = 1296;
 export const TEXT_AUTO_LEADING_FACTOR = Number(PLAIN_POINT_TEXT_V1.paragraph.autoLeadingAmount) / 100;
 const leadingRequestSchema = z.union([z.number().finite().positive().max(TEXT_LEADING_MAX), z.literal('auto')]);
+const orientationWireSchemas = textLayoutRunSchemasFor(POINT_TEXT_JUSTIFICATIONS, 'text-orientation');
+const textLayoutSnapshotSchema = orientationWireSchemas.snapshot;
+const textLayoutSnapshotInputSchema = orientationWireSchemas.input;
+const orientationBlockerSchema = z.enum([...textLayoutBlockerSchema.options, 'result_too_large']);
 export const setTextOrientationPlanSchema = z.strictObject({
     operation: z.literal(SET_TEXT_ORIENTATION_OPERATION),
     documentKey: z.string().min(1).max(16_384),
@@ -26,7 +32,7 @@ export const setTextOrientationPlanSchema = z.strictObject({
     leading: leadingRequestSchema.nullable(),
     before: textLayoutSnapshotSchema,
     after: textLayoutSnapshotSchema,
-    applyBlockedReasonCodes: z.array(textLayoutBlockerSchema),
+    applyBlockedReasonCodes: z.array(orientationBlockerSchema),
     confirmationStatus: z.enum(['required', 'confirmed']),
     applyAllowed: z.boolean(),
 }).superRefine((plan, context) => {
@@ -39,7 +45,7 @@ export const setTextOrientationPlanSchema = z.strictObject({
     if (plan.before.kind === 'TextType.AREATEXT' && plan.before.fit?.status !== 'fits') {
         context.addIssue({ code: 'custom', message: 'A text-orientation plan requires area text that fits its frame.' });
     }
-    const expected = predictOrientationAfter(plan.before, plan.orientation, plan.leading);
+    const expected = predictOrientationWireAfter(plan.before, plan.orientation, plan.leading);
     if (!sameCanonical(expected, plan.after)) {
         context.addIssue({ code: 'custom', message: 'A text-orientation plan may move only the orientation and the requested leading.' });
     }
@@ -61,7 +67,10 @@ export function predictOrientationAfter(before, orientation, leading) {
         }),
     };
 }
-const transactionSchema = textLayoutTransactionSchema('Text orientation');
+export function predictOrientationWireAfter(before, orientation, leading) {
+    return encodeTextLayoutRuns(predictOrientationAfter(decodeTextLayoutRuns(before), orientation, leading));
+}
+const transactionSchema = textLayoutTransactionSchema('Text orientation', textLayoutSnapshotSchema);
 export const setTextOrientationResultSchema = z.union([
     z.strictObject({
         operation: z.literal(SET_TEXT_ORIENTATION_OPERATION), applied: z.literal(false),
@@ -75,6 +84,8 @@ export const setTextOrientationResultSchema = z.union([
 ]).superRefine((result, context) => {
     if (result.transaction.state === 'planned') {
         const blockers = pointTextApplyBlockers(result.document.mutationAllowed, result.plan.before);
+        if (textResultBytes(result.plan) > TEXT_RESULT_ADMISSION_BYTES)
+            blockers.push('result_too_large');
         if (result.plan.confirmationStatus !== 'required' || !sameCanonical(result.plan.applyBlockedReasonCodes, blockers)) {
             context.addIssue({ code: 'custom', message: 'A planned text-orientation change must expose exact blockers.' });
         }
@@ -184,10 +195,10 @@ function orientationPreflight(forApply) {
     throw mutationError("preflight_failed", "Text-orientation changes require area text that shows its whole story.");
   }
   if (forApply) {
-    if (!textLayoutSame(resolved.before, params.expectedBefore)) {
+    if (!textLayoutSame(resolved.before, textLayoutRunsDecode(params.expectedBefore, "expected_before"))) {
       throw mutationError("preflight_failed", "Target state does not match expected_before.");
     }
-    if (!textLayoutSame(orientationPredictAfter(resolved.before), params.confirmedAfter)) {
+    if (!textLayoutSame(orientationPredictAfter(resolved.before), textLayoutRunsDecode(params.confirmedAfter, "confirmed_after"))) {
       throw mutationError("preflight_failed", "confirmed_after does not match the derived orientation state.");
     }
   }
@@ -195,7 +206,7 @@ function orientationPreflight(forApply) {
 }
 
 function orientationPlan(preflight) {
-  return {
+  var plan = {
     operation: "set_text_orientation", documentKey: preflight.context.key, targetUuid: params.targetUuid,
     orientation: params.orientation, leading: params.leading,
     before: preflight.before,
@@ -204,6 +215,10 @@ function orientationPlan(preflight) {
     confirmationStatus: params.apply === true ? "confirmed" : "required",
     applyAllowed: params.apply === true && preflight.blockers.length === 0
   };
+  // The result carries the runs, so the runs are what the estimate counts.
+  var wire = textResultAdmitPlan(textLayoutRunsPlan(plan));
+  plan.applyAllowed = wire.applyAllowed;
+  return plan;
 }
 
 function orientationRevalidate(preflight, plan) {
@@ -279,7 +294,7 @@ function orientationRollback(state) {
     current = textLayoutSnapshot(preflight.document, target, params.targetUuid);
   } catch (error) { return { status: "indeterminate", message: "Rollback target state is indeterminate." }; }
   if (textLayoutSame(current, preflight.before)) {
-    state.operationState.rollbackEvidence.restoredSnapshot = current;
+    state.operationState.rollbackEvidence.restoredSnapshot = textLayoutRunsEncode(current);
     return { status: "verified" };
   }
   var mask = { orientation: true, start: 0, end: params.leading === null ? 0 : preflight.before.characters.length,
@@ -292,7 +307,7 @@ function orientationRollback(state) {
   var restored;
   try { restored = textLayoutSnapshot(preflight.document, target, params.targetUuid); }
   catch (verifyError) { return { status: "indeterminate", message: "Rollback verification is indeterminate." }; }
-  state.operationState.rollbackEvidence.restoredSnapshot = restored;
+  state.operationState.rollbackEvidence.restoredSnapshot = textLayoutRunsEncode(restored);
   return textLayoutSame(restored, preflight.before)
     ? { status: "verified" }
     : { status: "failed", message: "Rollback did not restore the exact before text-layout state." };
@@ -324,14 +339,16 @@ if (app.documents.length > 0 && app.activeDocument === orientationExecution.pref
 }
 var result = { operation: "set_text_orientation",
   applied: orientationExecution.transaction.state === "verified",
-  document: orientationDocument, plan: orientationExecution.plan, transaction: orientationExecution.transaction };
-if (orientationExecution.transaction.state === "verified") result.postcondition = orientationExecution.value;
+  document: orientationDocument, plan: textLayoutRunsPlan(orientationExecution.plan), transaction: orientationExecution.transaction };
+if (orientationExecution.transaction.state === "verified") result.postcondition = textLayoutRunsEncode(orientationExecution.value);
 `;
 export const SET_TEXT_ORIENTATION_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
 ${POINT_TEXT_SNAPSHOT_SCRIPT}
 ${POINT_TEXT_BLOCKERS_SCRIPT}
 ${AREA_TEXT_SNAPSHOT_SCRIPT}
 ${TEXT_LAYOUT_SNAPSHOT_SCRIPT}
+${TEXT_LAYOUT_RUNS_SCRIPT}
+${TEXT_RESULT_SIZE_SCRIPT}
 ${SET_TEXT_ORIENTATION_MODULE_SCRIPT}${SET_TEXT_ORIENTATION_RUNNER_SCRIPT}`;
 export const SET_TEXT_ORIENTATION_HOST_SCRIPT_DIGEST = canonicalSha256(SET_TEXT_ORIENTATION_SCRIPT);
 export const SET_TEXT_ORIENTATION_ADAPTER_IDENTITY = mutationAdapterIdentity({
@@ -344,6 +361,13 @@ export const SET_TEXT_ORIENTATION_ADAPTER_IDENTITY = mutationAdapterIdentity({
 });
 function normalizedRequest(input) {
     const request = internalInputSchema.parse(input);
+    if (request.apply) {
+        const plan = { operation: SET_TEXT_ORIENTATION_OPERATION, documentKey: request.expectedDocumentKey,
+            targetUuid: request.targetUuid, orientation: request.orientation, leading: request.leading,
+            before: request.expectedBefore, after: request.confirmedAfter };
+        if (textResultBytes(plan) > TEXT_RESULT_ADMISSION_BYTES)
+            throw new Error(textResultSizeMessage(plan));
+    }
     const digestRequest = 'commandId' in request
         ? (({ commandId: _commandId, ...rest }) => rest)(request)
         : request;
@@ -362,7 +386,8 @@ export const setTextOrientationToolContract = {
         + 'back on. The orientation must change. Area text must show its whole story before and after; a change that '
         + 'makes it overflow is rolled back. Kinsoku, mojikumi, burasagari and roman hanging are not supported. Apply '
         + 'performs exact compare-and-set over a per-character fingerprint, native read-back verification, and the '
-        + 'measured inverse (original orientation, then each character\'s own leading).',
+        + 'measured inverse (original orientation, then each character\'s own leading). Snapshots carry `runs` of equal attributes '
+        + '(echo them unchanged); a frame whose estimated apply result still exceeds 209715 UTF-8 bytes is refused with result_too_large.',
     inputSchema,
     publicInputSchema: setTextOrientationPublicInputSchema,
     outputSchema: setTextOrientationResponseSchema,
@@ -373,7 +398,8 @@ function safetyView(value) {
     const result = setTextOrientationResultSchema.parse(value);
     return {
         operationId: SET_TEXT_ORIENTATION_OPERATION, documentKey: result.document.key, targetUuid: result.plan.targetUuid,
-        before: result.plan.before, after: result.plan.after,
+        before: decodeTextLayoutRuns(result.plan.before),
+        after: decodeTextLayoutRuns(result.plan.after),
         changeSet: { orientation: result.plan.orientation, leading: result.plan.leading },
         blocked: result.plan.applyBlockedReasonCodes.length > 0,
         confirmationStatus: result.plan.confirmationStatus, applyAllowed: result.plan.applyAllowed,

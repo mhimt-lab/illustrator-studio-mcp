@@ -1,4 +1,3 @@
-import { hostVersionConsentSchema } from '../../host-version-consent.js';
 import { z } from 'zod';
 import { canonicalSha256 } from '../../mutation-canonical.js';
 import { documentContextSchema, mutationAuditSchema } from '../../mutation-result-schema-core.js';
@@ -50,7 +49,6 @@ const blockedReasonSchema = z.enum([
     'host_version_unmeasured',
 ]);
 const planSchema = z.strictObject({
-    hostVersionConsent: hostVersionConsentSchema,
     operation: z.literal('create_swatch_resource'),
     documentKey: z.string().min(1).max(16_384),
     resource: swatchResourceDefinitionSchema,
@@ -277,7 +275,7 @@ export const swatchResourceResultSchema = z.union([
         }
     }
     if (result.plan.resource.kind === 'spot' &&
-        result.plan.hostVersionVerified !== hostVersionAdmitted('spot_rollback', result.document.appVersion, result.plan.hostVersionConsent)) {
+        result.plan.hostVersionVerified !== hostVersionAdmitted('spot_rollback', result.document.appVersion)) {
         context.addIssue({ code: 'custom', message: 'Spot host-version verification must match the host version policy.', path: ['plan', 'hostVersionVerified'] });
     }
     if (result.transaction.state === 'rolled_back' &&

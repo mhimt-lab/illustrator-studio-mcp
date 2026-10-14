@@ -58,40 +58,20 @@ export async function verifyDeleteBackup(store, backupId) {
     });
 }
 export const DELETE_TARGET_LOOKUP_SCRIPT = `
-function deleteScanCollection(collection, uuid, typename, found) {
-  for (var index = 0; index < collection.length; index++) {
-    var candidate = collection[index];
-    if (String(candidate.uuid) === uuid) found.push({ item: candidate, typename: typename });
-  }
-}
-/** Measured route: only the typed collections of the supported types (getPageItemFromUuid misreports some types). */
+/** Resolves a supported target (PathItem, TextFrame, GroupItem) by native UUID; any other item, and an absent one, is null. */
 function deleteResolveTyped(document, uuid) {
-  var found = [];
-  deleteScanCollection(document.pathItems, uuid, "PathItem", found);
-  deleteScanCollection(document.textFrames, uuid, "TextFrame", found);
-  deleteScanCollection(document.groupItems, uuid, "GroupItem", found);
-  if (found.length > 1) throw mutationError("preflight_failed", "More than one supported item carries UUID " + uuid + ".");
-  if (found.length === 0) return null;
-  if (String(found[0].item.typename) !== found[0].typename) throw mutationError("preflight_failed", "The item with UUID " + uuid + " does not report its collection type.");
-  return found[0];
+  var resolved = resolvePageItem(document, uuid);
+  if (resolved === null) return null;
+  if (resolved.typename !== "PathItem" && resolved.typename !== "TextFrame" && resolved.typename !== "GroupItem") return null;
+  return { item: resolved.item, typename: resolved.typename };
 }
-/** Diagnostic only: the typename the document-wide collection reports for a UUID outside the supported types. */
+/** Diagnostic only: the typename the document reports for a UUID outside the supported types. */
 function deleteOtherTypename(document, uuid) {
-  for (var index = 0; index < document.pageItems.length; index++) {
-    var item = document.pageItems[index];
-    if (String(item.uuid) === uuid) return String(item.typename);
-  }
-  return null;
+  var resolved = resolvePageItem(document, uuid);
+  return resolved === null ? null : resolved.typename;
 }
-/** Measured absence (D1-D4): the lookup throws (MRAP 1200) and no typed collection holds the UUID. */
+/** Absence: no direct reference answers and a walk that reached every page item finds no item with the UUID; an incomplete walk is refused, never read as absent. */
 function deleteIsAbsent(document, uuid) {
-  var lookupThrew = false;
-  try { document.getPageItemFromUuid(uuid); } catch (_lookupError) { lookupThrew = true; }
-  if (!lookupThrew) return false;
-  var found = [];
-  deleteScanCollection(document.pathItems, uuid, "PathItem", found);
-  deleteScanCollection(document.textFrames, uuid, "TextFrame", found);
-  deleteScanCollection(document.groupItems, uuid, "GroupItem", found);
-  return found.length === 0;
+  return resolvePageItem(document, uuid) === null;
 }
 `;

@@ -1,3 +1,4 @@
+import { DIRTY_FILE_BARRIER_REASON, DIRTY_FILE_BLOCKED_REASON, DIRTY_FILE_GLOBAL_BARRIER_REASON, DIRTY_FILE_SESSION_REASON, DIRTY_FILE_STORE_INVALID_REASON, } from './unsaved-document-guidance.js';
 export const JSX_RUNTIME = String.raw `
 function stringifyJson(value) {
   if (value === null || value === undefined) return "null";
@@ -26,6 +27,52 @@ function stringifyJson(value) {
     if (value.hasOwnProperty(key)) objectParts.push(stringifyJson(key) + ":" + stringifyJson(value[key]));
   }
   return "{" + objectParts.join(",") + "}";
+}
+
+// ES3 has no JSON.parse. Admit only JSON tokens and grammar before evaluating a value; in particular,
+// adjacent arrays must not become JavaScript property access. The stack avoids recursive validation.
+function parseJsonValue(text) {
+  function reject() {
+    var error = new Error("Invalid JSON value.");
+    error.mutationReasonCode = "preflight_failed";
+    error.mutationPublicMessage = error.message;
+    throw error;
+  }
+  if (typeof text !== "string") reject();
+  var tokens = /"(?:[^"\\\x00-\x1f]|\\(?:["\\\/bfnrt]|u[0-9a-fA-F]{4}))*"|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null|[\[\]{},:]/g;
+  var whitespace = /^[ \t\r\n]*$/;
+  var stack = [{ kind: "root", state: "value" }], end = 0, match;
+  while ((match = tokens.exec(text)) !== null) {
+    if (!whitespace.test(text.substring(end, match.index))) reject();
+    end = tokens.lastIndex;
+    var token = match[0], frame = stack[stack.length - 1], state = frame.state;
+    if (state === "firstKey" || state === "key") {
+      if (token === "}" && state === "firstKey") stack.pop();
+      else { if (token.charAt(0) !== '"') reject(); frame.state = "colon"; }
+    } else if (state === "colon") {
+      if (token !== ":") reject();
+      frame.state = "value";
+    } else if (state === "commaOrEnd") {
+      if (token === ",") {
+        if (frame.kind === "array") frame.state = "value";
+        else frame.state = "key";
+      } else {
+        if ((frame.kind === "array" && token !== "]") || (frame.kind === "object" && token !== "}")) reject();
+        stack.pop();
+      }
+    } else if (state === "value" || state === "firstValue") {
+      if (state === "firstValue" && token === "]") { stack.pop(); continue; }
+      if (frame.kind === "root") frame.state = "done";
+      else frame.state = "commaOrEnd";
+      if (token === "[") stack.push({ kind: "array", state: "firstValue" });
+      else if (token === "{") stack.push({ kind: "object", state: "firstKey" });
+      else if (token === "]" || token === "}" || token === "," || token === ":") reject();
+    } else reject();
+  }
+  if (!whitespace.test(text.substring(end)) || stack.length !== 1 || stack[0].state !== "done") reject();
+  // JSON permits literal line/paragraph separators in strings, but ES3 string literals require escapes.
+  var source = text.replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  try { return eval("(" + source + ")"); } catch (parseError) { reject(); }
 }
 
 // Measured on 30.8.1: every read of an invalid page-item reference throws ReferenceError 45, and a native UUID lookup
@@ -71,7 +118,7 @@ function hostFailureMessage(error) {
     return message;
   }
   var detail;
-  try { detail = eval("(" + message.substring(prefix.length) + ")"); } catch (parseError) { return message; }
+  try { detail = parseJsonValue(message.substring(prefix.length)); } catch (parseError) { return message; }
   if (!detail || detail.code !== "OBJECT_NOT_FOUND" || typeof detail.uuid !== "string" || app.documents.length === 0) return message;
   var unproved;
   try { unproved = esAbsenceUnproved(app.activeDocument, [detail.uuid]); } catch (scanError) { unproved = "scan_failed"; }
@@ -81,6 +128,7 @@ function hostFailureMessage(error) {
 }
 
 function readJson(path) {
+  // Only reads server-written JSON; skip the guard because its ExtendScript performance is unmeasured (#635).
   var file = new File(path);
   file.encoding = "UTF-8";
   if (!file.open("r")) throw new Error("Cannot read " + path);
@@ -297,11 +345,51 @@ function getDocumentIdentity(doc, documentIndex) {
  * the open edit session (if any) the Node side handed to this host call for a document path. The
  * wrapper declares EDIT_SESSION_ADMISSION_INPUT only for commands that take part in edit sessions.
  */
-function editSessionForPath(path) {
+function editSessionForPath(path, documentKey) {
   if (typeof EDIT_SESSION_ADMISSION_INPUT === "undefined" || EDIT_SESSION_ADMISSION_INPUT === null || !path) return null;
   var sessions = EDIT_SESSION_ADMISSION_INPUT.sessions;
+  var matched = null;
   for (var sessionIndex = 0; sessionIndex < sessions.length; sessionIndex++) {
-    if (sessions[sessionIndex].sourcePath === path) return sessions[sessionIndex];
+    var session = sessions[sessionIndex];
+    var matches = session.sourcePath === path || (session.sourcePathMatch === path && documentKey === EDIT_SESSION_ADMISSION_INPUT.boundDocumentKey);
+    var forms = session.sourcePathForms || [];
+    for (var formIndex = 0; formIndex < forms.length; formIndex++) if (forms[formIndex] === path) matches = true;
+    if (matches) {
+      if (matched !== null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "EDIT_SESSION_DUPLICATE_PATH" }));
+      matched = session;
+    }
+  }
+  return matched;
+}
+
+/** The global barrier exception is new; only paths with Node's positive record/inode proof can use it. */
+function editSessionGlobalExempt(session, path) {
+  var paths = session.globalExemptPaths || [];
+  for (var index = 0; index < paths.length; index++) if (paths[index] === path) return true;
+  return false;
+}
+
+/**
+ * The reason a saved file with unsaved changes is not admitted as dirty_file, or null when it is.
+ * DIRTY_FILE_ADMISSION_INPUT is declared only for commands that take part.
+ * Node hands candidate spellings (NFC/NFD, ASCII letters lowered); only ASCII letters are lowered here, then compared exactly.
+ */
+function dirtyFileBlockedReason(path, pathOnly) {
+  var input = DIRTY_FILE_ADMISSION_INPUT;
+  var lowered = "";
+  for (var pathIndex = 0; pathIndex < path.length; pathIndex++) {
+    var pathCode = path.charCodeAt(pathIndex);
+    lowered += (pathCode >= 65 && pathCode <= 90) ? String.fromCharCode(pathCode + 32) : path.charAt(pathIndex);
+  }
+  for (var blockedIndex = 0; blockedIndex < input.blocked.length; blockedIndex++) {
+    var blocked = input.blocked[blockedIndex];
+    if (pathOnly && blocked.reason !== "release_barrier") continue;
+    if (!pathOnly && blocked.reason === "release_barrier") continue;
+    for (var candidateIndex = 0; candidateIndex < blocked.candidates.length; candidateIndex++) {
+      if (blocked.candidates[candidateIndex] === lowered) {
+        return blocked.reason === "release_barrier" ? ${JSON.stringify(DIRTY_FILE_BARRIER_REASON)} : ${JSON.stringify(DIRTY_FILE_SESSION_REASON)};
+      }
+    }
   }
   return null;
 }
@@ -317,19 +405,31 @@ function getDocumentContext() {
   var pathState = readDocumentPath(doc);
   var mutationProfile = null;
   var mutationBlockedReason = null;
+  var input = null;
+  if (typeof DIRTY_FILE_ADMISSION_INPUT !== "undefined" && DIRTY_FILE_ADMISSION_INPUT !== null && DIRTY_FILE_ADMISSION_INPUT.version === 1) input = DIRTY_FILE_ADMISSION_INPUT;
+  var editSession = null;
+  if (pathState.available && identity.fileExists !== false) editSession = editSessionForPath(identity.path, identity.key);
+  var matchingSession = editSession !== null && identity.fileRevision !== null && identity.fileRevision === editSession.sourceFileRevision;
+  var ownBarrier = null;
+  if (pathState.available && input !== null) ownBarrier = dirtyFileBlockedReason(identity.path, true);
   if (!pathState.available) mutationBlockedReason = "The document path could not be read (path_unavailable); mutation is refused.";
+  else if (identity.saved && identity.fileRevision && !matchingSession) mutationProfile = "saved_file";
+  else if (ownBarrier !== null) mutationBlockedReason = ownBarrier;
+  // Tentative: requireDocument confirms the structure digest before any change is admitted.
+  else if (matchingSession && (identity.saved || input === null || (!input.global && !input.invalid) || editSessionGlobalExempt(editSession, identity.path))) mutationProfile = "edit_session_file";
   else if (identity.fileExists === false) mutationProfile = "unsaved_document";
-  else if (!identity.saved) mutationBlockedReason = "Save pending document changes before mutation.";
-  else if (!identity.fileRevision) mutationBlockedReason = "The saved file revision could not be verified.";
-  else mutationProfile = "saved_file";
-  if (pathState.available && identity.fileExists !== false) {
-    var editSession = editSessionForPath(identity.path);
-    // Tentative: requireDocument confirms the structure digest before any change is admitted.
-    if (editSession !== null && identity.fileRevision !== null && identity.fileRevision === editSession.sourceFileRevision) {
-      mutationProfile = "edit_session_file";
-      mutationBlockedReason = null;
+  else if (!identity.saved) {
+    mutationBlockedReason = ${JSON.stringify(DIRTY_FILE_BLOCKED_REASON)};
+    if (input !== null) {
+      var dirtyBlockedReason = dirtyFileBlockedReason(identity.path, false);
+      if (dirtyBlockedReason !== null) mutationBlockedReason = dirtyBlockedReason;
+      else if (identity.fileRevision && input.invalid) mutationBlockedReason = ${JSON.stringify(DIRTY_FILE_STORE_INVALID_REASON)};
+      else if (identity.fileRevision && input.global) mutationBlockedReason = ${JSON.stringify(DIRTY_FILE_GLOBAL_BARRIER_REASON)};
+      else if (identity.fileRevision && input.allowDirtyFile === true) { mutationProfile = "dirty_file"; mutationBlockedReason = null; }
     }
   }
+  else if (!identity.fileRevision) mutationBlockedReason = "The saved file revision could not be verified.";
+  else mutationProfile = "saved_file";
   return {
     keyVersion: identity.keyVersion,
     key: identity.key,
@@ -382,7 +482,21 @@ function resolveExpectedDocument(expectedKey) {
 
 function requireDocument(expectedKey) {
   var context = resolveExpectedDocument(expectedKey);
-  var editSession = editSessionForPath(context.path);
+  var editSession = editSessionForPath(context.path, context.key);
+  // A session's transaction admission must not bypass this slice's own barrier or an unproven global exception.
+  if (editSession !== null && !context.mutationAllowed && typeof DIRTY_FILE_ADMISSION_INPUT !== "undefined" && DIRTY_FILE_ADMISSION_INPUT !== null &&
+      (context.mutationBlockedReason === ${JSON.stringify(DIRTY_FILE_BARRIER_REASON)} ||
+       ((DIRTY_FILE_ADMISSION_INPUT.global || DIRTY_FILE_ADMISSION_INPUT.invalid) && !editSessionGlobalExempt(editSession, context.path)))) {
+    throw new Error("MCP_ERROR:" + stringifyJson({ code: "DOCUMENT_NOT_SAVED", message: context.mutationBlockedReason }));
+  }
+  if (editSession === null && isShortDocumentKey(expectedKey) && context.path && /[^\x00-\x7f]/.test(context.path) &&
+      typeof EDIT_SESSION_ADMISSION_INPUT !== "undefined" && EDIT_SESSION_ADMISSION_INPUT !== null) {
+    for (var sessionIndex = 0; sessionIndex < EDIT_SESSION_ADMISSION_INPUT.sessions.length; sessionIndex++) {
+      if (/[^\x00-\x7f]/.test(EDIT_SESSION_ADMISSION_INPUT.sessions[sessionIndex].sourcePath)) {
+        throw new Error("MCP_ERROR:" + stringifyJson({ code: "EDIT_SESSION_PATH_UNMATCHED", message: "Pass the full document key to bind a non-ASCII path outside the finite comparison set." }));
+      }
+    }
+  }
   if (editSession !== null) {
     // Only the transaction runner can bind a change to the session head; any other script is refused before a change.
     if (typeof mutationEditSessionAdmit !== "function") {
@@ -402,6 +516,8 @@ export function buildJsxCommand(options) {
     return `(function () {\n${JSX_RUNTIME}\n` +
         (options.editSessionAdmission === undefined ? '' :
             `var EDIT_SESSION_ADMISSION_INPUT = ${JSON.stringify(options.editSessionAdmission)};\n`) +
+        (options.dirtyFileAdmission === undefined ? '' :
+            `var DIRTY_FILE_ADMISSION_INPUT = ${JSON.stringify(options.dirtyFileAdmission)};\n`) +
         `var COMMAND_ID = ${JSON.stringify(options.commandId)};\n` +
         `var PARAMS_PATH = ${JSON.stringify(options.paramsPath)};\n` +
         `var RESULT_PATH = ${JSON.stringify(options.resultPath)};\n` +

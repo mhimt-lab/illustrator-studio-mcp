@@ -58,11 +58,11 @@ export function samePathTarget(left, right) {
 }
 export const pathEditBlockerSchema = z.enum(['document_mutation_not_allowed', 'host_version_unmeasured', 'target_locked', 'target_hidden',
     'target_not_editable', 'layer_hidden', 'layer_locked']);
-export function pathEditBlockers(mutationAllowed, appVersion, before, consent) {
+export function pathEditBlockers(mutationAllowed, appVersion, before) {
     const blockers = [];
     if (!mutationAllowed)
         blockers.push('document_mutation_not_allowed');
-    if (!hostVersionAdmitted('edit_path_points', appVersion, consent))
+    if (!hostVersionAdmitted('edit_path_points', appVersion))
         blockers.push('host_version_unmeasured');
     const initial = blockers.length;
     if (before.locked)
@@ -114,27 +114,15 @@ function pathEditReadPointType(value) {
   throw mutationError("preflight_failed", "Unsupported path-point type.");
 }
 
-/** supportedPathFind resolution, re-confirmed in the typed pathItems collection; CompoundPathItem members are refused. */
+/** Direct native UUID resolution (type taken from the item's own collection row); a CompoundPathItem member is refused. */
 function pathEditResolveTarget(document, uuid) {
   if (typeof uuid !== "string" || uuid.length === 0) throw mutationError("preflight_failed", "target_uuid is required.");
-  var target = supportedPathFind(document, uuid);
-  if (target === null) pathEditFailTarget("OBJECT_NOT_FOUND", uuid);
-  if (String(target.typename) !== "PathItem") pathEditFailTarget("PATH_TARGET_UNSUPPORTED", uuid, "not_path_item:" + String(target.typename));
+  var resolved = resolvePageItem(document, uuid);
+  if (resolved === null) pathEditFailTarget("OBJECT_NOT_FOUND", uuid);
+  var target = resolved.item;
+  if (resolved.typename !== "PathItem") pathEditFailTarget("PATH_TARGET_UNSUPPORTED", uuid, "not_path_item:" + resolved.typename);
   if (typeof target.uuid !== "string" || target.uuid !== uuid) throw mutationError("preflight_failed", "Target native UUID is unavailable or changed.");
-  var matches = 0;
-  for (var index = 0; index < document.pathItems.length; index++) {
-    var candidate = document.pathItems[index];
-    if (String(candidate.uuid) !== uuid) continue;
-    if (String(candidate.typename) !== "PathItem") pathEditFailTarget("PATH_TARGET_UNSUPPORTED", uuid, "typed_collection_mismatch");
-    matches++;
-  }
-  if (matches !== 1) pathEditFailTarget("PATH_TARGET_UNSUPPORTED", uuid, "typed_collection_mismatch");
-  for (var compoundIndex = 0; compoundIndex < document.compoundPathItems.length; compoundIndex++) {
-    var members = document.compoundPathItems[compoundIndex].pathItems;
-    for (var memberIndex = 0; memberIndex < members.length; memberIndex++) {
-      if (String(members[memberIndex].uuid) === uuid) pathEditFailTarget("PATH_TARGET_UNSUPPORTED", uuid, "compound_path_member");
-    }
-  }
+  if (String(target.parent.typename) === "CompoundPathItem") pathEditFailTarget("PATH_TARGET_UNSUPPORTED", uuid, "compound_path_member");
   return target;
 }
 /** Layer-direct PathItems only (the measured fixture); group and CompoundPathItem members are refused. */

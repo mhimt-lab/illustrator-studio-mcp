@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { callTimingEnabled } from './call-timing.js';
 import { defaultCommandRunner } from './command-runner.js';
 import { IndeterminateExecutionError } from './domain.js';
 import { HostProcessExitError, } from './host-transport.js';
@@ -17,7 +18,7 @@ export function macSessionLockState(ioregOutput) {
 }
 export const defaultHostApplicationAvailabilityProbe = async () => {
     const stdout = await new Promise((resolve, reject) => {
-        execFile('/usr/sbin/ioreg', ['-n', 'Root', '-d1'], { timeout: 5_000 }, (error, output) => {
+        execFile('ioreg', ['-n', 'Root', '-d1'], { timeout: 5_000 }, (error, output) => {
             if (error)
                 reject(error);
             else
@@ -104,18 +105,27 @@ export const defaultIllustratorApplicationProbes = {
     running: () => detectRunningIllustratorBundles(defaultCommandRunner),
     resolveName: (name) => resolveIllustratorNameToBundleId(defaultCommandRunner, name),
 };
+const roundMs = (ms) => Math.round(ms * 10) / 10;
+function writeHostTiming(record) {
+    try {
+        process.stderr.write(`illustrator-studio-mcp: host-timing ${JSON.stringify(record)}\n`);
+    }
+    catch { }
+}
 export class OsascriptTransport {
     processRunner;
     hostApplicationAvailabilityProbe;
     applicationProbes;
     launchController;
     shProcessRunner;
-    constructor(processRunner, hostApplicationAvailabilityProbe, applicationProbes, launchController, shProcessRunner) {
+    platform;
+    constructor(processRunner, hostApplicationAvailabilityProbe, applicationProbes, launchController, shProcessRunner, platform = process.platform) {
         this.processRunner = processRunner;
         this.hostApplicationAvailabilityProbe = hostApplicationAvailabilityProbe;
         this.applicationProbes = applicationProbes;
         this.launchController = launchController;
         this.shProcessRunner = shProcessRunner;
+        this.platform = platform;
     }
     async assertHostAvailable(mode) {
         await this.hostApplicationAvailabilityProbe(mode);
@@ -142,10 +152,28 @@ export class OsascriptTransport {
             `    do javascript of file "${escapedPath}"\n  end timeout\nend tell\n`;
     }
     async launch(files, timeoutMs, recordExecution, onGo = () => undefined) {
-        if (this.launchController === 'sh')
-            await this.runShLauncher(files, timeoutMs, recordExecution, onGo);
-        else
-            await this.runNodeLauncher(files, timeoutMs, recordExecution, onGo);
+        if (!callTimingEnabled()) {
+            if (this.launchController === 'sh')
+                await this.runShLauncher(files, timeoutMs, recordExecution, onGo);
+            else
+                await this.runNodeLauncher(files, timeoutMs, recordExecution, onGo);
+            return;
+        }
+        const started = performance.now();
+        let goAt = null;
+        const timedGo = () => { goAt = performance.now(); onGo(); };
+        let outcome = 'error';
+        try {
+            if (this.launchController === 'sh')
+                await this.runShLauncher(files, timeoutMs, recordExecution, timedGo);
+            else
+                await this.runNodeLauncher(files, timeoutMs, recordExecution, timedGo);
+            outcome = 'result';
+        }
+        finally {
+            const ended = performance.now();
+            writeHostTiming({ launchMs: roundMs(ended - started), afterGoMs: goAt === null ? null : roundMs(ended - goAt), outcome });
+        }
     }
     async runNodeLauncher(files, timeoutMs, recordExecution, onGo) {
         const nonce = randomUUID();
@@ -299,7 +327,16 @@ export class OsascriptTransport {
                 clearTimeout(timer);
         }
     }
-    liveness(processGroupId) {
+    liveness(record) {
+        this.assertPosixLiveness();
+        return Promise.resolve(record.version === 1 ? this.processGroupLiveness(record.processGroupId) : 'unknown');
+    }
+    assertPosixLiveness() {
+        if (this.platform === 'win32')
+            throw new Error('POSIX process-group liveness must never be called on Windows.');
+    }
+    processGroupLiveness(processGroupId) {
+        this.assertPosixLiveness();
         try {
             process.kill(-processGroupId, 0);
             return 'active';

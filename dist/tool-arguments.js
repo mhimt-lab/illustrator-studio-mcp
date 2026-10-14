@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
+import { BATCH_STEP_NEXT_CALLS } from './adapters/batch-step-next-call.js';
 function editDistance(left, right) {
     let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
     for (let row = 1; row <= left.length; row += 1) {
@@ -49,18 +50,40 @@ export function formatToolArgumentError(toolName, issues) {
         : `${issue.path.map(String).join('.')}: ${issue.message}`));
     return `Input validation error: Invalid arguments for tool ${toolName}: ${formatted.join(', ')}`;
 }
+const MAX_SUMMARIZED_ISSUES = 4;
+function flattenIssues(issues, into, prefix = []) {
+    for (const issue of issues) {
+        const path = [...prefix, ...issue.path];
+        if (issue.code === 'invalid_union' && issue.errors.length > 0) {
+            for (const branch of issue.errors)
+                flattenIssues(branch, into, path);
+            continue;
+        }
+        into.add(path.length === 0 ? issue.message : `${path.map(String).join('.')}: ${issue.message}`);
+    }
+}
+export function summarizeValidationFailure(error) {
+    const lines = new Set();
+    flattenIssues(error.issues, lines);
+    const shown = [...lines].slice(0, MAX_SUMMARIZED_ISSUES);
+    return `${shown.join('; ')}${lines.size > shown.length ? `; and ${lines.size - shown.length} more` : ''}`;
+}
 export const NEXT_CALL_PLAN_ECHOES = Object.freeze({
     illustrator_create_rectangle: {},
+    illustrator_create_barcode: {},
     illustrator_create_swatch_resource: {},
     illustrator_create_point_text: {},
+    illustrator_create_qr_code: {},
     illustrator_create_area_text: {},
     illustrator_create_character_style: {},
     illustrator_create_batch: {},
     illustrator_create_shape: {},
     illustrator_place_image: {},
     illustrator_set_path_appearance: { expected_before: 'before', confirmed_after: 'after' },
+    illustrator_set_stroke_style: { expected_before: 'before', confirmed_after: 'after', expected_stroke_scene: 'strokeScene' },
     illustrator_transform_object: { expected_before: 'before', confirmed_after: 'after' },
     illustrator_replace_point_text: { expected_before: 'before', confirmed_after: 'after' },
+    illustrator_replace_area_text_range: { expected_before: 'before', confirmed_after: 'predictedAfter' },
     illustrator_replace_text_range: { expected_before: 'before', confirmed_after: 'after' },
     illustrator_set_text_style: { expected_before: 'before', confirmed_after: 'after' },
     illustrator_set_text_orientation: { expected_before: 'before', confirmed_after: 'after' },
@@ -121,36 +144,19 @@ function batchTargets(input, plan, field, matches) {
             return undefined;
         if (isRecord(snapshot.after) && 'uuid' in snapshot.after && snapshot.after.uuid !== request.target_uuid)
             return undefined;
-        mapped.push({ ...request, expected_before: snapshot.before, confirmed_after: snapshot.after });
+        const extra = field === 'steps' ? registeredNextCall(request.operation)?.extraEcho?.(snapshot) ?? {} : {};
+        mapped.push({ ...request, expected_before: snapshot.before, confirmed_after: snapshot.after, ...extra });
         byUuid.delete(request.target_uuid);
     }
     return { ...input, [field]: mapped };
 }
+function registeredNextCall(operation) {
+    return typeof operation === 'string' && Object.hasOwn(BATCH_STEP_NEXT_CALLS, operation) ? BATCH_STEP_NEXT_CALLS[operation] : undefined;
+}
 function mixedStepMatches(request, target) {
     if (request.operation !== target.operation || !isRecord(target.plan))
         return false;
-    const plan = target.plan;
-    if (request.operation === 'replace_point_text')
-        return request.replacement === plan.replacement;
-    if (request.operation === 'set_text_style' && isRecord(request.style)) {
-        const style = 'fill_color' in request.style && isRecord(request.style.fill_color)
-            ? { fillColor: { model: 'rgb', ...request.style.fill_color } } : { size: request.style.size };
-        return request.start === plan.start && request.end === plan.end && isDeepStrictEqual(style, plan.style);
-    }
-    if (request.operation === 'transform_object' && isRecord(request.transform)) {
-        return isDeepStrictEqual({ type: request.transform.type, deltaX: request.transform.delta_x, deltaY: request.transform.delta_y }, plan.transform);
-    }
-    if (request.operation === 'set_path_appearance' && isRecord(request.appearance) && isRecord(plan.after)) {
-        const { fill, stroke, opacity } = plan.after;
-        if (!isRecord(fill) || !isRecord(stroke))
-            return false;
-        return plan.targetUuid === request.target_uuid && isDeepStrictEqual(request.appearance, {
-            opacity,
-            fill: fill.kind === 'none' ? { kind: 'none' } : fill,
-            stroke: stroke.kind === 'none' ? { kind: 'none' } : stroke,
-        });
-    }
-    return false;
+    return registeredNextCall(request.operation)?.matchesPlan(request, target.plan) ?? false;
 }
 export const NEXT_CALL_BUILDERS = Object.freeze({
     ...Object.fromEntries(Object.entries(NEXT_CALL_PLAN_ECHOES).map(([tool, echoes]) => [tool, copyEchoes(echoes)])),
@@ -176,6 +182,8 @@ export const NEXT_CALL_BUILDERS = Object.freeze({
     },
     illustrator_edit_path_points: (input, plan) => isRecord(plan.after)
         ? { ...input, confirmed_after: plan.after.path } : undefined,
+    illustrator_transform_path_anchors: (input, plan) => isRecord(plan.after)
+        ? { ...input, confirmed_after: plan.after.path } : undefined,
     illustrator_import_vector_artwork: (input, plan) => isRecord(plan.layer)
         ? { ...input, expected_layer_item_uuids: plan.layer.itemUuids } : undefined,
     illustrator_replace_point_text_batch: (input, plan) => batchTargets(input, plan, 'targets', (request, target) => request.replacement === target.replacement),
@@ -183,8 +191,8 @@ export const NEXT_CALL_BUILDERS = Object.freeze({
     illustrator_align_objects: (input, plan) => {
         if (!isRecord(input.layout))
             return undefined;
-        const { artboard_index: artboardIndex, ...layout } = input.layout;
-        if (!isDeepStrictEqual({ ...layout, ...(artboardIndex === undefined ? {} : { artboardIndex }) }, plan.layout))
+        const { artboard_index: artboardIndex, spacing, ...layout } = input.layout;
+        if (!isDeepStrictEqual({ ...layout, ...(spacing === 'gaps' ? { spacing } : {}), ...(artboardIndex === undefined ? {} : { artboardIndex }) }, plan.layout))
             return undefined;
         return batchTargets(input, plan, 'targets', () => true);
     },

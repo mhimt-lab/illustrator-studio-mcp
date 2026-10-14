@@ -1,11 +1,10 @@
-import { hostVersionConsentSchema } from '../host-version-consent.js';
 import { hostVersionPublicFields, hostVersionInternalFields, normalizeHostVersionConsent } from '../host-version-consent.js';
 import { createHash } from 'node:crypto';
 import { open, realpath } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { z } from 'zod';
 import { extractSvgTextExpectation, SvgNestedGroupError, svgTextExpectationSchema, svgCodePointCountsSchema, SVG_TEXT_MAX_UNITS, SVG_TEXT_MAX_DISTINCT, SVG_FONT_READ_LIMIT, SVG_TEXT_DIFFERENCE_LIMIT, SVG_FONT_WARNING_LIMIT, SVG_TEXT_VERIFICATION_SCRIPT } from '../svg-text-verification.js';
-import { BLOCKED_NEXT_STEPS_NOTE } from '../blocked-guidance.js';
+import { nextStepsForCodes } from '../blocked-guidance.js';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
@@ -135,7 +134,7 @@ export class SvgTextPlanBlockedError extends Error {
         this.reason = reason;
     }
     nextSteps() {
-        return { blocked_by: [this.reason], actions: ['unsupported'], note: `${this.message} ${BLOCKED_NEXT_STEPS_NOTE}` };
+        return nextStepsForCodes([this.reason], this.message);
     }
 }
 function boundedMessage(error) {
@@ -266,7 +265,6 @@ const layerStateSchema = z.strictObject({
     itemUuids: z.array(uuidSchema).max(IMPORT_VECTOR_MAX_LAYER_ITEMS),
 });
 const planSchema = z.strictObject({
-    hostVersionConsent: hostVersionConsentSchema,
     operation: z.literal(IMPORT_VECTOR_ARTWORK_OPERATION),
     documentKey: documentKeySchema,
     hostVersion: z.string().max(64),
@@ -441,7 +439,7 @@ function nodeDerivedBlockers(result, planned) {
     const { plan } = result;
     if (planned && !result.document.mutationAllowed)
         blockers.add('document_mutation_not_allowed');
-    if (!hostVersionAdmitted('import_vector_artwork', plan.hostVersion, plan.hostVersionConsent))
+    if (!hostVersionAdmitted('import_vector_artwork', plan.hostVersion))
         blockers.add('host_version_unmeasured');
     if (planned && plan.documentCount !== 1)
         blockers.add('other_documents_open');
@@ -771,8 +769,6 @@ function viPlan(preflight) {
     predicted: { consumedUuids: [], created: "one GroupItem at index 0 of the layer; its UUIDs and children are known only after apply opens the source" },
     applyBlockedReasonCodes: preflight.blockers, applyAllowed: preflight.blockers.length === 0
   };
-  var consent = hostVersionConsent(params);
-  if (consent !== null) plan.hostVersionConsent = consent;
   return plan;
 }
 

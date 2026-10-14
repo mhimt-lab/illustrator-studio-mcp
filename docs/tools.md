@@ -1,101 +1,109 @@
-# 88のMCPツール
+# 96のMCPツール
 
 **日本語** | [English](tools.en.md)
 
-このリリースで公開している88件の全ツール名です。利用可能な機能の一覧であり、全入力の実機確認を意味しません。引数はAIアプリが取得する入力仕様を確認し、名前を推測しないでください。[確認範囲](compatibility.md)、[導入](install.md)、[復旧](runbook.md)も参照してください。
+このリリースで公開している96件の全ツール名です。利用可能な機能の一覧であり、全入力の実機確認を意味しません。引数はAIアプリが取得する入力仕様を確認し、名前を推測しないでください。[確認範囲](compatibility.md)、[導入](install.md)、[復旧](runbook.md)も参照してください。
 
-通常版Illustratorを前面に表示し、画面ロックを解除して使います。sessionは36種類の変更操作に対応し、削除・画像埋め込み・ベクター取り込み・アートボード更新は対象外です。backupとsessionの実質上限は1,000 items（1,000 itemsの実機1回で確認）です。SVG書き出し、アートボードの削除、段落スタイル、グループ解除、リンク切れ修復、Windowsは対象外です。プレビュー取得は汎用の書き出し機能ではありません。1件の削除にも明示的なbackup・確認契約が必要です。
+通常版Illustratorを前面に表示し、画面ロックを解除して使います。sessionでは、削除・画像埋め込み・ベクター取り込み・アートボード更新・文書内のトンボ・バーコード・QRコード・線のスタイルは対象外です。backupは20,778 itemsまで（1,000 itemsを超える書類はストリームで全件を比較）、sessionは1回の走査で3,000 items、分割した走査で20,779 itemsまでを実機で確認しています。SVG書き出し、アートボードの削除、段落スタイル、グループ解除、リンク切れ修復、Windowsは対象外です。プレビュー取得は汎用の書き出し機能ではありません。1件の削除にも明示的なbackup・確認契約が必要です。
 
 | # | ツール識別名 |
 | --- | --- |
 | 1 | `illustrator_align_objects` |
-| 2 | `illustrator_apply_character_style` |
-| 3 | `illustrator_apply_pathfinder` |
-| 4 | `illustrator_audit_typography` |
-| 5 | `illustrator_capture_preview` |
-| 6 | `illustrator_capture_structure_snapshot` |
-| 7 | `illustrator_check_contrast` |
-| 8 | `illustrator_check_text_consistency` |
-| 9 | `illustrator_close_document` |
-| 10 | `illustrator_close_edit_session` |
-| 11 | `illustrator_compare_images` |
-| 12 | `illustrator_create_area_text` |
-| 13 | `illustrator_create_backup` |
-| 14 | `illustrator_create_batch` |
-| 15 | `illustrator_create_character_style` |
-| 16 | `illustrator_create_clipping_mask` |
-| 17 | `illustrator_create_document` |
-| 18 | `illustrator_create_layer` |
-| 19 | `illustrator_create_point_text` |
-| 20 | `illustrator_create_rectangle` |
-| 21 | `illustrator_create_shape` |
-| 22 | `illustrator_create_swatch_resource` |
-| 23 | `illustrator_create_trim_marks` |
-| 24 | `illustrator_delete_objects` |
-| 25 | `illustrator_diff_structure` |
-| 26 | `illustrator_duplicate_object` |
-| 27 | `illustrator_edit_path_points` |
-| 28 | `illustrator_embed_image` |
-| 29 | `illustrator_export` |
-| 30 | `illustrator_export_outlined` |
-| 31 | `illustrator_export_pdf` |
-| 32 | `illustrator_extract_design_tokens` |
-| 33 | `illustrator_find_color_usages` |
-| 34 | `illustrator_find_fonts` |
-| 35 | `illustrator_get_area_text_options` |
-| 36 | `illustrator_get_context` |
-| 37 | `illustrator_get_edit_session` |
-| 38 | `illustrator_get_object` |
-| 39 | `illustrator_get_path_points` |
-| 40 | `illustrator_group_objects` |
-| 41 | `illustrator_import_vector_artwork` |
-| 42 | `illustrator_list_documents` |
-| 43 | `illustrator_list_layers` |
-| 44 | `illustrator_list_objects` |
-| 45 | `illustrator_list_recipes` |
-| 46 | `illustrator_list_selection` |
-| 47 | `illustrator_list_swatches` |
-| 48 | `illustrator_list_text_styles` |
-| 49 | `illustrator_make_compound_path` |
-| 50 | `illustrator_move_object_to_layer` |
-| 51 | `illustrator_mutate_batch` |
-| 52 | `illustrator_open_document` |
-| 53 | `illustrator_open_edit_session` |
-| 54 | `illustrator_optimize_images` |
-| 55 | `illustrator_place_image` |
-| 56 | `illustrator_plan_color_replacement` |
-| 57 | `illustrator_plan_recipe` |
-| 58 | `illustrator_preflight_images` |
-| 59 | `illustrator_preflight_print` |
-| 60 | `illustrator_read_structure_diff` |
-| 61 | `illustrator_reconcile` |
-| 62 | `illustrator_reconcile_backup` |
-| 63 | `illustrator_reconcile_delete` |
-| 64 | `illustrator_reconcile_export` |
-| 65 | `illustrator_reconcile_save_as` |
-| 66 | `illustrator_release_clipping_mask` |
-| 67 | `illustrator_relink_image` |
-| 68 | `illustrator_reorder_layer` |
-| 69 | `illustrator_replace_font` |
-| 70 | `illustrator_replace_point_text` |
-| 71 | `illustrator_replace_point_text_batch` |
-| 72 | `illustrator_replace_text_range` |
-| 73 | `illustrator_run_m6_appearance_preview_recipe` |
-| 74 | `illustrator_run_recipe` |
-| 75 | `illustrator_save_document` |
-| 76 | `illustrator_save_document_as` |
-| 77 | `illustrator_save_recipe` |
-| 78 | `illustrator_set_area_text_columns` |
-| 79 | `illustrator_set_layer_state` |
-| 80 | `illustrator_set_no_break` |
-| 81 | `illustrator_set_object_state` |
-| 82 | `illustrator_set_path_appearance` |
-| 83 | `illustrator_set_stacking_order` |
-| 84 | `illustrator_set_text_orientation` |
-| 85 | `illustrator_set_text_style` |
-| 86 | `illustrator_transform_object` |
-| 87 | `illustrator_update_artboard` |
-| 88 | `illustrator_update_character_style` |
+| 2 | `illustrator_analyze_display_spacing` |
+| 3 | `illustrator_apply_character_style` |
+| 4 | `illustrator_apply_pathfinder` |
+| 5 | `illustrator_audit_typography` |
+| 6 | `illustrator_capture_preview` |
+| 7 | `illustrator_capture_structure_snapshot` |
+| 8 | `illustrator_check_contrast` |
+| 9 | `illustrator_check_text_consistency` |
+| 10 | `illustrator_close_document` |
+| 11 | `illustrator_close_edit_session` |
+| 12 | `illustrator_compare_images` |
+| 13 | `illustrator_create_area_text` |
+| 14 | `illustrator_create_backup` |
+| 15 | `illustrator_create_barcode` |
+| 16 | `illustrator_create_batch` |
+| 17 | `illustrator_create_character_style` |
+| 18 | `illustrator_create_clipping_mask` |
+| 19 | `illustrator_create_document` |
+| 20 | `illustrator_create_layer` |
+| 21 | `illustrator_create_point_text` |
+| 22 | `illustrator_create_qr_code` |
+| 23 | `illustrator_create_rectangle` |
+| 24 | `illustrator_create_shape` |
+| 25 | `illustrator_create_swatch_resource` |
+| 26 | `illustrator_create_trim_marks` |
+| 27 | `illustrator_delete_objects` |
+| 28 | `illustrator_diff_structure` |
+| 29 | `illustrator_duplicate_object` |
+| 30 | `illustrator_edit_path_points` |
+| 31 | `illustrator_embed_image` |
+| 32 | `illustrator_export` |
+| 33 | `illustrator_export_outlined` |
+| 34 | `illustrator_export_pdf` |
+| 35 | `illustrator_extract_design_tokens` |
+| 36 | `illustrator_extract_text` |
+| 37 | `illustrator_find_color_usages` |
+| 38 | `illustrator_find_fonts` |
+| 39 | `illustrator_get_area_text_options` |
+| 40 | `illustrator_get_context` |
+| 41 | `illustrator_get_edit_session` |
+| 42 | `illustrator_get_object` |
+| 43 | `illustrator_get_path_points` |
+| 44 | `illustrator_group_objects` |
+| 45 | `illustrator_import_vector_artwork` |
+| 46 | `illustrator_list_documents` |
+| 47 | `illustrator_list_layers` |
+| 48 | `illustrator_list_objects` |
+| 49 | `illustrator_list_recipes` |
+| 50 | `illustrator_list_selection` |
+| 51 | `illustrator_list_swatches` |
+| 52 | `illustrator_list_text_styles` |
+| 53 | `illustrator_make_compound_path` |
+| 54 | `illustrator_move_object_to_layer` |
+| 55 | `illustrator_mutate_batch` |
+| 56 | `illustrator_open_document` |
+| 57 | `illustrator_open_edit_session` |
+| 58 | `illustrator_optimize_images` |
+| 59 | `illustrator_place_image` |
+| 60 | `illustrator_plan_color_replacement` |
+| 61 | `illustrator_plan_recipe` |
+| 62 | `illustrator_preflight_images` |
+| 63 | `illustrator_preflight_print` |
+| 64 | `illustrator_read_structure_diff` |
+| 65 | `illustrator_reconcile` |
+| 66 | `illustrator_reconcile_backup` |
+| 67 | `illustrator_reconcile_delete` |
+| 68 | `illustrator_reconcile_export` |
+| 69 | `illustrator_reconcile_save_as` |
+| 70 | `illustrator_release_clipping_mask` |
+| 71 | `illustrator_relink_image` |
+| 72 | `illustrator_render_artboards` |
+| 73 | `illustrator_reorder_layer` |
+| 74 | `illustrator_replace_area_text_range` |
+| 75 | `illustrator_replace_font` |
+| 76 | `illustrator_replace_point_text` |
+| 77 | `illustrator_replace_point_text_batch` |
+| 78 | `illustrator_replace_text_range` |
+| 79 | `illustrator_run_m6_appearance_preview_recipe` |
+| 80 | `illustrator_run_recipe` |
+| 81 | `illustrator_save_document` |
+| 82 | `illustrator_save_document_as` |
+| 83 | `illustrator_save_recipe` |
+| 84 | `illustrator_set_area_text_columns` |
+| 85 | `illustrator_set_layer_state` |
+| 86 | `illustrator_set_no_break` |
+| 87 | `illustrator_set_object_state` |
+| 88 | `illustrator_set_path_appearance` |
+| 89 | `illustrator_set_stacking_order` |
+| 90 | `illustrator_set_stroke_style` |
+| 91 | `illustrator_set_text_orientation` |
+| 92 | `illustrator_set_text_style` |
+| 93 | `illustrator_transform_object` |
+| 94 | `illustrator_transform_path_anchors` |
+| 95 | `illustrator_update_artboard` |
+| 96 | `illustrator_update_character_style` |
 
 ## 作業ごとの案内
 
@@ -105,13 +113,13 @@ README の「できること」の各項目から、ここへリンクしてい�
 `illustrator_create_batch` は、図形・ポイント文字などをまとめて計画し、1回の適用で作ります。作った後は1つずつIllustratorから読み直して確かめます。個別の作成は `illustrator_create_shape`・`illustrator_create_point_text`・`illustrator_create_area_text` です。
 
 ### 整列と等間隔
-`illustrator_align_objects` は、2〜16個のパスを最初の対象かアートボードに揃え（左・中央・右・上・中央・下）、3〜16個を中心の等間隔に並べます。対象はパス（`PathItem`）で、線幅を含まない境界が基準です。
+`illustrator_align_objects` は、2〜16個のパスを最初の対象かアートボードに揃え（左・中央・右・上・中央・下）、3〜16個を中心の等間隔に並べます。対象はパス（`PathItem`）か横組みのポイント文字（混在は不可）で、線幅を含まない境界が基準です。`illustrator_set_stacking_order` は、1つのレイヤーの1〜16個のパスを最前面・最背面へ、または1つ前・後ろへ移します。
 
 ### 文字をまとめて差し替える
 `illustrator_replace_point_text_batch` は2〜32件のポイント文字をまとめて置き換え、`illustrator_mutate_batch` は文字の置換・書式・移動などを2〜16ステップで実行します。どちらも1つでも対象外があれば、書き込む前に全体を止めます。
 
 ### 日本語の改行を点検する
-`illustrator_audit_typography` は、Illustratorが組んだ実際の改行位置を読み、行頭・行末の禁則、分割禁止、指定した分割禁止語、和文に挟まれた半角約物、あふれを指摘します。文書は変更しません。強制改行・両端揃えの字間・ルビ・割注は判定しません（詳しくは下の説明）。
+`illustrator_audit_typography` は、Illustratorが組んだ実際の改行位置を読み、行頭・行末の禁則、分割禁止、指定した分割禁止語、和文に挟まれた半角約物、あふれを指摘します。文書は変更しません。強制改行・両端揃えの字間・ルビ・割注は判定しません（詳しくは下の説明）。`illustrator_set_no_break` で範囲に分割禁止を設定すると、語を1行に収められます。
 
 ### フォントの組をまとめて置き換える
 `illustrator_replace_font` の `mappings` は、最大16組のフォントの置き換えを1回で行います（全部か、何もしないか）。インストールされていて、OSとIllustratorのフォント一覧で確かめられるフォントだけを使います。確かめられないフォント（このMacに無いフォントや、Adobeアプリ専用に有効化されたフォントなど）には書き込みません。合成フォントは未対応です。
@@ -129,10 +137,13 @@ README の「できること」の各項目から、ここへリンクしてい�
 `illustrator_preflight_print` は色・インキ・オーバープリント・透明・裁ち落とし・線・フォント・画像などを、`illustrator_preflight_images` はリンク・埋め込み画像の同一性と実効解像度を調べます。確かめられなかった項目は合格にしません。
 
 ### 塗り足しとトンボつきのPDF
-`illustrator_export_pdf` は、保存済みの文書から選んだアートボードを新しいPDFに書き出します。トンボ・レジストレーションマーク・カラーバー・ページ情報（和文・欧文）と、各辺0〜72 ptの塗り足しを指定できます。書き出したPDFのページ数・仕上がりサイズ・塗り足しを確かめてから公開し、既存のファイルは上書きしません。塗り足しは整数のptで指定してください（端数はIllustratorが丸めるため、書き出したPDFの確認で止まります）。PDF/Xのプリセットは使えません。
+`illustrator_export_pdf` は、保存済みの文書から選んだアートボードを新しいPDFに書き出します。トンボ・レジストレーションマーク・カラーバー・ページ情報（和文・欧文）と、各辺0〜72 ptの塗り足しを指定できます。書き出したPDFのページ数・仕上がりサイズ・塗り足しを確かめてから公開し、既存のファイルは上書きしません。塗り足しは整数のptで指定してください（端数はIllustratorが丸めるため、計画の段階で止めます）。書類の3 mmの裁ち落とし設定をそのまま使う指定もあります。`pdfx` でPDF/X（`x3_2002`・`x3_2003`・`x4`）を明示できます。書き出したファイルにPDF/Xの版と出力インテントがあることは確かめますが、規格への適合は検証しません。PDF/Xのプリセットは使えません。
 
 ### 文書にトンボをつくる
 `illustrator_create_trim_marks` は、アートボードの周りに編集できるトンボを、新しいレイヤーのパスとして描きます。塗り足し・オフセット・長さ・線幅はptで指定します（プリセットはありません。印刷所の指定に合わせてください）。PDFの書き出しでトンボを付ける場合は、二重にならないようどちらか一方にします。
+
+### QRコードをつくる
+`illustrator_create_qr_code` は、URLや日本語を含むテキストから標準のQRコード（Model 2、バージョン1〜40、誤り訂正L/M/Q/H）を、編集できるベクターで描きます。暗いモジュールは横に連なる分を1つの矩形にまとめ、1つの複合パスと（白背景を選んだ場合は）Quiet Zoneを含む白い矩形を1つのグループに入れます。前景は黒（CMYKはK100、RGBは0,0,0）だけで、Quiet Zoneは4モジュール以上です。`size_pt` はQuiet Zoneを含む正方形全体の一辺で、plan は版・モジュール数・矩形数・実際の1モジュールの大きさ（pt・mm）を返します。計画の矩形を描画して zbarimg で読み戻し（zbarimg が無ければ `not_run`）、適用後は使い捨ての文書に複製した描画も読み戻して内容との一致を確かめます。不一致は成功として返しません。装飾・ロゴ・GS1適合は扱いません。最終的な印刷条件（方式・紙・インク・読み取り機器）での読み取り確認は必要です。QRコードは株式会社デンソーウェーブの登録商標です。
 
 ### 文字をアウトライン化して書き出す
 `illustrator_export_outlined` は、作業用の複製で全テキストをアウトライン化し、新しいAIまたはPDFを書き出します。元の文書とファイルは変更しません。
@@ -143,11 +154,53 @@ README の「できること」の各項目から、ここへリンクしてい�
 ### 上書き前にバックアップ
 `illustrator_create_backup` は、保存済みのファイルをコピーし、そのコピーを開いて中身を比べてから記録します。上書き保存と削除には、このバックアップが必要です。結果が分からなくなった時は [復旧](runbook.md) の手順で状態を確かめます。
 
+### 文字の一部を差し替えて書式を変える
+`illustrator_replace_text_range` は、ポイント文字（1行、または改行・強制改行で区切った32行まで）の一部を差し替え、ほかの文字とその書式はそのまま残します。`illustrator_set_text_style` は、範囲の文字サイズ・トラッキング・水平／垂直比率・塗り・インストール済みのフォントを設定します。`illustrator_create_character_style` はサイズとトラッキングを持つ文字スタイルを作り、`illustrator_apply_character_style` は既存の文字スタイルを1行のポイント文字の範囲に適用します。Illustrator 30.8.2では、`illustrator_replace_area_text_range` で1段落のエリア内文字の範囲も差し替えられます。
+
+### 見出しの字間を分析する
+`illustrator_analyze_display_spacing` は、見出しやロゴを1つ測ります。対象は横組みのポイント文字・エリア内文字の1行（64文字まで、文字サイズは1つ、欧文または和文）です。保存せずに閉じる作業用の文書で複製をアウトライン化し、隣り合う文字の組ごとに、間隔と間の白さ、枠の中央値に近づけるカーニングの目安を返します。元の文書は変えません。Illustratorを前面に表示し、画面ロックを解除して使います。
+
+### エリア内文字を段組みにする
+`illustrator_set_area_text_columns` は、レイヤー直下の連結していない横組みのエリア内文字1つに、段数と行数（各1〜20）、間隔（0〜1,000 pt）、流し込む向きを設定します。文字があふれて隠れる設定は元に戻します。今の設定は `illustrator_get_area_text_options` で読めます。
+
+### すべての文字を抜き出して校正する
+`illustrator_extract_text` は、すべてのテキストフレームの文字をアートボードごとに、段落と行に分けて返します。`illustrator_check_text_consistency` は、ダミー文字、行末や連続した空白、繰り返した単語、同じ語の大文字・小文字や全角・半角の揺れを見つけます。どちらも文書は変えません。指摘がなくても、入稿できる状態とは限りません。
+
+### 変わった所を画像で比べる
+`illustrator_render_artboards` は、文書を変えずに各アートボードをPNGに描画します。`compare_to` を指定すると、アートボードごとに変わった画素、その範囲の枠、差分画像を返します。Illustratorを前面に表示し、画面ロックを解除して使います（1回で100アートボードまで）。`illustrator_diff_structure` は、2つの構造スナップショットの間で追加・削除・移動・変更されたオブジェクトを一覧にします。
+
+### パスの編集とパスファインダー
+`illustrator_edit_path_points` は、アンカーの移動、コーナーポイントのハンドルの設定、点の追加・削除、パスを開く・閉じるを行います。`illustrator_transform_path_anchors` は、選んだアンカーをハンドルごと拡大縮小します。`illustrator_apply_pathfinder`（合体・前面オブジェクトで型抜き・交差・中マド）と `illustrator_make_compound_path` は、2つのパスの複製に対して行い、元のパスは変えません。パスファインダーは重なった2つの長方形、複合パスは閉じた直線だけの2つのパスで確認しています。ほかの形は拒否します。
+
+### 破線と線端と角の形
+`illustrator_set_stroke_style` は、3点の開いた直線のパスに、破線・破線のオフセット・線端・角の形・比率の上限をまとめて設定します（一度も保存していない1レイヤーのCMYK文書で確認）。`illustrator_set_path_appearance` は、パスの塗り・線・不透明度を文書のカラーモードで設定します。
+
+### アートボードとレイヤーを整理する
+`illustrator_update_artboard` は、保存済みのRGB文書でアートボードの名前・大きさの変更、アクティブ化、追加を行います（256枚まで。削除は未対応）。`illustrator_create_layer`、`illustrator_set_layer_state`（名前・表示・ロック・プリント）、`illustrator_reorder_layer` でレイヤーを整理し、`illustrator_move_object_to_layer` でパスを別のレイヤーへ移します。
+
+### SVGやAIを取り込む
+`illustrator_import_vector_artwork` は、.svgまたは.aiファイル1つの中身を、最上位レイヤーに編集できる新しいグループ1つとして取り込みます。確認している範囲は狭く、RGB、元のファイルにパス・複合パス・文字だけのグループが1つ、取り込み先が開いている唯一の文書、という条件です。SVGは画像や外部ファイルを参照していないものに限ります。
+
+### 色を探して置き換える
+`illustrator_find_color_usages` は、ある色の使用箇所（パスの塗りと線、文字、グラデーションの分岐点、スウォッチ）を一覧にします。`illustrator_plan_color_replacement` は、対応する使用箇所（パスの見た目と、一様なRGBの文字の塗り）を、`illustrator_mutate_batch` で適用する1つのまとまりにします。カラーモードをまたいだ変換はせず、対応しない使用箇所は理由とともに返します。
+
+### 文字と背景のコントラストを判定する
+`illustrator_check_contrast` は、指定した色の組み合わせのWCAG 2.xのコントラスト比と、AA・AAAに届くかを、Illustratorに接続せずに計算します。`auto_detect` は、開いている文書の表示中の文字と、その背後で塗りのある図形を組み合わせて判定します（Illustratorを前面に表示し、画面ロックを解除して使います）。
+
+### JANコードをつくる
+`illustrator_create_barcode` は、JAN（EAN-13・短縮のEAN-8）とITF-14のバーコードを、数字（ITF-14はベアラーバーも）つきの編集できるベクターで描き、チェックデジットと寸法を確かめ、描いたものを読み取って確認します。番号の採番はしません。GS1の認証や印刷品質は保証しません。QRコードは上の「QRコードをつくる」を参照してください。
+
+### 画像の解像度を確かめて軽くする
+`illustrator_preflight_images` は、リンク画像と埋め込み画像の同一性と、元の解像度・実効解像度を調べます。`illustrator_optimize_images` は、上限のPPIを超える埋め込みのRGB画像を作業用の複製で縮小し、新しい.aiファイルに保存します。元の文書とファイルは変えません。
+
+### PNGやJPEGで書き出す
+`illustrator_export` は、保存済みのRGB文書のアートボード1つを新しいPNGまたはJPEGファイルに書き出し、画素数を確かめます。既存のファイルは上書きしません。元の文書とファイルは変えません。
+
 ## plan から apply へ（`next_call` と `command_id`）
 
 変更はどれも2回の呼び出しです。`apply: false` で plan を受け取り、`apply: true` と `command_id` で実行します。変更ツール40種すべてで、blocker がなく、必要な値を公開入力 schema に適合する形で組み立てられた場合に `next_call` が付きます。ツール名と apply にそのまま渡す引数（新しい `command_id` の候補を含む）です。この引数を変えずに送ってください。複製・グループ・重なり順・複合パス・パスファインダー・クリッピング・レイヤー・文字スタイル・フォント置換・画像埋め込み・パス編集・削除・ベクター読み込み・バッチ・整列・アートボード更新も対象です。blocker や値の欠落・不整合がある場合、候補は返しません。候補があっても、実行時の文書・対象・バックアップ・結果不明のコマンドなどの確認は省略されません。`illustrator_export` は計画の結果の `nextCall` に、適用にそのまま渡す引数を返します。
 
-blocker で止まった計画には、`next_call` の代わりに `next_steps` が付きます。止めた理由のコード（`blocked_by`）、次の手（`actions`: `resolve_document_state`・`reconcile`・`unlock_target`・`show_target`・`install_font`・`narrow_scope`・`unsupported`・`fix_request`）、AIアプリへの短い指示（`note`）です。画面の自動操作や独自のスクリプトで同じ変更をせず、理由と次の手を利用者に伝えてください。
+blocker で止まった計画には、`next_call` の代わりに `next_steps` が付きます。止めた理由のコード（`blocked_by`）、次の手（`actions`: `resolve_document_state`・`reconcile`・`unlock_target`・`show_target`・`install_font`・`narrow_scope`・`unsupported`・`fix_request`・`custom_script`）、AIアプリへの短い指示（`note`）です。理由と次の手を利用者に伝えてください。機能がない・測っていない・測った範囲の外という理由で止まった場合（`custom_script`）に限り、AIアプリが自分のスクリプトでMCPの外から同じ変更をしてもかまいません。その場合は、何を変えるかを先に伝え、保存済みのファイルなら先に `illustrator_create_backup` を取り、読み取りのツールで結果を確かめ、MCPの外で変えたことを報告し、文書キーを読み直します。結果不明・解除されていないロック・古いか一致しない対象・画面ロックや前面でない状態で止まったときは、スクリプトや画面の自動操作で代えず、状態を直してからこのサーバーでやり直します。
 
 `command_id` は小文字の UUID v4（`xxxxxxxx-xxxx-4xxx-[89ab]xxx-xxxxxxxxxxxx`）です。`next_call.arguments.command_id` や `uuidgen | tr A-Z a-z` の値を使えます。同じ値を再送してよいのは同じ apply の再試行だけで、タイムアウト後や `illustrator_reconcile` の後も同じです。再送すると二重に適用せず、記録済みの結果を返します。plan をやり直したら、新しい plan の候補を使ってください。plan の候補はサーバーに記録されません。古い plan から apply しても、ドキュメントがその plan の `before` と一致しなければ拒否されます。
 
@@ -175,7 +228,7 @@ blocker で止まった計画には、`next_call` の代わりに `next_steps` �
 
 `illustrator_update_artboard` は実験段階です。保存済みRGB文書で、名前変更、ボードの整数pt更新（activeボードを含む）、active切替、名前つき整数ptボードの末尾への追加を扱います。追加すると新しいボードがactiveになり、追加とactive切替では文書の原点がactiveボードの `[-left,-bottom]` になります。activeボードの移動・サイズ変更でも、文書の原点は新しいボードの `[-left,-bottom]` に合わせて動きます。全ボードの原点が `[0,0]` で文書の原点がこの規則どおりの時だけ受け付け、それ以外は計画の段階で止まります（`unmeasured_ruler_origin`）。名前変更・整数pt更新・追加の後は文書が未保存になるため、続けて変更する前に保存が必要です。active切替は保存済みの文書を未保存にしません。追加したアートボードをこのサーバーで削除する手段はありません。最大256ボード、通常のレイヤー直下パス128個・合計256点。移動・サイズ変更と追加に `pixel`（幅・高さ・倍率1または2、1辺4000 px・総画素1200万まで）を付けると、`illustrator_export` が書き出す画素寸法を計画で示し、合わなければ `pixel_size_mismatch` で止めます（差分を返し、自動では合わせません）。端数ptと編集セッションは非対応。製品経路の実機確認は、名前変更とその戻し、非activeボードの移動・サイズ変更とその戻し、追加、active切替とその戻し、activeボードの移動・サイズ変更とその戻し、`pixel` の一致と不一致で通過しています。
 
-`illustrator_export` は、保存済みで未編集のRGB文書のアートボード1枚を、新しいPNG24またはJPEGファイルとして書き出します。元の文書とファイルは変更しません。書き出しは作業用の複製で行い、ファイル全体を読み込んで画素寸法が計画と一致することを確かめてから公開します。既存のパスは上書きせず拒否します。対応範囲は、倍率1または2（寸法はアートボードの幅・高さ×倍率で完全一致）、幅・高さ×倍率が整数になる辺（端数は1倍で.5pt、2倍で.25ptまたは.5pt）、1辺4000 px・総画素1200万まで、アートボードの定規原点が整数、不透明なPNGは1倍のみです。対応しない寸法は `fractional_pixel_size`・`fractional_edge_unmeasured`・`artboard_ruler_origin_unmeasured` で止まります。範囲外、未保存の変更、一度も保存していない文書、編集セッション中、CMYK、リンク画像は計画の段階で拒否します。SVGは未対応です。書き出しは同時に1つずつです。結果不明で止まった場合は `illustrator_reconcile_export` で、止まった段階に応じて `inspect`・`close_work_copy`・`finalize`（既に公開された書き出しを記録して後処理）・`abandon`（公開せずに失敗として記録。ファイルは消さない）・`release_quarantined`（隔離された記録を、ファイルを確認した後に `confirm_export_id` を付けて解放）を行います。
+`illustrator_export` は、保存済みで未編集のRGB文書のアートボード1枚を、新しいPNG24またはJPEGファイルとして書き出します。元の文書とファイルは変更しません。書き出しは作業用の複製で行い、ファイル全体を読み込んで画素寸法が計画と一致することを確かめてから公開します。既存のパスは上書きせず拒否します。対応範囲は、倍率1または2（寸法はアートボードの幅・高さ×倍率で完全一致）、幅・高さ×倍率が整数になる辺（端数は1倍で.5pt、2倍で.25ptまたは.5pt）、1辺4000 px・総画素1200万まで、アートボードの定規原点が整数、不透明なPNGは1倍のみです。対応しない寸法は `fractional_pixel_size`・`fractional_edge_unmeasured`・`artboard_ruler_origin_unmeasured` で止まります。`width_px` か `height_px` で画素数を指定する書き出し（アートボード1枚、縦横比を保つ、30.8.xで倍率25〜400%を実測）と、`output_dir` と `artboard_indexes`（32まで）か `all_artboards: true` で複数のアートボードをまとめて書き出す指定もあります。範囲外、未保存の変更、一度も保存していない文書、編集セッション中、CMYK、リンク画像は計画の段階で拒否します。SVGは未対応です。書き出しは同時に1つずつです。結果不明で止まった場合は `illustrator_reconcile_export` で、止まった段階に応じて `inspect`・`close_work_copy`・`finalize`（既に公開された書き出しを記録して後処理）・`abandon`（公開せずに失敗として記録。ファイルは消さない）・`release_quarantined`（隔離された記録を、ファイルを確認した後に `confirm_export_id` を付けて解放）を行います。
 
 `illustrator_audit_typography` は読み取りだけのツールです。Illustratorが組んだ日本語の改行位置を読み、行頭禁則（`JP_LINE_START_PROHIBITED`）・行末禁則（`JP_LINE_END_PROHIBITED`）・分割禁止（`JP_UNBREAKABLE_SPLIT`）・指定した分割禁止語（`JP_PROTECTED_TERM_SPLIT`、`protected_terms`）・和文に挟まれた半角約物（`JP_HALFWIDTH_PUNCTUATION`）・エリア内文字のあふれ（`JP_OVERSET`）を返します。`policy` は配列で、いまは `jp_line_break_v1` だけです。1回の読み取りは200枠・20,000字・2,000行・2,000段落まで。パス上文字・連結した文字・ロックまたは非表示・縦組みのポイント文字・空の枠は理由を付けて除外し、結果は部分的（`incomplete`）になります。強制改行、あふれて見えない部分、両端揃えの字間、ルビ、割注は判定しません。読んでいる間に文書の保存状態が変わった場合は、結果を返さずエラーにします。
 

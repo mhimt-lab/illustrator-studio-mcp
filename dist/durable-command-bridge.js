@@ -1,11 +1,21 @@
 import { illustratorApplicationTarget, } from './illustrator-application.js';
 import { HostProcessExitError } from './host-transport.js';
+import { executionIdentityMatches, executionRecordsMatch } from './execution-record.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { CommandLockedError, MUTATION_DURABLE_STATE_VERSION, assertNeverTerminalKind, } from './command-store.js';
 import { IndeterminateExecutionError, CommandQuarantinedError, CommandReleasedUnverifiedError, ProvenPreApplyFailureError, HostReferenceInvalidError, hostReferenceInvalidDetail, } from './domain.js';
 import { buildJsxCommand } from './jsx-runtime.js';
+import { auditMismatchInResult } from './mutation-audit-consistency.js';
+import { barrierTargetFromKey, barrierTargetFromResultText } from './release-barrier.js';
 import { validateMutationResultArtifact, } from './mutation-result-validator.js';
 export const DEFAULT_CALL_QUEUE_WAIT_LIMIT_MS = 60_000;
+function readReleaseHint(kind, commandId) {
+    if (kind !== 'read')
+        return '';
+    return ` The read's lock stays until you reconcile it: run illustrator_reconcile with command_id=${commandId} (action=inspect). ` +
+        `If it reports canAbandon, run it again with action=abandon, command_id=${commandId} and confirm_command_id=${commandId}; ` +
+        'if Illustrator is still running the script, wait for it to finish first.';
+}
 export class IllustratorBusyError extends Error {
     waitedMs;
     constructor(waitedMs) {
@@ -48,6 +58,14 @@ class HostResultUnavailableError extends Error {
         this.name = 'HostResultUnavailableError';
     }
 }
+export function missingReadRecoveryCandidate(platform, commandId, lockOwner, kind, status, execution) {
+    return platform === 'win32' && lockOwner === commandId && kind === 'read' &&
+        status.state === 'unknown' && execution.state === 'missing';
+}
+export function missingMutationRecoveryCandidate(platform, commandId, lockOwner, kind, status, execution) {
+    return platform === 'win32' && lockOwner === commandId && kind === 'mutation' &&
+        status.state === 'unknown' && execution.state === 'missing';
+}
 export class DurableCommandBridge {
     store;
     registry;
@@ -56,15 +74,23 @@ export class DurableCommandBridge {
     queueWaitLimitMs;
     queueTail = Promise.resolve();
     terminalObserver = null;
+    barrierStore;
     constructor(application, store, registry, transport, options = {}) {
         this.store = store;
         this.registry = registry;
         this.transport = transport;
         this.queueWaitLimitMs = options.queueWaitLimitMs ?? DEFAULT_CALL_QUEUE_WAIT_LIMIT_MS;
+        this.barrierStore = options.barrierStore ?? null;
         if (!this.registry.isSealed() || this.store.getAdapterRegistry() !== this.registry) {
             throw new Error('Bridge and command store must share the exact sealed mutation adapter registry.');
         }
         this.target = illustratorApplicationTarget(application);
+    }
+    async legacyBarrierSources() {
+        return await this.store.listLegacyBarrierSources((execution) => this.releaseExecutionLiveness(execution));
+    }
+    releaseBarrierStore() {
+        return this.barrierStore;
     }
     applicationTarget() {
         return { ...this.target };
@@ -76,12 +102,44 @@ export class DurableCommandBridge {
         this.terminalObserver = observer;
     }
     async observeAttested(commandId, terminalState) {
+        await this.ensureAttestedBarrier(commandId, terminalState);
         if (this.terminalObserver === null || await this.store.readLockOwner() !== commandId)
             return;
         const result = await this.store.readResult(commandId);
         if (result.state !== 'valid')
             throw new Error(`The attested result of ${commandId} is unreadable; edit sessions cannot be updated.`);
         await this.terminalObserver.attested({ commandId, terminalState, resultText: result.text });
+    }
+    async ensureAttestedBarrier(commandId, terminalState) {
+        if (this.barrierStore === null || await this.store.readLockOwner() !== commandId)
+            return;
+        try {
+            const compact = await this.store.inspectCompactIdempotency(commandId);
+            const result = await this.store.readResult(commandId);
+            const resultText = result.state === 'valid' ? result.text : '';
+            const source = terminalState === 'rollback_failed' ? 'rollback_failed'
+                : auditMismatchInResult(resultText) ? 'audit_mismatch' : null;
+            if (source === null)
+                return;
+            const target = barrierTargetFromResultText(resultText, compact.state === 'valid' ? compact.value.documentKey : undefined);
+            if (target !== null)
+                await this.barrierStore.ensure(target, { commandId, source });
+        }
+        catch (error) {
+            throw new IndeterminateExecutionError(`The document barrier could not be made durable (${commandId}); the lock is kept. ${error instanceof Error ? error.message : String(error)}`, commandId);
+        }
+    }
+    async ensureReleasedBarrier(record) {
+        if (this.barrierStore === null)
+            return;
+        try {
+            const target = barrierTargetFromKey(record.documentKey);
+            if (target !== null)
+                await this.barrierStore.ensure(target, { commandId: record.commandId, source: 'released_unverified' });
+        }
+        catch (error) {
+            throw new IndeterminateExecutionError(`The released document barrier could not be made durable (${record.commandId}); the lock is kept. ${error instanceof Error ? error.message : String(error)}`, record.commandId);
+        }
     }
     async observeProvenPreApplyFailure(commandId) {
         if (await this.store.readLockOwner() !== commandId)
@@ -101,6 +159,7 @@ export class DurableCommandBridge {
             return;
         await this.terminalObserver.unresolved({ commandId, reason });
     }
+    releaseUnverifiedOffered() { return true; }
     async execute(command) {
         const leave = await this.enterQueue();
         try {
@@ -195,9 +254,15 @@ export class DurableCommandBridge {
         await this.observeUnresolved(commandId, 'released_unverified');
         const record = await this.store.releaseUnverified(commandId, {
             confirmCommandId,
-            processGroupLiveness: (processGroupId) => this.transport.liveness(processGroupId),
+            executionLiveness: (execution) => this.releaseExecutionLiveness(execution),
+            beforeUnlock: (released) => this.ensureReleasedBarrier(released),
         });
         return await this.releasedStatus(record);
+    }
+    async releaseExecutionLiveness(execution) {
+        return execution.version === 1
+            ? this.transport.processGroupLiveness?.(execution.processGroupId) ?? 'unknown'
+            : await this.transport.liveness(execution);
     }
     async releasedStatus(record) {
         const result = await this.store.readResult(record.commandId);
@@ -228,7 +293,7 @@ export class DurableCommandBridge {
             await this.observeUnresolved(options.commandId);
             const quarantined = await this.store.quarantineCommand(options.commandId, {
                 confirmCommandId: options.confirmCommandId ?? '',
-                processGroupLiveness: (processGroupId) => this.transport.liveness(processGroupId),
+                processGroupLiveness: (processGroupId) => this.transport.processGroupLiveness?.(processGroupId) ?? 'unknown',
             });
             return {
                 commandId: quarantined.commandId,
@@ -271,6 +336,7 @@ export class DurableCommandBridge {
                 throw new Error(`A command released without verification cannot be abandoned (${targetId}).`);
             if (lockOwner === targetId) {
                 await this.observeUnresolved(targetId, 'released_unverified');
+                await this.ensureReleasedBarrier(compact.value);
                 await this.store.release(targetId);
             }
             return await this.releasedStatus(compact.value);
@@ -295,8 +361,8 @@ export class DurableCommandBridge {
             return await this.reconcileLegacyState(targetId, lockOwner, options, 'compact');
         }
         if (compact.state === 'invalid') {
-            if (!options.abandon && lockOwner === targetId) {
-                const eligibility = await this.store.inspectReleaseUnverified(targetId, (id) => this.transport.liveness(id));
+            if (!options.abandon && lockOwner === targetId && this.releaseUnverifiedOffered()) {
+                const eligibility = await this.store.inspectReleaseUnverified(targetId, (record) => this.releaseExecutionLiveness(record));
                 if (eligibility.eligible && eligibility.resume === 'twin') {
                     return {
                         commandId: targetId,
@@ -316,8 +382,17 @@ export class DurableCommandBridge {
             return await this.reconcileLegacyState(targetId, lockOwner, options, 'metadata', metadataInspection.value);
         }
         const metadata = metadataInspection.state === 'valid' ? metadataInspection.value : null;
-        const execution = await this.store.readExecution(targetId);
-        const executionStatus = execution === null ? 'unknown' : this.transport.liveness(execution.processGroupId);
+        const inspection = await this.store.readExecution(targetId);
+        const execution = inspection.state === 'valid' ? inspection.value : null;
+        const unstartedWindowsRead = missingReadRecoveryCandidate(process.platform, targetId, lockOwner, metadata?.kind, status, inspection) &&
+            !(await this.store.hostRunningPublished(targetId));
+        const unstartedWindowsMutation = metadata?.kind === 'mutation' &&
+            missingMutationRecoveryCandidate(process.platform, targetId, lockOwner, metadata.kind, status, inspection) &&
+            await this.store.inspectNeverStartedMutation(targetId);
+        if (unstartedWindowsMutation && metadata?.kind === 'mutation') {
+            return await this.reconcileUnstartedWindowsMutation(targetId, metadata, status, options);
+        }
+        const executionStatus = execution === null ? (unstartedWindowsRead ? 'inactive' : 'unknown') : await this.transport.liveness(execution);
         let finalizationBlocked = metadata === null;
         if (metadata === null && (status.state === 'completed' || status.state === 'failed')) {
             status = {
@@ -386,10 +461,11 @@ export class DurableCommandBridge {
         const mutationAudit = await this.store.readMutationAudit(targetId);
         const transaction = mutationAudit === null ? undefined : this.indeterminateTransaction(mutationAudit);
         const canAbandon = lockOwner === targetId && executionStatus === 'inactive' && !finalizationBlocked;
-        const canReleaseUnverified = !canAbandon && lockOwner === targetId && executionStatus === 'inactive' &&
-            (await this.store.inspectReleaseUnverified(targetId, (id) => this.transport.liveness(id))).eligible;
+        const canReleaseUnverified = this.releaseUnverifiedOffered() && !canAbandon && lockOwner === targetId && executionStatus === 'inactive' &&
+            (await this.store.inspectReleaseUnverified(targetId, (record) => this.releaseExecutionLiveness(record))).eligible;
         const releaseGuidance = canReleaseUnverified
-            ? ` Its outcome cannot be verified. Check the document in Illustrator first (make sure no script is still running; ` +
+            ? ` Its outcome cannot be verified. An inactive controller does not prove that the Illustrator script has finished. ` +
+                'Check the document in Illustrator first (make sure no script is still running; ' +
                 'close a saved file without saving and reopen it, or check an unsaved document by eye), then run ' +
                 `illustrator_reconcile with action=release_unverified, command_id=${targetId}, and confirm_command_id=${targetId}. ` +
                 'The document state stays unverified and this command is never replayed or reapplied.'
@@ -408,7 +484,7 @@ export class DurableCommandBridge {
                 await this.store.retireUnstartedHostArtifacts(targetId);
             }
             await this.store.abandon(targetId);
-            return this.publicCommandStatus(await this.store.readStatus(targetId), execution, executionStatus, false);
+            return this.publicCommandStatus(await this.store.readStatus(targetId), execution, executionStatus, false, unstartedWindowsRead);
         }
         if (status.state !== 'running' && status.state !== 'unknown') {
             throw new Error('Nonterminal reconciliation reached an impossible command state.');
@@ -417,12 +493,45 @@ export class DurableCommandBridge {
             ...status,
             ...(releaseGuidance === '' ? {} : { message: `${status.message ?? `Command ${targetId} is unresolved.`}${releaseGuidance}` }),
             ...(transaction === undefined ? {} : { transaction }),
-        }, execution, executionStatus, canAbandon);
+        }, execution, executionStatus, canAbandon, unstartedWindowsRead);
         return canReleaseUnverified ? { ...nonterminal, canReleaseUnverified: true } : nonterminal;
     }
+    async reconcileUnstartedWindowsMutation(commandId, metadata, status, options) {
+        if (options.quarantine || options.releaseUnverified) {
+            throw new Error('An unstarted Windows mutation can only be inspected or abandoned; quarantine and release_unverified are not available.');
+        }
+        if (!options.abandon) {
+            return this.publicCommandStatus({
+                ...status,
+                message: `The runner of mutation ${commandId} never reached the host (no execution record, no host marker). ` +
+                    `Run illustrator_reconcile with action=abandon, command_id=${commandId}, and confirm_command_id=${commandId} ` +
+                    'to record it as failed before apply and free the lock; the command is never reapplied.',
+            }, null, 'inactive', true, true);
+        }
+        if (options.confirmCommandId !== commandId) {
+            throw new Error('Abandoning a command requires confirm_command_id to exactly match the locked command.');
+        }
+        const leave = await this.enterQueue();
+        try {
+            if (!(await this.store.inspectNeverStartedMutation(commandId))) {
+                throw new Error('The command cannot be abandoned: it is no longer provably an unstarted mutation.');
+            }
+            await this.observeProvenPreApplyFailure(commandId);
+            await this.store.finalizeNeverStartedMutation(this.store.files(commandId), metadata);
+        }
+        finally {
+            leave();
+        }
+        return this.publicCommandStatus({
+            commandId,
+            state: 'failed',
+            message: `Mutation ${commandId} never reached the host; it was recorded as failed before apply and will not be reapplied.`,
+        }, null, 'inactive', false, true);
+    }
     async reconcileLegacyState(commandId, lockOwner, options, source, metadata) {
-        const execution = await this.store.readExecution(commandId);
-        const executionStatus = execution === null ? 'unknown' : this.transport.liveness(execution.processGroupId);
+        const inspection = await this.store.readExecution(commandId);
+        const execution = inspection.state === 'valid' ? inspection.value : null;
+        const executionStatus = execution === null ? 'unknown' : await this.transport.liveness(execution);
         const finalization = source === 'metadata'
             ? await this.store.inspectFinalization(commandId)
             : { state: 'missing' };
@@ -435,7 +544,7 @@ export class DurableCommandBridge {
             finalization.value.validatorVersion === metadata.mutationValidator.version &&
             finalization.value.adapterIdentity === metadata.adapterIdentity;
         const hasFixedLegacyTerminalRecord = source === 'compact' || hasMatchingLegacyFinalization;
-        const recoverable = lockOwner === commandId &&
+        const recoverable = process.platform !== 'win32' && lockOwner === commandId &&
             (metadata?.kind === 'read' || executionStatus === 'inactive' || hasFixedLegacyTerminalRecord);
         const message = source === 'compact'
             ? 'Durable version 1 compact state is quarantined and cannot be replayed under the current adapter identity.'
@@ -537,6 +646,7 @@ export class DurableCommandBridge {
         try {
             const gate = command.hostGate?.beforeHost ? await command.hostGate.beforeHost({ commandId }) : undefined;
             const editSessionAdmission = gate ? gate.editSessionAdmission : undefined;
+            const dirtyFileAdmission = gate ? gate.dirtyFileAdmission : undefined;
             if (command.kind === 'mutation')
                 await this.store.assertMutationCapacity();
             files = await this.store.create(commandId, command.kind, command.mutationValidator, command.kind === 'mutation' ? command.idempotency : undefined);
@@ -550,6 +660,7 @@ export class DurableCommandBridge {
                         script: command.script,
                         mutation: command.kind === 'mutation',
                         ...(editSessionAdmission === undefined ? {} : { editSessionAdmission }),
+                        ...(dirtyFileAdmission === undefined ? {} : { dirtyFileAdmission }),
                     })}` },
                 { path: files.runnerPath, contents: this.transport.buildRunner(files.scriptPath, callApplication, command.timeoutMs ?? 30_000, command.kind === 'mutation' ? command.mutationHostApplicationMode : undefined) },
             ]);
@@ -615,7 +726,7 @@ export class DurableCommandBridge {
                     await this.observeAttested(commandId, terminalState);
                 }
                 catch (_observerError) {
-                    throw new IndeterminateExecutionError(`Illustrator mutation ${commandId} is attested, but its edit session could not be updated; the lock is kept. Run illustrator_reconcile.`, commandId);
+                    throw new IndeterminateExecutionError(`Illustrator mutation ${commandId} is attested, but its document barrier or edit session could not be updated; the lock is kept. Run illustrator_reconcile.`, commandId);
                 }
                 raw.data = validatedData;
                 raw.delivery = { mode: 'original', finalizedAt };
@@ -634,12 +745,12 @@ export class DurableCommandBridge {
             if (expectedExecution && executionLiveness !== 'inactive') {
                 if (error instanceof IndeterminateExecutionError)
                     throw error;
-                throw new IndeterminateExecutionError(`Illustrator execution process group is ${executionLiveness}; outcome is indeterminate (${commandId}).`, commandId, error instanceof HostProcessExitError
+                throw new IndeterminateExecutionError(`Illustrator execution process group is ${executionLiveness}; outcome is indeterminate (${commandId}).${readReleaseHint(command.kind, commandId)}`, commandId, error instanceof HostProcessExitError
                     ? { exitCode: error.exitCode, signal: error.signal, killed: error.killed }
                     : code === 'ETIMEDOUT' ? { code: 'ETIMEDOUT' } : {});
             }
             if (code === 'ETIMEDOUT') {
-                throw new IndeterminateExecutionError(`Illustrator command timed out; outcome is indeterminate (${commandId}).`, commandId, { code: 'ETIMEDOUT' });
+                throw new IndeterminateExecutionError(`Illustrator command timed out; outcome is indeterminate (${commandId}).${readReleaseHint(command.kind, commandId)}`, commandId, { code: 'ETIMEDOUT' });
             }
             if (error instanceof HostProcessExitError && (error.signal !== null || error.killed)) {
                 const termination = [
@@ -647,7 +758,7 @@ export class DurableCommandBridge {
                     `signal ${error.signal ?? 'none'}`,
                     `killed ${String(error.killed)}`,
                 ].join(', ');
-                throw new IndeterminateExecutionError(`Illustrator command process terminated; outcome is indeterminate (${termination}; ${commandId}).`, commandId, {
+                throw new IndeterminateExecutionError(`Illustrator command process terminated; outcome is indeterminate (${termination}; ${commandId}).${readReleaseHint(command.kind, commandId)}`, commandId, {
                     exitCode: error.exitCode,
                     signal: error.signal,
                     killed: error.killed,
@@ -780,8 +891,9 @@ export class DurableCommandBridge {
         }
         const status = await this.store.readStatus(commandId);
         if (status.state === 'failed') {
-            const execution = await this.store.readExecution(commandId);
-            if (execution !== null && this.transport.liveness(execution.processGroupId) === 'inactive' &&
+            const inspection = await this.store.readExecution(commandId);
+            const execution = inspection.state === 'valid' ? inspection.value : null;
+            if (execution !== null && (await this.transport.liveness(execution)) === 'inactive' &&
                 await this.compactPersistedFailure(commandId, stored)) {
                 return await this.replayMutation(command);
             }
@@ -899,36 +1011,54 @@ export class DurableCommandBridge {
     async commandExecutionState(commandId) {
         let execution;
         try {
-            execution = await this.store.readExecution(commandId);
+            const inspection = await this.store.readExecution(commandId);
+            if (inspection.state === 'missing')
+                return 'inactive';
+            if (inspection.state !== 'valid')
+                return 'unknown';
+            execution = inspection.value;
         }
         catch (_error) {
             return 'unknown';
         }
-        if (execution === null)
-            return 'inactive';
-        return this.transport.liveness(execution.processGroupId);
+        return await this.transport.liveness(execution);
     }
     async executionLiveness(commandId, expectedExecution) {
         if (expectedExecution === undefined)
             return 'inactive';
         let durableExecution;
         try {
-            durableExecution = await this.store.readExecution(commandId);
+            const inspection = await this.store.readExecution(commandId);
+            if (inspection.state !== 'valid')
+                return 'unknown';
+            durableExecution = inspection.value;
         }
         catch (_error) {
             return 'unknown';
         }
-        if (durableExecution === null || durableExecution.pid !== expectedExecution.pid ||
-            durableExecution.processGroupId !== expectedExecution.processGroupId ||
-            durableExecution.nonce !== expectedExecution.nonce || durableExecution.state !== expectedExecution.state ||
-            durableExecution.startedAt !== expectedExecution.startedAt)
+        if (durableExecution === null || !(expectedExecution.version === 1
+            ? executionIdentityMatches(durableExecution, expectedExecution) : executionRecordsMatch(durableExecution, expectedExecution)))
             return 'unknown';
-        return this.transport.liveness(expectedExecution.processGroupId);
+        return await this.transport.liveness(durableExecution);
     }
-    publicCommandStatus(status, execution, executionStatus, canAbandon) {
+    publicCommandStatus(status, execution, executionStatus, canAbandon, unstartedWindows = false) {
         const base = {
             commandId: status.commandId,
             ...(status.message === undefined ? {} : { message: status.message }),
+        };
+        if (unstartedWindows && execution === null) {
+            if (status.state === 'completed')
+                throw new Error('A missing execution cannot prove completion.');
+            if (status.state === 'failed')
+                return { ...base, state: 'failed', executionRecord: 'missing',
+                    executionStatus: 'inactive', canAbandon: false };
+            return { ...base, state: status.state, executionRecord: 'missing', executionStatus: 'inactive',
+                canAbandon };
+        }
+        const identity = execution === null ? null : {
+            ...(execution.version === 1 ? { executionControllerProcessGroupId: execution.processGroupId }
+                : { executionIdentity: { kind: 'windows_process', pid: execution.pid, creationTime: execution.creationTime } }),
+            executionNonce: execution.nonce, executionState: execution.state,
         };
         if (status.state === 'completed' || status.state === 'failed') {
             if (execution === null || executionStatus !== 'inactive') {
@@ -937,9 +1067,7 @@ export class DurableCommandBridge {
             return {
                 ...base,
                 state: status.state,
-                executionControllerProcessGroupId: execution.processGroupId,
-                executionNonce: execution.nonce,
-                executionState: execution.state,
+                ...identity,
                 executionStatus,
                 canAbandon: false,
             };
@@ -952,11 +1080,6 @@ export class DurableCommandBridge {
         if (execution === null) {
             return { ...nonterminal, executionStatus: 'unknown', canAbandon: false };
         }
-        const identity = {
-            executionControllerProcessGroupId: execution.processGroupId,
-            executionNonce: execution.nonce,
-            executionState: execution.state,
-        };
         if (executionStatus === 'inactive') {
             return { ...nonterminal, ...identity, executionStatus, canAbandon };
         }

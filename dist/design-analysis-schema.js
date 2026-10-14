@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { boundsSchema, documentContextSchema } from './mutation-result-schema-core.js';
 import { cmykColorSummarySchema, finiteNumberSchema, grayColorSummarySchema, gradientSummarySchema, labColorSummarySchema, patternColorSummarySchema, percentSchema, rgbChannelSchema, rgbColorSummarySchema, spotSummarySchema, unknownColorSummarySchema, } from './object-appearance-schema.js';
 import { CONTRAST_LARGE_TEXT, CONTRAST_THRESHOLDS, DESIGN_ANALYSIS_LIMITS } from './design-analysis.js';
+import { PREFLIGHT_SCOPE_NOTE } from './preflight-scope-note.js';
 const message = z.string().min(1).max(500);
 const count = z.number().int().nonnegative();
 const tokenId = z.string().min(1).max(255);
@@ -114,11 +115,14 @@ export const designTokensResultSchema = z.strictObject({
         swatches: count,
         unavailableAttributes: count,
     }),
+    unreadableTextFrames: z.array(z.strictObject({
+        uuid: z.string().min(1).max(255), name: z.string().max(255), attributes: z.array(z.string().min(1).max(64)).max(8),
+    })).max(DESIGN_ANALYSIS_LIMITS.textFrameDetailReads),
     complete: z.boolean(),
     incompleteReasons: z.array(z.enum([
         'text_frame_detail_limit', 'text_style_scan_truncated', 'text_content_truncated', 'colors_truncated',
-        'fonts_truncated', 'font_sizes_truncated', 'stroke_widths_truncated', 'attribute_unavailable',
-    ])).max(8),
+        'fonts_truncated', 'font_sizes_truncated', 'stroke_widths_truncated', 'attribute_unavailable', 'text_frame_unreadable',
+    ])).max(9),
     limitations: z.array(z.enum(['line_height_css_value_unavailable', 'cmyk_css_not_color_managed'])).max(2),
     css: z.string().nullable(),
 }).superRefine((value, context) => {
@@ -176,10 +180,12 @@ export const textConsistencyFindingSchema = z.discriminatedUnion('rule', [
 ]);
 export const textConsistencyResultSchema = z.strictObject({
     document: documentContextSchema,
+    scopeNote: z.literal(PREFLIGHT_SCOPE_NOTE),
     textFrames: count,
     scannedTextFrames: count,
     findings: z.array(textConsistencyFindingSchema).max(DESIGN_ANALYSIS_LIMITS.findings),
     findingCount: count,
+    unreadableTextFrames: z.array(z.strictObject({ uuid: z.string().min(1).max(255), name: z.string().max(255) })).max(DESIGN_ANALYSIS_LIMITS.textFrameDetailReads),
     complete: z.boolean(),
     incompleteReasons: z.array(z.enum(['text_content_truncated', 'text_unavailable', 'findings_truncated'])).max(3),
 }).superRefine((value, context) => {

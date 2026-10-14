@@ -2,17 +2,21 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readdir, rename, rmdir, stat, statfs, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { CANONICAL_COMMAND_ID_MESSAGE, isCanonicalCommandId } from './command-id.js';
 import { CommandQuarantinedError, CommandReleasedUnverifiedError } from './domain.js';
-import { describeStateEntry, ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath, privateOwnerModeViolation, unsafeStateEntriesError, validatePrivateDirectory, validatePrivateStateRoot, withPrivateDirectoryScope, } from './private-state.js';
+import { describeStateEntry, ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath, isWindowsPrivateState, privateOwnerModeViolation, unsafeStateEntriesError, validatePrivateDirectory, validatePrivateStateRoot, withPrivateDirectoryScope, } from './private-state.js';
 import { PRIVATE_RECORD_LIMITS, atomicCreatePrivateRecord, atomicCreatePrivateRecords, atomicReplacePrivateRecord, createEmptyPrivateStagingRecords, readSecurePrivateRecord, unlinkPrivateRecord, unlinkPrivateRecords, } from './private-record.js';
-import { validateMutationResultArtifact } from './mutation-result-validator.js';
-import { classifyCommandDirectory, ensureQuarantineArea, inspectCommandDirectory, publishQuarantineManifest, quarantineArea, quarantineManifestExists, readQuarantineManifest, scanCommandQuarantineArea, snapshotMatches, stateRootDevice, } from './state-quarantine.js';
+import { rectangleResultSchema as legacyRectangleResultSchema } from './legacy-rectangle-result-v1.js';
+import { parseCompletedResultEnvelope, validateMutationResultArtifact } from './mutation-result-validator.js';
+import { classifyCommandDirectory, ensureQuarantineArea, inspectCommandDirectory, publishQuarantineManifest, quarantineArea, quarantineManifestExists, readQuarantineManifest, scanCommandQuarantineArea, snapshotMatches, stateRootDevice, temporaryTwinPattern, } from './state-quarantine.js';
 import { defaultMutationOperationRegistry } from './default-mutation-operation-adapters.js';
 import { legacyCommandMetadata, legacyCompactIdempotency, legacyFinalization, } from './legacy-mutation-state-v1.js';
 import { currentUid, PlatformUnsupportedError } from './platform-primitives.js';
+import { windowsPathComponentRejection } from './windows/output-path.js';
+import { isFileTime, parseExecutionRecord, prepareExecutionRecord, executionIdentityMatches, executionRecordsMatch } from './execution-record.js';
+export { parseExecutionRecord } from './execution-record.js';
 const COMMAND_FILE_KEYS = [
     'commandId',
     'directory',
@@ -144,17 +148,6 @@ function parseStoredCommandStatus(text, commandId) {
     }
     return status;
 }
-function parseExecutionRecord(text) {
-    const value = JSON.parse(text);
-    const keys = Object.keys(value).sort().join(',');
-    if (keys !== 'nonce,pid,processGroupId,startedAt,state,version' || value.version !== 1 ||
-        value.state !== 'prepared' || typeof value.pid !== 'number' || !Number.isSafeInteger(value.pid) || value.pid <= 0 ||
-        value.processGroupId !== value.pid || typeof value.nonce !== 'string' ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.nonce) ||
-        typeof value.startedAt !== 'string' || value.startedAt.length === 0)
-        return null;
-    return value;
-}
 function hasCanonicalTimestamp(value) {
     return typeof value === 'string' && CANONICAL_ISO_TIMESTAMP.test(value) && Number.isFinite(Date.parse(value));
 }
@@ -166,6 +159,16 @@ const RELEASED_UNVERIFIED_KEYS = [
 const RELEASED_UNVERIFIED_EVIDENCE_KEYS = [
     'adapterResolved', 'executionNonce', 'executionProcessGroupId', 'resultDigest', 'resultDigestAlgorithm',
 ].join(',');
+const WINDOWS_RELEASED_UNVERIFIED_EVIDENCE_KEYS = [
+    'adapterResolved', 'executionCreationTime', 'executionNonce', 'executionProcessId', 'resultDigest', 'resultDigestAlgorithm',
+].join(',');
+function releasedEvidenceIdentityValid(evidence) {
+    const keys = Object.keys(evidence).sort().join(',');
+    const pid = keys === RELEASED_UNVERIFIED_EVIDENCE_KEYS ? evidence.executionProcessGroupId : evidence.executionProcessId;
+    return typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0 &&
+        (keys === RELEASED_UNVERIFIED_EVIDENCE_KEYS ||
+            (keys === WINDOWS_RELEASED_UNVERIFIED_EVIDENCE_KEYS && isFileTime(evidence.executionCreationTime)));
+}
 function parseReleasedUnverifiedRecord(value, commandId) {
     const evidence = value.evidence;
     if (Object.keys(value).sort().join(',') !== RELEASED_UNVERIFIED_KEYS ||
@@ -179,11 +182,10 @@ function parseReleasedUnverifiedRecord(value, commandId) {
         value.terminalState !== 'released_unverified' || value.documentState !== 'unverified' ||
         !RELEASE_REASON_CODES.has(value.reasonCode) || !hasCanonicalTimestamp(value.releasedAt) ||
         typeof evidence !== 'object' || evidence === null || Array.isArray(evidence) ||
-        Object.keys(evidence).sort().join(',') !== RELEASED_UNVERIFIED_EVIDENCE_KEYS ||
+        !releasedEvidenceIdentityValid(evidence) ||
         typeof evidence.executionNonce !== 'string' ||
         !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(evidence.executionNonce) ||
-        typeof evidence.executionProcessGroupId !== 'number' || !Number.isSafeInteger(evidence.executionProcessGroupId) ||
-        evidence.executionProcessGroupId <= 0 || evidence.resultDigestAlgorithm !== 'sha256' ||
+        evidence.resultDigestAlgorithm !== 'sha256' ||
         (evidence.resultDigest !== null &&
             (typeof evidence.resultDigest !== 'string' || !/^[0-9a-f]{64}$/.test(evidence.resultDigest))) ||
         typeof evidence.adapterResolved !== 'boolean')
@@ -312,6 +314,8 @@ export class FileCommandStore {
                     break;
                 case 'released_unverified':
                     await this.assertReleasedUnverifiedBinding(compact.value);
+                    if ('executionProcessId' in compact.value.evidence && await this.readLockOwner() !== commandId)
+                        return;
                     break;
                 case 'replay_bundle':
                     break;
@@ -363,7 +367,7 @@ export class FileCommandStore {
             directory,
             paramsPath: join(directory, 'params.json'),
             scriptPath: join(directory, 'command.jsx'),
-            runnerPath: join(directory, 'runner.applescript'),
+            runnerPath: join(directory, process.platform === 'win32' ? 'runner.ps1' : 'runner.applescript'),
             resultPath: join(directory, 'result.json'),
             statusPath: join(directory, 'status.json'),
             executionPath: join(directory, 'execution.json'),
@@ -384,13 +388,13 @@ export class FileCommandStore {
             return { state: 'invalid', reason: 'unknown_mutation_adapter' };
         return { state: 'valid', value: inspected.value };
     }
-    async inspectMetadataStructure(commandId) {
+    async inspectMetadataStructure(commandId, directory) {
         const files = this.files(commandId);
         try {
-            const record = await this.readCommandRecord(commandId, join(files.directory, 'metadata.json'), PRIVATE_RECORD_LIMITS.metadata);
+            const record = await this.readCommandRecord(commandId, join(files.directory, 'metadata.json'), PRIVATE_RECORD_LIMITS.metadata, directory);
             if (record.state === 'missing') {
                 try {
-                    await this.validateCommandDirectory(commandId);
+                    await this.validateBarrierDirectory(commandId, directory);
                     return { state: 'invalid', reason: 'metadata_missing' };
                 }
                 catch (error) {
@@ -526,10 +530,10 @@ export class FileCommandStore {
         const inspected = await this.inspectFinalization(commandId);
         return inspected.state === 'valid' ? inspected.value : null;
     }
-    async inspectFinalization(commandId) {
+    async inspectFinalization(commandId, directory) {
         const path = this.files(commandId).finalizationPath;
         try {
-            const record = await this.readCommandRecord(commandId, path, PRIVATE_RECORD_LIMITS.finalization);
+            const record = await this.readCommandRecord(commandId, path, PRIVATE_RECORD_LIMITS.finalization, directory);
             if (record.state !== 'valid')
                 return record;
             const value = JSON.parse(record.text);
@@ -601,10 +605,10 @@ export class FileCommandStore {
         }
         await this.assertNoTombstoneTerminalArtifacts(files.commandId);
     }
-    async inspectCompactIdempotency(commandId) {
+    async inspectCompactIdempotency(commandId, directory) {
         const files = this.files(commandId);
         try {
-            const record = await this.readCommandRecord(commandId, files.idempotencyPath, PRIVATE_RECORD_LIMITS.idempotency);
+            const record = await this.readCommandRecord(commandId, files.idempotencyPath, PRIVATE_RECORD_LIMITS.idempotency, directory);
             if (record.state !== 'valid')
                 return record;
             const value = JSON.parse(record.text);
@@ -724,7 +728,10 @@ export class FileCommandStore {
                 };
             }
             else {
-                await this.assertProvenPreApplyTerminalEvidence(files);
+                if (terminal.evidence === 'never_started')
+                    await this.assertNeverStartedMutationEvidence(files.commandId, false);
+                else
+                    await this.assertProvenPreApplyTerminalEvidence(files);
                 try {
                     await this.assertNoTombstoneTerminalArtifacts(files.commandId);
                 }
@@ -821,8 +828,8 @@ export class FileCommandStore {
                 }
                 const path = join(files.directory, name);
                 const metadata = await lstat(path);
-                if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== currentUid() ||
-                    (metadata.mode & 0o7777) !== 0o600) {
+                if (!metadata.isFile() || metadata.isSymbolicLink() || privateOwnerModeViolation(metadata, 0o600) !== null ||
+                    (isWindowsPrivateState() && windowsPathComponentRejection(name) !== null)) {
                     throw unsafeStateEntriesError('Command directory compaction', [
                         `unsafe artifact that cannot be compacted: ${describeStateEntry(path, metadata, 0o600)}`,
                     ]);
@@ -871,6 +878,105 @@ export class FileCommandStore {
         }
         return compacted;
     }
+    async windowsQuarantineAreaScan() {
+        const { base } = quarantineArea(this.root, 'commands');
+        try {
+            await lstat(base);
+        }
+        catch (error) {
+            if (isMissingPath(error))
+                return { bytes: 0n, quarantined: 0, violations: [] };
+            throw error;
+        }
+        return { bytes: 0n, quarantined: 0, violations: [
+                `quarantine area present but Windows does not implement quarantine: ${base}`,
+            ] };
+    }
+    async inspectNeverStartedMutation(commandId) {
+        try {
+            await this.assertNeverStartedMutationEvidence(commandId);
+            return true;
+        }
+        catch (_error) {
+            return false;
+        }
+    }
+    async assertNeverStartedMutationEvidence(commandId, requireStaging = true) {
+        if (!isWindowsPrivateState())
+            throw new Error('Never-started mutation recovery is defined for Windows only.');
+        const files = this.files(commandId);
+        const fail = (reason) => {
+            throw new Error(`Command ${commandId} is not provably an unstarted mutation: ${reason}.`);
+        };
+        if (await this.readLockOwner() !== commandId)
+            fail('it does not own the active command lock');
+        if ((await this.readMetadata(commandId))?.kind !== 'mutation')
+            fail('its metadata is not a valid mutation record');
+        if ((await this.inspectCompactIdempotency(commandId)).state !== 'missing')
+            fail('a compact idempotency record exists');
+        if ((await this.readExecution(commandId)).state !== 'missing')
+            fail('an execution record exists');
+        if (await this.hostRunningPublished(commandId))
+            fail('the host running marker exists');
+        const status = await this.readStatus(commandId);
+        if (status.state !== 'unknown' || status.message !== 'Command created but not started.')
+            fail('its status is not the created state');
+        const published = new Set(['metadata.json', 'status.json.unknown.json', 'params.json', 'command.jsx', 'runner.ps1']);
+        const stagingNames = new Set([
+            'result.json.tmp',
+            'status.json.running.json.tmp',
+            'status.json.host_completed.json.tmp',
+            'status.json.completed.json.tmp',
+            'status.json.failed.json.tmp',
+            ...Array.from({ length: 32 }, (_unused, index) => `status.json.audit.${String(index).padStart(3, '0')}.json.tmp`),
+        ]);
+        const twinBases = new Set([...published, 'execution.json']);
+        await this.withCommandScope(commandId, async (scope) => {
+            const names = await readdir(files.directory);
+            if (names.length > 128)
+                fail('the directory holds too many entries');
+            if (requireStaging && !names.includes('status.json.running.json.tmp'))
+                fail('the host staging was not prepared (the creating process may still be running)');
+            for (const name of names) {
+                const twin = /^(.+)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/u.exec(name);
+                if (!published.has(name) && !stagingNames.has(name) && !(twin !== null && twinBases.has(twin[1]))) {
+                    fail(`unexpected entry ${JSON.stringify(name)}`);
+                }
+            }
+            for (const name of names) {
+                const metadata = await lstat(join(files.directory, name));
+                if (!metadata.isFile() || metadata.isSymbolicLink())
+                    fail(`entry ${JSON.stringify(name)} is not a regular file`);
+            }
+            await scope.assertStable();
+        });
+    }
+    async finalizeNeverStartedMutation(files, metadata, options = {}) {
+        files = this.validateCommandFiles(files);
+        const existing = await this.inspectCompactIdempotency(files.commandId);
+        let finalizedAt = new Date().toISOString();
+        if (existing.state === 'valid' && existing.value.kind === 'tombstone')
+            finalizedAt = existing.value.finalizedAt;
+        else {
+            await this.assertNeverStartedMutationEvidence(files.commandId);
+            await options.neverStartedBoundary?.('before_retire');
+            await this.retireUnstartedHostArtifacts(files.commandId);
+            await options.neverStartedBoundary?.('after_retire');
+            await this.assertNeverStartedMutationEvidence(files.commandId, false);
+        }
+        const compacted = await this.compactMutationInternal(files, metadata, {
+            kind: 'proven_pre_apply_failed',
+            finalizedAt,
+            evidence: 'never_started',
+        }, options);
+        if (compacted.kind !== 'tombstone')
+            throw new Error('Never-started terminalization did not produce a tombstone.');
+        await this.release(files.commandId);
+        if (await this.readLockOwner() === files.commandId) {
+            throw new Error('Never-started terminalization could not verify command lock release.');
+        }
+        return compacted;
+    }
     async assertMutationCapacity() {
         const quota = this.mutationQuota;
         if (!Number.isSafeInteger(quota.maxCommandCount) || quota.maxCommandCount < 1 ||
@@ -879,7 +985,7 @@ export class FileCommandStore {
             quota.reservationBytes > quota.maxTotalBytes) {
             throw new Error('Mutation state quota configuration is invalid.');
         }
-        const selfUid = currentUid();
+        const selfUid = isWindowsPrivateState() ? null : currentUid();
         await this.withCommandsScope(async (scope) => {
             const commandsRoot = join(this.root, 'commands');
             const entries = await readdir(commandsRoot, { withFileTypes: true });
@@ -898,7 +1004,7 @@ export class FileCommandStore {
                     continue;
                 }
                 if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink() ||
-                    directoryMetadata.uid !== selfUid || (directoryMetadata.mode & 0o7777) !== 0o700) {
+                    privateOwnerModeViolation(directoryMetadata, 0o700) !== null) {
                     violations.push(`unsafe command directory: ${describeStateEntry(directory, directoryMetadata, 0o700)}`);
                     violatingCommands.push(entry.name);
                     continue;
@@ -920,7 +1026,7 @@ export class FileCommandStore {
                             violations.push(`nonregular artifact: ${describeStateEntry(artifactPath, artifactMetadata, 0o600)}`);
                             continue;
                         }
-                        if (artifactMetadata.uid !== selfUid || (artifactMetadata.mode & 0o7777) !== 0o600 ||
+                        if (privateOwnerModeViolation(artifactMetadata, 0o600) !== null ||
                             !Number.isSafeInteger(artifactMetadata.size) || artifactMetadata.size < 0) {
                             violations.push(`unsafe artifact: ${describeStateEntry(artifactPath, artifactMetadata, 0o600)}`);
                             continue;
@@ -932,12 +1038,16 @@ export class FileCommandStore {
                 if (violations.length > before)
                     violatingCommands.push(entry.name);
             }
-            const quarantined = await scanCommandQuarantineArea(this.root, selfUid, commandsRoot);
+            const quarantined = selfUid === null
+                ? await this.windowsQuarantineAreaScan()
+                : await scanCommandQuarantineArea(this.root, selfUid, commandsRoot);
             violations.push(...quarantined.violations);
             totalBytes += quarantined.bytes;
             await scope.assertStable();
             if (violations.length > 0) {
-                throw unsafeStateEntriesError('Mutation state quota scan', violations, await this.quarantineGuidance(violatingCommands, selfUid));
+                throw unsafeStateEntriesError('Mutation state quota scan', violations, selfUid === null
+                    ? ['Windows does not implement quarantine: the evidence is retained and no automatic repair was performed.']
+                    : await this.quarantineGuidance(violatingCommands, selfUid));
             }
             if (totalBytes + BigInt(quota.reservationBytes) > BigInt(quota.maxTotalBytes)) {
                 throw new Error('Mutation state byte quota cannot reserve space for a new command.' + (quarantined.bytes > 0n
@@ -1077,16 +1187,12 @@ export class FileCommandStore {
     }
     async writeExecution(files, record) {
         files = this.validateCommandFiles(files);
-        const execution = {
-            version: 1,
-            state: 'prepared',
-            ...record,
-            startedAt: new Date().toISOString(),
-        };
+        const execution = prepareExecutionRecord(record, new Date().toISOString());
         await this.withCommandScope(files.commandId, async (scope) => atomicReplacePrivateRecord(files.executionPath, JSON.stringify(execution), { scope }));
-        const published = await this.readExecution(files.commandId);
-        if (!published || published.pid !== execution.pid || published.processGroupId !== execution.processGroupId ||
-            published.nonce !== execution.nonce) {
+        const inspection = await this.readExecution(files.commandId);
+        const published = inspection.state === 'valid' ? inspection.value : null;
+        if (!published || !executionIdentityMatches(published, execution) ||
+            (execution.version === 2 && !executionRecordsMatch(published, execution))) {
             throw new Error('Durable execution record could not be verified before launch.');
         }
         return published;
@@ -1096,20 +1202,21 @@ export class FileCommandStore {
         try {
             const record = await this.readCommandRecord(commandId, files.executionPath, PRIVATE_RECORD_LIMITS.execution);
             if (record.state !== 'valid')
-                return null;
+                return { state: record.state === 'missing' ? 'missing' : 'invalid' };
             return parseExecutionRecord(record.text);
         }
         catch (error) {
-            if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT')
-                return null;
+            if (isMissingPath(error))
+                return { state: 'missing' };
             if (error instanceof SyntaxError)
-                return null;
+                return { state: 'invalid' };
             throw error;
         }
     }
     async readExecutionPid(commandId) {
         this.files(commandId);
-        return (await this.readExecution(commandId))?.pid ?? null;
+        const inspection = await this.readExecution(commandId);
+        return inspection.state === 'valid' ? inspection.value.pid : null;
     }
     async abandon(commandId) {
         const files = this.files(commandId);
@@ -1120,17 +1227,37 @@ export class FileCommandStore {
         });
         await this.release(commandId);
     }
-    async inspectReleaseUnverified(commandId, processGroupLiveness) {
+    async inspectReleaseUnverified(commandId, executionLiveness) {
         this.files(commandId);
         const refuse = (reason) => ({ eligible: false, reason });
-        let selfUid;
-        try {
-            selfUid = currentUid();
+        let selfUid = null;
+        if (!isWindowsPrivateState()) {
+            try {
+                selfUid = currentUid();
+            }
+            catch (error) {
+                if (error instanceof PlatformUnsupportedError)
+                    return refuse('the operating-system user cannot be verified');
+                throw error;
+            }
         }
-        catch (error) {
-            if (error instanceof PlatformUnsupportedError)
-                return refuse('the operating-system user cannot be verified');
-            throw error;
+        else {
+            const quarantineExists = await this.withRootScope(async (scope) => {
+                try {
+                    await lstat(join(this.root, 'quarantine'));
+                    return true;
+                }
+                catch (error) {
+                    if (isMissingPath(error))
+                        return false;
+                    throw error;
+                }
+                finally {
+                    await scope.assertStable();
+                }
+            });
+            if (quarantineExists)
+                return refuse('Windows quarantine state is unsupported and is retained');
         }
         if (await this.isQuarantined(commandId))
             return refuse('the command is quarantined');
@@ -1142,18 +1269,25 @@ export class FileCommandStore {
                 ? 'its state is durable version 1; use action=abandon'
                 : 'its metadata is missing, unsafe, or not a mutation');
         }
-        const execution = await this.readExecution(commandId).catch(() => null);
+        const execution = await this.readReleaseExecution(commandId);
         if (execution === null)
             return refuse('its execution record is missing or unreadable, so its runner is not proven stopped');
-        const liveness = processGroupLiveness(execution.processGroupId);
+        const snapshot = Object.freeze({ ...execution });
+        let liveness;
+        try {
+            liveness = await executionLiveness(snapshot);
+        }
+        catch {
+            liveness = 'unknown';
+        }
         if (liveness !== 'inactive')
-            return refuse(`its execution process group is ${liveness}`);
+            return refuse(`its execution ${snapshot.version === 1 ? 'process group' : 'process'} is ${liveness}`);
         const compact = await this.inspectCompactIdempotency(commandId);
         let resume = 'none';
         if (compact.state === 'valid') {
             if (compact.value.kind !== 'released_unverified')
                 return refuse(`it already has a ${compact.value.kind} terminal record`);
-            if (!this.releasedMatches(compact.value, metadata.value, execution))
+            if (!this.releasedMatches(compact.value, metadata.value, snapshot))
                 return refuse('its released record does not match its metadata and execution');
             resume = 'record';
         }
@@ -1162,23 +1296,269 @@ export class FileCommandStore {
                 return refuse('a finalization attestation exists; its attested compaction has not finished, so reconcile it again instead');
             }
         }
-        else if ((await this.readReleaseTwin(commandId, metadata.value, execution)) !== null) {
+        else if ((await this.readReleaseTwin(commandId, metadata.value, snapshot)) !== null) {
             resume = 'twin';
         }
         else {
             return refuse(`its terminal idempotency record is ${compact.state === 'legacy' ? 'durable version 1' : compact.reason}`);
         }
-        const attribution = await this.withCommandsScope(async (scope) => {
-            const classified = await classifyCommandDirectory(this.files(commandId).directory, selfUid);
-            await scope.assertStable();
-            return classified;
-        });
-        if (attribution === null)
-            return refuse('its command directory does not exist');
-        if (attribution.state === 'unattributable') {
-            return refuse(`its command directory has state that cannot be attributed to this user (${attribution.reasons.join('; ')})`);
+        if (selfUid === null) {
+            const reason = await this.inspectWindowsReleaseDirectory(commandId);
+            if (reason !== null)
+                return refuse(reason);
         }
-        return { eligible: true, resume };
+        else {
+            const uid = selfUid;
+            const attribution = await this.withCommandsScope(async (scope) => {
+                const classified = await classifyCommandDirectory(this.files(commandId).directory, uid);
+                await scope.assertStable();
+                return classified;
+            });
+            if (attribution === null)
+                return refuse('its command directory does not exist');
+            if (attribution.state === 'unattributable') {
+                return refuse(`its command directory has state that cannot be attributed to this user (${attribution.reasons.join('; ')})`);
+            }
+        }
+        if (!await this.releaseSnapshotMatches(commandId, metadata.value, snapshot))
+            return refuse('its metadata or execution changed during the release observation');
+        return { eligible: true, resume, execution: snapshot, adapterResolved: metadata.adapterResolved,
+            metadata: Object.freeze({ ...metadata.value, mutationValidator: Object.freeze({ ...metadata.value.mutationValidator }) }) };
+    }
+    async inspectWindowsReleaseDirectory(commandId) {
+        return await this.withCommandScope(commandId, async (scope) => {
+            const directory = this.files(commandId).directory;
+            const names = await readdir(directory);
+            if (names.length > 128)
+                return 'its command directory exceeds the 128-artifact limit';
+            const entries = new Map();
+            for (const name of names) {
+                if (!/^[A-Za-z0-9._-]{1,128}$/u.test(name) || name.includes('..') || windowsPathComponentRejection(name) !== null) {
+                    return 'its command directory has an unsafe artifact name';
+                }
+                const entry = await lstat(join(directory, name), { bigint: true });
+                if (entry.isSymbolicLink() || !entry.isFile())
+                    return 'its command directory has a link or non-regular artifact';
+                entries.set(name, entry);
+            }
+            for (const [name, entry] of entries) {
+                if (entry.nlink === 1n)
+                    continue;
+                const twins = [...entries].filter(([other, stat]) => other !== name && stat.nlink === 2n &&
+                    stat.dev === entry.dev && stat.ino === entry.ino &&
+                    (temporaryTwinPattern(name).test(other) || temporaryTwinPattern(other).test(name)));
+                if (entry.nlink !== 2n || twins.length !== 1)
+                    return 'its command directory has an unexpected hard-link alias';
+            }
+            await scope.assertStable();
+            return null;
+        });
+    }
+    async readReleaseExecution(commandId) {
+        try {
+            const inspected = await this.readExecution(commandId);
+            return inspected.state === 'valid' ? inspected.value : null;
+        }
+        catch {
+            return null;
+        }
+    }
+    releaseMetadataMatches(left, right) {
+        return left.kind === 'mutation' && right.kind === 'mutation' && left.commandId === right.commandId &&
+            left.operation === right.operation && left.documentKey === right.documentKey && left.requestDigest === right.requestDigest &&
+            left.adapterIdentity === right.adapterIdentity && left.mutationValidator.kind === right.mutationValidator.kind &&
+            left.mutationValidator.version === right.mutationValidator.version;
+    }
+    async releaseSnapshotMatches(commandId, metadata, execution) {
+        const currentMetadata = await this.inspectMetadataStructure(commandId);
+        const currentExecution = await this.readReleaseExecution(commandId);
+        return currentMetadata.state === 'valid' && currentExecution !== null &&
+            this.releaseMetadataMatches(metadata, currentMetadata.value) && executionRecordsMatch(execution, currentExecution);
+    }
+    async listLegacyBarrierSources(executionLiveness = async () => 'unknown') {
+        const names = new Set();
+        try {
+            for (const name of await readdir(join(this.root, 'commands')))
+                if (isCanonicalCommandId(name))
+                    names.add(name);
+        }
+        catch (error) {
+            if (!isMissingPath(error))
+                throw error;
+        }
+        try {
+            for (const name of await readdir(quarantineArea(this.root, 'commands').area)) {
+                const id = name.endsWith('.json') ? name.slice(0, -5) : name;
+                if (isCanonicalCommandId(id))
+                    names.add(id);
+            }
+        }
+        catch (error) {
+            if (!isMissingPath(error))
+                throw error;
+        }
+        const owner = await this.readLockOwner();
+        const sources = [];
+        for (const commandId of [...names].sort()) {
+            const unknown = () => { sources.push({ commandId, source: 'released_unverified' }); };
+            const manifest = await readQuarantineManifest(this.root, 'commands', commandId);
+            if (manifest.state === 'invalid') {
+                unknown();
+                continue;
+            }
+            if (manifest.state === 'valid' && owner === manifest.manifest.operation?.id)
+                continue;
+            if (owner === commandId)
+                continue;
+            let directory;
+            if (manifest.state === 'valid') {
+                const state = await this.inspectQuarantine(commandId);
+                if (state?.state === 'inconsistent') {
+                    unknown();
+                    continue;
+                }
+                const retained = join(quarantineArea(this.root, 'commands').area, commandId);
+                const moved = await pathExists(retained);
+                if (state?.state === 'quarantined' || moved)
+                    directory = retained;
+            }
+            else if (await pathExists(join(quarantineArea(this.root, 'commands').area, commandId))) {
+                unknown();
+                continue;
+            }
+            try {
+                const found = await this.inspectLegacyBarrierCommand(commandId, directory, executionLiveness);
+                if (found !== null)
+                    sources.push(found);
+            }
+            catch {
+                unknown();
+            }
+        }
+        return sources;
+    }
+    async inspectLegacyBarrierCommand(commandId, directory, executionLiveness) {
+        const unknown = () => ({ commandId, source: 'released_unverified' });
+        await this.validateBarrierDirectory(commandId, directory);
+        const files = this.files(commandId);
+        const read = (path, limit) => this.readCommandRecord(commandId, path, limit, directory);
+        const compact = await this.inspectCompactIdempotency(commandId, directory);
+        if (compact.state === 'invalid')
+            return unknown();
+        const result = await read(files.resultPath, PRIVATE_RECORD_LIMITS.result);
+        const finalization = await this.inspectFinalization(commandId, directory);
+        const terminal = (record) => {
+            if (!('resultDigest' in record) || result.state !== 'valid')
+                throw new Error('The terminal result is not readable.');
+            const digest = createHash('sha256').update(result.bytes).digest('hex');
+            if (digest !== record.resultDigest)
+                throw new Error('The terminal digest differs from its record.');
+            if (record.version === 1) {
+                const envelope = parseCompletedResultEnvelope(result.text, commandId);
+                const parsed = legacyRectangleResultSchema.parse(envelope.data);
+                if (parsed.transaction.state !== record.terminalState)
+                    throw new Error('The legacy terminal differs from its result.');
+            }
+            else {
+                const artifact = validateMutationResultArtifact(this.registry, {
+                    commandId, operation: record.operation, intent: 'apply',
+                    validator: { kind: record.validatorKind, version: record.validatorVersion }, adapterIdentity: record.adapterIdentity,
+                }, result.bytes);
+                if (artifact.classification.state !== record.terminalState)
+                    throw new Error('The terminal differs from its result.');
+            }
+            return record.terminalState === 'rollback_failed'
+                ? { commandId, source: 'rollback_failed', documentKey: record.documentKey, resultText: result.text } : null;
+        };
+        if (compact.state === 'valid' || compact.state === 'legacy') {
+            const record = compact.value;
+            if (record.kind === 'released_unverified')
+                return { commandId, source: 'released_unverified', documentKey: record.documentKey };
+            if (record.kind === 'tombstone') {
+                if (result.state !== 'missing' || finalization.state !== 'missing')
+                    return unknown();
+                return null;
+            }
+            return terminal(record);
+        }
+        const metadata = await this.inspectMetadataStructure(commandId, directory);
+        if (metadata.state !== 'valid' && metadata.state !== 'legacy')
+            return unknown();
+        const execution = await read(files.executionPath, PRIVATE_RECORD_LIMITS.execution);
+        let inactive = execution.state === 'missing';
+        if (execution.state === 'valid') {
+            const parsed = parseExecutionRecord(execution.text);
+            inactive = parsed.state === 'valid' && await executionLiveness(parsed.value) === 'inactive';
+        }
+        if (!inactive)
+            return unknown();
+        const value = metadata.value;
+        if (value.kind === 'read') {
+            if (finalization.state !== 'missing')
+                return unknown();
+            const states = ['completed', 'failed', 'running', 'unknown'];
+            for (const state of states) {
+                const record = await read(`${files.statusPath}.${state}.json`, PRIVATE_RECORD_LIMITS.status);
+                if (record.state === 'invalid')
+                    return unknown();
+                if (record.state === 'valid') {
+                    if (parseStoredCommandStatus(record.text, commandId).state !== state)
+                        return unknown();
+                    return null;
+                }
+            }
+            const legacy = await read(files.statusPath, PRIVATE_RECORD_LIMITS.status);
+            if (legacy.state !== 'valid')
+                return unknown();
+            parseStoredCommandStatus(legacy.text, commandId);
+            return null;
+        }
+        if (finalization.state === 'valid' || finalization.state === 'legacy') {
+            const attestation = finalization.value;
+            if (attestation.version !== value.version || attestation.operation !== value.operation ||
+                attestation.documentKey !== value.documentKey || attestation.requestDigest !== value.requestDigest ||
+                attestation.validatorKind !== value.mutationValidator.kind || attestation.validatorVersion !== value.mutationValidator.version ||
+                attestation.adapterIdentity !== value.adapterIdentity)
+                return unknown();
+            return terminal(attestation);
+        }
+        if (finalization.state !== 'missing' || result.state !== 'missing')
+            return unknown();
+        if (execution.state === 'missing') {
+            const status = await read(`${files.statusPath}.unknown.json`, PRIVATE_RECORD_LIMITS.status);
+            const staging = await read(`${files.statusPath}.running.json.tmp`, PRIVATE_RECORD_LIMITS.status);
+            const started = await read(`${files.statusPath}.running.json`, PRIVATE_RECORD_LIMITS.status);
+            if (status.state === 'valid' && staging.state === 'valid' && staging.bytes.length === 0 && started.state === 'missing') {
+                const parsed = parseStoredCommandStatus(status.text, commandId);
+                if (parsed.state === 'unknown' && parsed.message === 'Command created but not started.') {
+                    const params = await read(files.paramsPath, 16_777_216);
+                    const script = await read(files.scriptPath, 16_777_216);
+                    const runner = await read(files.runnerPath, 16_777_216);
+                    if (params.state === 'valid' && script.state === 'valid' && runner.state === 'valid' && script.bytes.length > 0 && runner.bytes.length > 0)
+                        return null;
+                }
+            }
+        }
+        const names = (await readdir(directory ?? files.directory)).filter(name => /^status\.json\.audit\.\d{3}\.json$/u.test(name)).sort();
+        const audit = [];
+        for (let index = 0; index < names.length && names.length <= 32; index++) {
+            const record = await read(join(files.directory, names[index]), PRIVATE_RECORD_LIMITS.audit);
+            if (record.state !== 'valid')
+                return unknown();
+            const event = JSON.parse(record.text);
+            if (!isMutationAuditEvent(event, index))
+                return unknown();
+            audit.push(event);
+        }
+        if (isProvenPreApplyFailureAudit(audit)) {
+            for (const state of ['unknown', 'running', 'failed']) {
+                const record = await read(`${files.statusPath}.${state}.json`, PRIVATE_RECORD_LIMITS.status);
+                if (record.state !== 'valid' || parseStoredCommandStatus(record.text, commandId).state !== state)
+                    return unknown();
+            }
+            return null;
+        }
+        return unknown();
     }
     async releaseUnverified(commandId, options) {
         const files = this.files(commandId);
@@ -1191,26 +1571,29 @@ export class FileCommandStore {
             if (compact.state === 'valid' && compact.value.kind === 'released_unverified')
                 return compact.value;
         }
-        const eligibility = await this.inspectReleaseUnverified(commandId, options.processGroupLiveness);
+        const eligibility = await this.inspectReleaseUnverified(commandId, options.executionLiveness);
         if (!eligibility.eligible) {
             throw new Error(`Command ${commandId} cannot be released without verification: ${eligibility.reason}. Nothing was written.`);
         }
-        const metadata = await this.inspectMetadataStructure(commandId);
-        const execution = await this.readExecution(commandId);
-        if (metadata.state !== 'valid' || metadata.value.kind !== 'mutation' || execution === null) {
+        const { metadata, execution } = eligibility;
+        if (!await this.releaseSnapshotMatches(commandId, metadata, execution) || await this.readLockOwner() !== commandId) {
             throw new Error(`Command ${commandId} changed during its release; nothing was written.`);
         }
         if (eligibility.resume === 'twin') {
-            await this.completeReleaseTwin(commandId, metadata.value, execution);
+            await this.completeReleaseTwin(commandId, metadata, execution);
             await options.boundary?.('twin_completed');
         }
         else if (eligibility.resume === 'none') {
-            const record = await this.releasedRecord(commandId, metadata.value, metadata.adapterResolved, execution);
+            const record = await this.releasedRecord(commandId, metadata, eligibility.adapterResolved, execution);
             try {
-                await this.withCommandScope(commandId, async (scope) => atomicCreatePrivateRecord(files.idempotencyPath, JSON.stringify(record), {
-                    scope,
-                    ...(options.durabilityBoundary === undefined ? {} : { durabilityBoundary: options.durabilityBoundary }),
-                }));
+                await this.withCommandScope(commandId, async (scope) => {
+                    if (!await this.releaseSnapshotMatches(commandId, metadata, execution))
+                        throw new Error('Release identity changed before publication; its lock is kept.');
+                    await atomicCreatePrivateRecord(files.idempotencyPath, JSON.stringify(record), {
+                        scope,
+                        ...(options.durabilityBoundary === undefined ? {} : { durabilityBoundary: options.durabilityBoundary }),
+                    });
+                });
             }
             catch (error) {
                 if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST'))
@@ -1219,10 +1602,15 @@ export class FileCommandStore {
         }
         const published = await this.inspectCompactIdempotency(commandId);
         if (published.state !== 'valid' || published.value.kind !== 'released_unverified' ||
-            !this.releasedMatches(published.value, metadata.value, execution)) {
+            !this.releasedMatches(published.value, metadata, execution) || !await this.releaseSnapshotMatches(commandId, metadata, execution)) {
             throw new Error(`The released record of ${commandId} could not be verified; its lock is kept.`);
         }
         await options.boundary?.('record_verified');
+        if (execution.version === 2 && !await this.releaseSnapshotMatches(commandId, metadata, execution)) {
+            throw new Error(`Command ${commandId} changed before its lock release; its released record and lock are kept.`);
+        }
+        if (options.beforeUnlock !== undefined)
+            await options.beforeUnlock(published.value);
         await this.release(commandId);
         if (await this.readLockOwner() === commandId)
             throw new Error(`The release of ${commandId} could not verify its lock release.`);
@@ -1267,7 +1655,8 @@ export class FileCommandStore {
             releasedAt: new Date().toISOString(),
             evidence: {
                 executionNonce: execution.nonce,
-                executionProcessGroupId: execution.processGroupId,
+                ...(execution.version === 1 ? { executionProcessGroupId: execution.processGroupId }
+                    : { executionProcessId: execution.pid, executionCreationTime: execution.creationTime }),
                 resultDigestAlgorithm: 'sha256',
                 resultDigest: result.state === 'valid' ? createHash('sha256').update(result.bytes).digest('hex') : null,
                 adapterResolved,
@@ -1281,11 +1670,17 @@ export class FileCommandStore {
             record.validatorKind === metadata.mutationValidator.kind &&
             record.validatorVersion === metadata.mutationValidator.version &&
             record.evidence.executionNonce === execution.nonce &&
-            record.evidence.executionProcessGroupId === execution.processGroupId;
+            (execution.version === 1
+                ? 'executionProcessGroupId' in record.evidence && record.evidence.executionProcessGroupId === execution.processGroupId
+                : 'executionProcessId' in record.evidence && record.evidence.executionProcessId === execution.pid &&
+                    record.evidence.executionCreationTime === execution.creationTime);
     }
     async assertReleasedUnverifiedBinding(record) {
+        if ('executionProcessId' in record.evidence) {
+            await this.withCommandScope(record.commandId, async (scope) => { await scope.syncLeafParent(); });
+        }
         const metadata = await this.inspectMetadataStructure(record.commandId);
-        const execution = await this.readExecution(record.commandId);
+        const execution = await this.readReleaseExecution(record.commandId);
         if (metadata.state !== 'valid' || execution === null || !this.releasedMatches(record, metadata.value, execution)) {
             throw new Error(`The released record of ${record.commandId} does not match its metadata and execution; its lock is kept.`);
         }
@@ -1302,7 +1697,7 @@ export class FileCommandStore {
                     if (!RELEASE_TWIN_NAME.test(name))
                         continue;
                     const candidate = await lstat(join(files.directory, name), { bigint: true });
-                    if (candidate.isFile() && candidate.ino === target.ino)
+                    if (candidate.isFile() && candidate.dev === target.dev && candidate.ino === target.ino)
                         twins.push(name);
                 }
                 if (twins.length !== 1)
@@ -1316,7 +1711,7 @@ export class FileCommandStore {
                 if (released === null || !this.releasedMatches(released, metadata, execution))
                     return null;
                 await scope.assertStable();
-                return { twin: join(files.directory, twins[0]), ino: target.ino };
+                return { twin: join(files.directory, twins[0]), dev: target.dev, ino: target.ino };
             });
         }
         catch (_error) {
@@ -1330,7 +1725,7 @@ export class FileCommandStore {
         const path = this.files(commandId).idempotencyPath;
         await this.withCommandScope(commandId, async (scope) => unlinkPrivateRecord(found.twin, { scope }));
         const after = await lstat(path, { bigint: true });
-        if (after.ino !== found.ino || after.nlink !== 1n) {
+        if (after.dev !== found.dev || after.ino !== found.ino || after.nlink !== 1n) {
             throw new Error(`The released record of ${commandId} changed while its publication was finished; its lock is kept.`);
         }
     }
@@ -1484,7 +1879,8 @@ export class FileCommandStore {
             if (record.state !== 'valid')
                 return null;
             try {
-                return parseExecutionRecord(record.text);
+                const inspection = parseExecutionRecord(record.text);
+                return inspection.state === 'valid' && inspection.value.version === 1 ? inspection.value : null;
             }
             catch {
                 return null;
@@ -1584,7 +1980,25 @@ export class FileCommandStore {
         if (await this.readLockOwner() === operationId)
             throw new Error('The quarantine could not verify its lock release.');
     }
-    async readCommandRecord(commandId, path, maxBytes) {
+    async readCommandRecord(commandId, path, maxBytes, directory) {
+        if (directory !== undefined && directory !== this.files(commandId).directory) {
+            const retained = join(quarantineArea(this.root, 'commands').area, commandId);
+            if (directory !== retained)
+                throw new Error('Barrier inspection must use the recorded command directory.');
+            try {
+                return await withPrivateDirectoryScope([
+                    { path: this.root, description: 'state root' },
+                    { path: quarantineArea(this.root, 'commands').base, description: 'quarantine directory' },
+                    { path: quarantineArea(this.root, 'commands').area, description: 'command quarantine directory' },
+                    { path: retained, description: 'retained command directory' },
+                ], async (scope) => readSecurePrivateRecord(join(retained, basename(path)), maxBytes, { scope }));
+            }
+            catch (error) {
+                if (isMissingPath(error))
+                    return { state: 'missing' };
+                return { state: 'invalid', reason: 'unsafe_retained_directory' };
+            }
+        }
         try {
             await lstat(this.files(commandId).directory);
         }
@@ -1601,6 +2015,16 @@ export class FileCommandStore {
                 return { state: 'missing' };
             return { state: 'invalid', reason: 'unsafe_command_directory' };
         }
+    }
+    async validateBarrierDirectory(commandId, directory) {
+        if (directory === undefined || directory === this.files(commandId).directory)
+            return await this.validateCommandDirectory(commandId);
+        if (directory !== join(quarantineArea(this.root, 'commands').area, commandId))
+            throw new Error('Unexpected retained directory.');
+        await validatePrivateStateRoot(this.root);
+        await validatePrivateDirectory(quarantineArea(this.root, 'commands').base, 0o700, 'quarantine directory');
+        await validatePrivateDirectory(quarantineArea(this.root, 'commands').area, 0o700, 'command quarantine directory');
+        await validatePrivateDirectory(directory, 0o700, 'retained command directory');
     }
     async validateCommandDirectory(commandId) {
         await validatePrivateStateRoot(this.root);

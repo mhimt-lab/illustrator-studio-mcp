@@ -30,7 +30,7 @@ export function textFrameMatches(a, b) {
 export const TRANSFORM_TEXT_SCRIPT = `
 var TRANSFORM_TEXT_MAX_CHARACTERS = ${TRANSFORM_TEXT_MAX_CHARACTERS};
 var TRANSFORM_TEXT_MAX_EVIDENCE_UNITS = ${TRANSFORM_TEXT_MAX_EVIDENCE_UNITS};
-function transformTextFrameEvidence(target) {
+function transformTextFrameEvidence(target, nested) {
   function paint(color) {
     var t = String(color.typename);
     if (t === "RGBColor") return [t, color.red, color.green, color.blue];
@@ -46,11 +46,12 @@ function transformTextFrameEvidence(target) {
   if (orientation !== "TextOrientation.HORIZONTAL" && orientation !== "TextOrientation.VERTICAL") {
     throw mutationError("preflight_failed", "Text orientation is unreadable.");
   }
-  if (!target.layer || target.parent !== target.layer) {
+  if (!target.layer || (!nested && target.parent !== target.layer)) {
     throw mutationError("preflight_failed", "The translated text frame must be directly on a layer.");
   }
   var story = target.story;
-  if (!story || !story.textFrames || story.textFrames.length !== 1 || story.textFrames[0] !== target) {
+  if (!story || !story.textFrames || story.textFrames.length !== 1 ||
+      (nested ? String(story.textFrames[0].uuid) !== String(target.uuid) : story.textFrames[0] !== target)) {
     throw mutationError("preflight_failed", "Threaded text frames are outside text translation support.");
   }
   var chars = target.characters;

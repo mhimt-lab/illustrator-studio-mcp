@@ -24,6 +24,22 @@ export function parseScreenLockState(ioregOutput) {
 export function expectedIllustratorBundleId(application) {
     return illustratorBundleIdentifier(application) ?? STABLE_ILLUSTRATOR_BUNDLE_ID;
 }
+const BUNDLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$/u;
+export class OsascriptHostApplicationActivator {
+    expectedBundleId;
+    exec;
+    constructor(expectedBundleId = STABLE_ILLUSTRATOR_BUNDLE_ID, exec = defaultExec) {
+        this.expectedBundleId = expectedBundleId;
+        this.exec = exec;
+        if (!BUNDLE_ID_PATTERN.test(expectedBundleId))
+            throw new Error('The Illustrator bundle identifier is not a valid bundle id; activation is unavailable.');
+    }
+    async activateExpectedApplication() {
+        await this.exec('osascript', [
+            '-e', `if application id "${this.expectedBundleId}" is running then tell application id "${this.expectedBundleId}" to activate`,
+        ], { timeout: HOST_PROBE_TIMEOUT_MS });
+    }
+}
 export class OsascriptHostProfileProbe {
     expectedBundleId;
     exec;

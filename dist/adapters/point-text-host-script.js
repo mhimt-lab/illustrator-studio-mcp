@@ -143,7 +143,7 @@ const pointTextStyleSchema = z.strictObject({
     strokeColor: z.strictObject({ model: z.literal('none') }),
     justification: pointTextJustificationSchema,
 });
-const pointTextFrameSchema = z.strictObject({
+export const pointTextFrameSchema = z.strictObject({
     anchor: z.tuple([z.number().finite(), z.number().finite()]),
     matrix: z.strictObject({
         a: z.number().finite(), b: z.number().finite(), c: z.number().finite(),
@@ -158,7 +158,34 @@ const pointTextLayerAncestorSchema = z.strictObject({
     visible: z.boolean(),
     locked: z.boolean(),
 });
-export const pointTextSnapshotSchema = z.strictObject({
+export const POINT_TEXT_MAX_GROUP_DEPTH = 32;
+export const POINT_TEXT_MAX_GROUP_CHILDREN = 1_024;
+const pointTextGroupClipPathSchema = z.strictObject({
+    uuid: z.string().min(1).max(255),
+    clipping: z.literal(true),
+    bounds: z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]),
+});
+export const pointTextGroupAncestorSchema = z.strictObject({
+    uuid: z.string().min(1).max(255),
+    type: z.literal('GroupItem'),
+    locked: z.literal(false),
+    hidden: z.literal(false),
+    opacity: z.number().finite(),
+    blendingMode: z.string().min(1).max(255),
+    clipped: z.boolean(),
+    clipPath: pointTextGroupClipPathSchema.nullable(),
+    childUuids: z.array(z.string().min(1).max(255)).min(1).max(POINT_TEXT_MAX_GROUP_CHILDREN),
+}).superRefine((group, context) => {
+    if (group.clipped !== (group.clipPath !== null)) {
+        context.addIssue({ code: 'custom', message: 'A clipped group must bind its clipping path, and only a clipped group does.' });
+    }
+    if (new Set(group.childUuids).size !== group.childUuids.length) {
+        context.addIssue({ code: 'custom', message: 'A group child order must list unique native UUIDs.' });
+    }
+});
+const pointTextGroupAncestrySchema = z.array(pointTextGroupAncestorSchema)
+    .min(1).max(POINT_TEXT_MAX_GROUP_DEPTH).optional();
+export const pointTextGroupSnapshotSchema = z.strictObject({
     uuid: z.string().min(1).max(255),
     type: z.literal('TextFrame'),
     kind: z.literal('TextType.POINTTEXT'),
@@ -173,6 +200,7 @@ export const pointTextSnapshotSchema = z.strictObject({
     frame: pointTextFrameSchema,
     layerPath: layerPathSchema,
     layerAncestry: z.array(pointTextLayerAncestorSchema).min(1).max(POINT_TEXT_MAX_LAYER_DEPTH_LIMIT),
+    groupAncestry: pointTextGroupAncestrySchema,
     contents: pointTextSingleLineSchema,
     locked: z.boolean(),
     hidden: z.boolean(),
@@ -180,6 +208,7 @@ export const pointTextSnapshotSchema = z.strictObject({
     layerVisible: z.boolean(),
     layerLocked: z.boolean(),
 });
+export const pointTextSnapshotSchema = pointTextGroupSnapshotSchema.omit({ groupAncestry: true });
 export const pointTextCharacterSchema = z.strictObject({
     contents: z.string().min(1).max(2),
     font: z.strictObject({
@@ -195,7 +224,7 @@ export const pointTextCharacterSchema = z.strictObject({
     fillColor: pointTextFillColorSchema,
     strokeColor: z.strictObject({ model: z.literal('none') }),
 });
-export const pointTextRangeSnapshotSchema = z.strictObject({
+export const pointTextRangeGroupSnapshotSchema = z.strictObject({
     uuid: z.string().min(1).max(255),
     type: z.literal('TextFrame'),
     kind: z.literal('TextType.POINTTEXT'),
@@ -209,6 +238,7 @@ export const pointTextRangeSnapshotSchema = z.strictObject({
     frame: pointTextFrameSchema,
     layerPath: layerPathSchema,
     layerAncestry: z.array(pointTextLayerAncestorSchema).min(1).max(POINT_TEXT_MAX_LAYER_DEPTH_LIMIT),
+    groupAncestry: pointTextGroupAncestrySchema,
     contents: pointTextSingleLineSchema,
     locked: z.boolean(),
     hidden: z.boolean(),
@@ -216,6 +246,7 @@ export const pointTextRangeSnapshotSchema = z.strictObject({
     layerVisible: z.boolean(),
     layerLocked: z.boolean(),
 });
+export const pointTextRangeSnapshotSchema = pointTextRangeGroupSnapshotSchema.omit({ groupAncestry: true });
 export const POINT_TEXT_SNAPSHOT_SCRIPT = `
 var POINT_TEXT_MAX_CODE_UNITS = ${POINT_TEXT_MAX_CODE_UNITS};
 var POINT_TEXT_PROFILE = ${JSON.stringify(POINT_TEXT_PROFILE_NAME)};
@@ -651,6 +682,245 @@ function pointTextSame(left, right) {
     mutationSameSequence(left.layerPath, right.layerPath) && left.contents === right.contents &&
     left.locked === right.locked && left.hidden === right.hidden && left.editable === right.editable &&
     left.layerVisible === right.layerVisible && left.layerLocked === right.layerLocked;
+}
+`;
+export const POINT_TEXT_GROUP_SCRIPT = `
+var POINT_TEXT_MAX_GROUP_DEPTH = ${POINT_TEXT_MAX_GROUP_DEPTH};
+var POINT_TEXT_MAX_GROUP_CHILDREN = ${POINT_TEXT_MAX_GROUP_CHILDREN};
+
+/**
+ * One enclosing GroupItem, or a refusal naming the group and the reason. Locked and hidden groups are refused here,
+ * at plan as at apply, because the host reports an ancestor's state on neither the frame nor its layer and applies
+ * script writes regardless. A clip group is admitted only in its measured shape: the first child is the
+ * clipping PathItem.
+ */
+function pointTextGroupAncestor(node, level) {
+  var uuid;
+  var locked;
+  var hidden;
+  var clipped;
+  try { uuid = node.uuid; locked = node.locked; hidden = node.hidden; clipped = node.clipped; }
+  catch (groupError) { throw mutationError("preflight_failed", "Target ancestor group state is unavailable."); }
+  if (typeof uuid !== "string" || uuid.length === 0 || typeof locked !== "boolean" ||
+      typeof hidden !== "boolean" || typeof clipped !== "boolean") {
+    throw mutationError("preflight_failed", "Target ancestor group state is unavailable.");
+  }
+  var label = "GroupItem " + uuid + " (ancestor level " + level + ")";
+  if (locked) throw mutationError("preflight_failed", "Point-text target is inside a locked " + label + "; unlock it first.");
+  if (hidden) throw mutationError("preflight_failed", "Point-text target is inside a hidden " + label + "; show it first.");
+  var items;
+  var count;
+  try { items = node.pageItems; count = items.length; }
+  catch (itemsError) { throw mutationError("preflight_failed", "Target ancestor group children are unavailable."); }
+  if (typeof count !== "number" || count < 1 || count > POINT_TEXT_MAX_GROUP_CHILDREN) {
+    throw mutationError("preflight_failed", "Point-text operations support ancestor groups of 1 to " +
+      POINT_TEXT_MAX_GROUP_CHILDREN + " children; " + label + " has " + count + ".");
+  }
+  var childUuids = [];
+  for (var index = 0; index < count; index++) {
+    var childUuid;
+    try { childUuid = items[index].uuid; }
+    catch (childError) { throw mutationError("preflight_failed", "Target ancestor group child identity is unavailable."); }
+    if (typeof childUuid !== "string" || childUuid.length === 0) {
+      throw mutationError("preflight_failed", "Target ancestor group child identity is unavailable.");
+    }
+    childUuids.push(childUuid);
+  }
+  var clipPath = null;
+  if (clipped) {
+    var first = items[0];
+    var bounds;
+    try {
+      if (String(first.typename) !== "PathItem" || first.clipping !== true) {
+        throw mutationError("preflight_failed", "Point-text target is inside a clipped " + label +
+          " whose first child is not its clipping path.");
+      }
+      bounds = first.geometricBounds;
+    } catch (clipError) {
+      if (clipError && clipError.mutationReasonCode) throw clipError;
+      throw mutationError("preflight_failed", "Target ancestor clipping path state is unavailable.");
+    }
+    clipPath = { uuid: childUuids[0], clipping: true,
+      bounds: [pointTextNumber(bounds[0], "clipPath.bounds[0]"), pointTextNumber(bounds[1], "clipPath.bounds[1]"),
+        pointTextNumber(bounds[2], "clipPath.bounds[2]"), pointTextNumber(bounds[3], "clipPath.bounds[3]")] };
+  }
+  var opacity;
+  var blend;
+  try { opacity = node.opacity; blend = String(node.blendingMode); }
+  catch (appearanceError) { throw mutationError("preflight_failed", "Target ancestor group appearance is unavailable."); }
+  return { uuid: uuid, type: "GroupItem", locked: false, hidden: false,
+    opacity: pointTextNumber(opacity, "ancestor group opacity"), blendingMode: blend,
+    clipped: clipped, clipPath: clipPath, childUuids: childUuids };
+}
+
+/**
+ * The GroupItems between the target and its layer, nearest first; empty when the layer holds the target directly.
+ * Anything else above the target (a compound path, a plugin item, ...) is refused naming its type.
+ */
+function pointTextGroupAncestry(target) {
+  var groups = [];
+  var node;
+  try { node = target.parent; }
+  catch (parentError) { throw mutationError("preflight_failed", "Target ancestry is unavailable."); }
+  while (node !== null && node !== undefined) {
+    var typename;
+    try { typename = String(node.typename); }
+    catch (typenameError) { throw mutationError("preflight_failed", "Target ancestry is unavailable."); }
+    if (typename === "Layer") break;
+    if (typename !== "GroupItem") {
+      throw mutationError("preflight_failed", "Point-text target is inside a " + typename +
+        "; only layers and plain or clipped groups can enclose an editable point-text frame.");
+    }
+    if (groups.length >= POINT_TEXT_MAX_GROUP_DEPTH) {
+      throw mutationError("preflight_failed", "Point-text target is nested deeper than " +
+        POINT_TEXT_MAX_GROUP_DEPTH + " groups.");
+    }
+    groups.push(pointTextGroupAncestor(node, groups.length + 1));
+    try { node = node.parent; }
+    catch (nextError) { throw mutationError("preflight_failed", "Target ancestry is unavailable."); }
+  }
+  if (node === null || node === undefined || !target.layer || node !== target.layer) {
+    throw mutationError("preflight_failed", "Point-text target must be contained by its layer, directly or through groups.");
+  }
+  return groups;
+}
+
+/**
+ * A snapshot with its \`groupAncestry\` field placed right after \`layerAncestry\`, the order the schema declares.
+ * The field is absent for a layer-direct target, so every layer-direct snapshot stays byte-identical.
+ */
+function pointTextWithGroups(snapshot, groups) {
+  if (groups.length === 0) return snapshot;
+  var out = {};
+  for (var key in snapshot) {
+    if (!snapshot.hasOwnProperty(key)) continue;
+    out[key] = snapshot[key];
+    if (key === "layerAncestry") out.groupAncestry = groups;
+  }
+  return out;
+}
+
+/**
+ * The layers above the target with every enclosing group stepped over (the groups are bound by
+ * pointTextGroupAncestry). For a layer-direct target this is exactly pointTextAncestry.
+ */
+function pointTextAncestryWithGroups(target, groups) {
+  if (groups.length === 0) return pointTextAncestry(target);
+  var chain = [];
+  var node = target.parent;
+  var steps = 0;
+  while (steps++ <= POINT_TEXT_MAX_LAYER_DEPTH + POINT_TEXT_MAX_GROUP_DEPTH) {
+    if (node === null || node === undefined) {
+      throw mutationError("preflight_failed", "Target layer ancestry does not terminate at the document.");
+    }
+    var typename;
+    try { typename = String(node.typename); }
+    catch (typenameError) { throw mutationError("preflight_failed", "Target layer ancestry is unavailable."); }
+    if (typename === "Document") return chain;
+    if (typename === "Layer") {
+      if (typeof node.name !== "string" || typeof node.visible !== "boolean" || typeof node.locked !== "boolean") {
+        throw mutationError("preflight_failed", "Target layer ancestry state is unavailable.");
+      }
+      chain.push({ name: node.name, visible: node.visible, locked: node.locked });
+    } else if (typename !== "GroupItem") {
+      throw mutationError("preflight_failed", "Point-text operations support layer ancestry only.");
+    }
+    try { node = node.parent; }
+    catch (nextError) { throw mutationError("preflight_failed", "Target layer ancestry is unavailable."); }
+  }
+  throw mutationError("preflight_failed", "Target layer ancestry exceeds the supported depth.");
+}
+
+/**
+ * pointTextSnapshot for a frame in a layer or inside groups. A layer-direct frame yields exactly the
+ * pointTextSnapshot result. A grouped frame is read through the same profile checks with its group chain bound.
+ */
+function pointTextGroupSnapshot(document, target, expectedUuid) {
+  var groups = pointTextGroupAncestry(target);
+  if (groups.length === 0) return pointTextSnapshot(document, target, expectedUuid);
+  if (!target || target.typename !== "TextFrame") {
+    throw mutationError("preflight_failed", "Point-text operations support TextFrame targets only.");
+  }
+  if (target.kind !== TextType.POINTTEXT) {
+    throw mutationError("preflight_failed", "Point-text operations support TextType.POINTTEXT only.");
+  }
+  if (typeof target.uuid !== "string" || (expectedUuid !== null && target.uuid !== expectedUuid)) {
+    throw mutationError("preflight_failed", "Target native UUID is unavailable or changed.");
+  }
+  if (!target.story || !target.story.textFrames ||
+      target.story.textFrames.length !== 1 || target.story.textFrames[0] !== target) {
+    throw mutationError("preflight_failed", "Point-text operations support unthreaded text only.");
+  }
+  if (typeof target.locked !== "boolean" || typeof target.hidden !== "boolean" ||
+      typeof target.editable !== "boolean" || typeof target.layer.visible !== "boolean" ||
+      typeof target.layer.locked !== "boolean") {
+    throw mutationError("preflight_failed", "Target safety state is unavailable.");
+  }
+  var layerPath = pointTextLayerPath(document, target.layer);
+  if (layerPath === null) throw mutationError("preflight_failed", "Target layer path is unavailable.");
+  var textRange = target.textRange;
+  if (!textRange || typeof textRange.getTextRunLength !== "function" ||
+      typeof textRange.length !== "number" || textRange.length < 1) {
+    throw mutationError("preflight_failed", "Target native text-run state is unavailable.");
+  }
+  var firstRunLength;
+  try { firstRunLength = textRange.getTextRunLength(); }
+  catch (textRunError) {
+    throw mutationError("preflight_failed", "Target native text-run state is unavailable.");
+  }
+  if (typeof firstRunLength !== "number" || firstRunLength !== textRange.length) {
+    throw mutationError("preflight_failed", "Point-text operations support one complete native text style run only.");
+  }
+  return pointTextWithGroups({
+    uuid: target.uuid,
+    type: target.typename,
+    kind: "TextType.POINTTEXT",
+    profile: POINT_TEXT_PROFILE,
+    frameShape: pointTextFrameShape(target),
+    fontInstalled: true,
+    storyFrameCount: 1,
+    textRunCount: 1,
+    manualKerning: pointTextManualKerning(textRange),
+    tabStopCount: pointTextParagraphState(textRange),
+    style: pointTextStyle(target),
+    frame: pointTextFrameState(target),
+    layerPath: layerPath,
+    layerAncestry: pointTextAncestryWithGroups(target, groups),
+    contents: pointTextValidateContents(target.contents, "Target contents"),
+    locked: target.locked,
+    hidden: target.hidden,
+    editable: target.editable,
+    layerVisible: target.layer.visible,
+    layerLocked: target.layer.locked
+  }, groups);
+}
+
+/**
+ * JSON with every object's keys sorted and undefined members dropped. Snapshots a caller echoes (expected_before,
+ * confirmed_after) come back through the published schema, which orders keys by its own declaration, so a comparison
+ * with a snapshot the host built must not depend on key order.
+ */
+function pointTextCanonicalJson(value) {
+  if (value === null || value === undefined) return "null";
+  var type = typeof value;
+  if (type === "number" || type === "boolean" || type === "string") return stringifyJson(value);
+  var parts = [];
+  if (Object.prototype.toString.call(value) === "[object Array]") {
+    for (var index = 0; index < value.length; index++) parts.push(pointTextCanonicalJson(value[index]));
+    return "[" + parts.join(",") + "]";
+  }
+  var keys = [];
+  for (var key in value) if (value.hasOwnProperty(key) && value[key] !== undefined) keys.push(key);
+  keys.sort();
+  for (var keyIndex = 0; keyIndex < keys.length; keyIndex++) {
+    parts.push(stringifyJson(keys[keyIndex]) + ":" + pointTextCanonicalJson(value[keys[keyIndex]]));
+  }
+  return "{" + parts.join(",") + "}";
+}
+
+/** Whole-snapshot equality, independent of key order, group chain included. */
+function pointTextGroupSame(left, right) {
+  return !!left && !!right && pointTextCanonicalJson(left) === pointTextCanonicalJson(right);
 }
 `;
 export const POINT_TEXT_APPLY_BLOCKERS = [

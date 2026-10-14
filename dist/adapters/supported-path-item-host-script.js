@@ -92,9 +92,14 @@ function supportedPathCanonicalChannel(value, label) {
  * paint scope whose cmykAdmitted() is true for its own measured scope, with five-decimal channels (the product
  * rule: the host quantizes a written channel in the 13th decimal). The scope is asked only when CMYK paint is
  * found, so an RGB target never reads anything new. Without a scope every other model keeps the RGB-only
- * refusal, so an operation that never measured CMYK is unchanged.
+ * refusal, so an operation that never measured CMYK is unchanged. A spot fill is read only when the scope also
+ * offers spotFillIndex(value), which returns the spot's position in the document's spot list; the paint is then
+ * { type, tint, spotIndex } and never carries the spot's name. A spot stroke stays refused.
  */
 function supportedPathPaint(value, label, paint) {
+  if (paint && paint.spotFillIndex && label === "fillColor" && value && String(value.typename) === "SpotColor") {
+    return { type: "SpotColor", tint: supportedPathCanonicalChannel(value.tint, label + ".tint"), spotIndex: paint.spotFillIndex(value) };
+  }
   if (paint && value && String(value.typename) === "CMYKColor") {
     if (paint.cmykAdmitted() !== true) throw mutationError("preflight_failed", label + " " + paint.cmykRefusal);
     return { type: "CMYKColor", cyan: supportedPathCanonicalChannel(value.cyan, label + ".cyan"),
@@ -103,6 +108,33 @@ function supportedPathPaint(value, label, paint) {
       black: supportedPathCanonicalChannel(value.black, label + ".black") };
   }
   return supportedPathRgb(value, label);
+}
+
+/**
+ * The structural and appearance items of a path that the shared gate refuses, each as "name=observed value".
+ * \`note\`, \`uRL\` and \`tags\` report only that they are non-empty, never their content. An empty list means the
+ * target passes. \`admit\` (the paint scope's stateAdmit, absent for every operation that did not measure it) names the
+ * values one operation accepts: { maxTags, negativePolarity }. A tag count above maxTags is reported as "tags=N".
+ */
+function supportedPathStateRefusals(target, visibilityVariable, includeClipping, admit) {
+  var refusals = [];
+  if (includeClipping && target.clipping) refusals.push("clipping=true");
+  if (target.guides) refusals.push("guides=true");
+  if (target.sliced) refusals.push("sliced=true");
+  if (target.isIsolated) refusals.push("isIsolated=true");
+  if (target.wrapped) refusals.push("wrapped=true");
+  var knockout = String(target.artworkKnockout);
+  if (knockout !== "KnockoutState.DISABLED") refusals.push("artworkKnockout=" + knockout);
+  var blendingMode = String(target.blendingMode);
+  if (blendingMode !== "BlendModes.NORMAL") refusals.push("blendingMode=" + blendingMode);
+  if (visibilityVariable !== null) refusals.push("visibilityVariable=present");
+  if (String(target.note) !== "") refusals.push("note=non-empty");
+  var tagCount = target.tags.length;
+  if (tagCount !== 0 && !(admit && tagCount <= admit.maxTags)) refusals.push(admit ? "tags=" + tagCount : "tags=non-empty");
+  if (String(target.uRL) !== "") refusals.push("uRL=non-empty");
+  var polarity = String(target.polarity);
+  if (polarity !== "PolarityValues.POSITIVE" && !(admit && admit.negativePolarity === true && polarity === "PolarityValues.NEGATIVE")) refusals.push("polarity=" + polarity);
+  return refusals;
 }
 
 function supportedPathSnapshot(document, target, expectedUuid, expectedParentTypename, paint) {
@@ -161,12 +193,9 @@ function supportedPathSnapshot(document, target, expectedUuid, expectedParentTyp
   var visibilityVariable;
   try { visibilityVariable = target.visibilityVariable; }
   catch (variableError) { throw mutationError("preflight_failed", "Target visibility variable state is unreadable."); }
-  if (target.clipping || target.guides || target.sliced || target.isIsolated || target.wrapped ||
-      String(target.artworkKnockout) !== "KnockoutState.DISABLED" ||
-      String(target.blendingMode) !== "BlendModes.NORMAL" || visibilityVariable !== null ||
-      String(target.note) !== "" || target.tags.length !== 0 || String(target.uRL) !== "" ||
-      String(target.polarity) !== "PolarityValues.POSITIVE") {
-    throw mutationError("preflight_failed", "Target uses an unsupported structural or appearance state.");
+  var stateRefusals = supportedPathStateRefusals(target, visibilityVariable, true, paint && paint.stateAdmit ? paint.stateAdmit : null);
+  if (stateRefusals.length > 0) {
+    throw mutationError("preflight_failed", "Target uses an unsupported structural or appearance state (" + stateRefusals.join(", ") + ").");
   }
   var strokeCap = String(target.strokeCap);
   var strokeJoin = String(target.strokeJoin);
@@ -176,7 +205,7 @@ function supportedPathSnapshot(document, target, expectedUuid, expectedParentTyp
        strokeJoin !== "StrokeJoin.MITERENDJOIN")) {
     throw mutationError("preflight_failed", "Target stroke cap or join is unsupported.");
   }
-  return {
+  var snapshot = {
     uuid: target.uuid,
     type: target.typename,
     name: String(target.name || ""),
@@ -225,6 +254,12 @@ function supportedPathSnapshot(document, target, expectedUuid, expectedParentTyp
     effectiveLayerVisible: effectiveVisible,
     effectiveLayerLocked: effectiveLocked
   };
+  // Only an operation that admits tags carries the count (never their content); every other snapshot is unchanged.
+  if (paint && paint.stateAdmit) {
+    delete snapshot.tagsEmpty;
+    snapshot.tagCount = target.tags.length;
+  }
+  return snapshot;
 }
 
 function supportedPathOrder(container) {
@@ -246,7 +281,23 @@ function supportedPathOrder(container) {
   return order;
 }
 
+/** A copy with every object's keys in sorted order, so a comparison never depends on key order. */
+function supportedPathSorted(value) {
+  if (value === null || typeof value !== "object") return value;
+  if (Object.prototype.toString.call(value) === "[object Array]") {
+    var items = [];
+    for (var index = 0; index < value.length; index++) items.push(supportedPathSorted(value[index]));
+    return items;
+  }
+  var keys = [];
+  for (var key in value) if (Object.prototype.hasOwnProperty.call(value, key)) keys.push(key);
+  keys.sort();
+  var sorted = {};
+  for (var at = 0; at < keys.length; at++) sorted[keys[at]] = supportedPathSorted(value[keys[at]]);
+  return sorted;
+}
+
 function supportedPathSame(left, right) {
-  return stringifyJson(left) === stringifyJson(right);
+  return stringifyJson(supportedPathSorted(left)) === stringifyJson(supportedPathSorted(right));
 }
 `;

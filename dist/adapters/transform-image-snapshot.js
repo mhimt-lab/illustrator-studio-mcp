@@ -66,18 +66,8 @@ export function imageMatches(left, right) {
 export const TRANSFORM_IMAGE_SCRIPT = `
 var TRANSFORM_IMAGE_LINEAR_TOLERANCE = ${TRANSFORM_IMAGE_LINEAR_TOLERANCE};
 function transformImageFind(document, uuid) {
-  var collections = [document.placedItems, document.rasterItems], found = null;
-  for (var c = 0; c < collections.length; c++) {
-    var items = collections[c];
-    if (items === undefined) continue;
-    if (!items || typeof items.length !== "number") throw mutationError("preflight_failed", "Image collections are unavailable.");
-    for (var index = 0; index < items.length; index++) {
-      if (String(items[index].uuid) !== uuid) continue;
-      if (found !== null) throw mutationError("preflight_failed", "Image native UUID is not unique.");
-      found = items[index];
-    }
-  }
-  return found;
+  var resolved = resolvePageItemDirect(document, uuid);
+  return resolved !== null && (resolved.typename === "PlacedItem" || resolved.typename === "RasterItem") ? resolved.item : null;
 }
 function transformImageEvidence(target) {
   var typename = String(target.typename);

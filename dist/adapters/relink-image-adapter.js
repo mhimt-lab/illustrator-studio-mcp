@@ -1,3 +1,4 @@
+import { HOST_FILE_PATH_HELPERS, sameFilePath } from '../file-path.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
@@ -49,11 +50,11 @@ export function relinkStateOf(snapshot) {
     const { uuid: _uuid, ...state } = snapshot;
     return state;
 }
-export function relinkSnapshotsWithinTolerance(left, right) {
+export function relinkSnapshotsWithinTolerance(left, right, compareReportedAfterPath = false) {
     const near = (a, b) => Math.abs(a - b) <= RELINK_IMAGE_TOLERANCE_PT;
     return left.type === right.type && canonicalDigest(left.layerPath) === canonicalDigest(right.layerPath) &&
         left.layerIndex === right.layerIndex && canonicalDigest(left.siblingUuids) === canonicalDigest(right.siblingUuids) &&
-        left.name === right.name && left.linkPath === right.linkPath &&
+        left.name === right.name && (left.linkPath === right.linkPath || (compareReportedAfterPath && left.linkPath !== null && right.linkPath !== null && sameFilePath(left.linkPath, right.linkPath))) &&
         left.locked === right.locked && left.hidden === right.hidden && left.layerVisible === right.layerVisible && left.layerLocked === right.layerLocked &&
         left.ancestorLocked === right.ancestorLocked && left.ancestorHidden === right.ancestorHidden &&
         left.position.every((value, index) => near(value, right.position[index])) &&
@@ -279,7 +280,7 @@ export const relinkImageResultSchema = z.union([
     if (result.applied) {
         if (result.transaction.state !== 'verified')
             context.addIssue({ code: 'custom', message: 'An applied relink requires a verified transaction.' });
-        if (result.postcondition.uuid === null || result.postcondition.uuid === result.plan.before.uuid || !relinkSnapshotsWithinTolerance(result.postcondition, result.plan.after)) {
+        if (result.postcondition.uuid === null || result.postcondition.uuid === result.plan.before.uuid || !relinkSnapshotsWithinTolerance(result.postcondition, result.plan.after, true)) {
             context.addIssue({ code: 'custom', message: 'Relink postcondition must carry a new UUID and match the planned after state.' });
         }
     }
@@ -361,7 +362,8 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
         throw new Error('Relink terminal result requires attestation.');
     await assertOperationSafetyAdapterConformance({ registration: RELINK_IMAGE_SAFETY, plan, result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
-export const RELINK_IMAGE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}${ANCESTOR_STATE_SCRIPT}
+export const RELINK_IMAGE_SCRIPT = `${HOST_FILE_PATH_HELPERS}
+${MUTATION_TRANSACTION_SCRIPT}${ANCESTOR_STATE_SCRIPT}
 var RELINK_IMAGE_MAX_DIRECT_ITEMS = ${RELINK_IMAGE_MAX_DIRECT_ITEMS};
 var RELINK_IMAGE_TOLERANCE_PT = ${RELINK_IMAGE_TOLERANCE_PT};
 var RELINK_IMAGE_PRECISION_DIGITS = ${RELINK_IMAGE_PRECISION_DIGITS};
@@ -372,12 +374,10 @@ function relinkRound(value) {
 }
 function relinkNear(a, b) { return Math.abs(a - b) <= RELINK_IMAGE_TOLERANCE_PT; }
 
-/** Measured: PlacedItem UUIDs resolve through the native placedItems collection, not getPageItemFromUuid. */
+/** A PlacedItem resolves by direct native UUID reference, with the type taken from the item's own collection row; null when absent or of another type. */
 function relinkFind(document, uuid) {
-  var collection = document.placedItems;
-  if (!collection || typeof collection.length !== "number") throw mutationError("preflight_failed", "The document placed-item collection is unavailable.");
-  for (var index = 0; index < collection.length; index++) if (String(collection[index].uuid) === uuid) return collection[index];
-  return null;
+  var resolved = resolvePageItem(document, uuid);
+  return resolved !== null && resolved.typename === "PlacedItem" ? resolved.item : null;
 }
 
 function relinkLayerPath(document, targetLayer) {
@@ -439,9 +439,9 @@ function relinkSnapshot(document, target) {
 }
 
 /** State equality without the replaceable UUID. */
-function relinkStateMatches(left, right) {
+function relinkStateMatches(left, right, compareReportedAfterPath) {
   if (!left || !right || left.type !== right.type || !mutationSameSequence(left.layerPath, right.layerPath) || left.layerIndex !== right.layerIndex ||
-      !mutationSameSequence(left.siblingUuids, right.siblingUuids) || left.name !== right.name || left.linkPath !== right.linkPath ||
+      !mutationSameSequence(left.siblingUuids, right.siblingUuids) || left.name !== right.name || (left.linkPath !== right.linkPath && !(compareReportedAfterPath && hostFilePathMatches(left.linkPath, right.linkPath))) ||
       left.locked !== right.locked || left.hidden !== right.hidden || left.layerVisible !== right.layerVisible || left.layerLocked !== right.layerLocked ||
       left.ancestorLocked !== right.ancestorLocked || left.ancestorHidden !== right.ancestorHidden) return false;
   for (var p = 0; p < 2; p++) if (!relinkNear(left.position[p], right.position[p])) return false;
@@ -505,7 +505,7 @@ function relinkResolve(forApply) {
   for (var s = 0; s < sourceBlockers.length; s++) blockers.push(sourceBlockers[s]);
   if (forApply) {
     if (!params.currentAdmission || params.currentAdmission.status !== "admitted") blockers.push(params.currentAdmission && params.currentAdmission.reason ? params.currentAdmission.reason : "current_link_unavailable");
-    else if (before.linkPath !== null && params.currentAdmission.resolvedPath !== before.linkPath) blockers.push("current_link_unavailable");
+    else if (before.linkPath !== null && !hostFilePathMatches(before.linkPath, params.currentAdmission.resolvedPath)) blockers.push("current_link_unavailable");
     else if (before.linkPath !== null && relinkFileChanged(before.linkPath, params.currentAdmission.bytes, params.currentAdmission.modifiedAtMs) !== null) blockers.push("current_link_unavailable");
     if (params.pixelDimensionsEqual !== true) blockers.push("source_pixel_dimensions_differ");
   }
@@ -579,7 +579,7 @@ function relinkVerify(preflight, plan, state) {
   if (target === null || target !== preflight.target) throw mutationError("verify_mismatch", "The new native UUID does not resolve to the relinked item.");
   if (relinkFind(preflight.document, plan.before.uuid) !== null) throw mutationError("verify_mismatch", "The previous native UUID still resolves after relink.");
   var actual = relinkSnapshot(preflight.document, target);
-  if (!relinkStateMatches(actual, plan.after)) throw mutationError("verify_mismatch", "Relink postcondition does not match the planned after state.");
+  if (!relinkStateMatches(actual, plan.after, true)) throw mutationError("verify_mismatch", "Relink postcondition does not match the planned after state.");
   return actual;
 }
 
@@ -595,7 +595,7 @@ function relinkRollback(state) {
     state.operationState.rollbackEvidence.restoredSnapshot = current;
     return { status: "verified" };
   }
-  if (!relinkStateMatches(current, preflight.after)) return { status: "indeterminate", message: "Rollback refused because the target is neither the before nor the planned after state." };
+  if (!relinkStateMatches(current, preflight.after, true)) return { status: "indeterminate", message: "Rollback refused because the target is neither the before nor the planned after state." };
   var previousInteractionLevel = app.userInteractionLevel;
   try {
     app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;

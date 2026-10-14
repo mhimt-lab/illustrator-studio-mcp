@@ -6,6 +6,9 @@ import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { boundsSchema, documentContextSchema, layerPathSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { SUPPORTED_PATH_ITEM_HOST_SCRIPT } from './supported-path-item-host-script.js';
+import { POINT_TEXT_APPLY_BLOCKERS } from './point-text-host-script.js';
+import { defineBatchStep } from './batch-step-contract.js';
+import { SET_OBJECT_STATE_BATCH_NEXT_CALL } from './batch-step-next-call.js';
 export const SET_OBJECT_STATE_OPERATION = 'set_object_state';
 export const SET_OBJECT_STATE_VALIDATOR = { kind: SET_OBJECT_STATE_OPERATION, version: 1 };
 export const OBJECT_STATE_TARGET_TYPES = ['PathItem', 'GroupItem', 'TextFrame', 'PlacedItem', 'CompoundPathItem'];
@@ -118,7 +121,7 @@ const internalInputSchema = z.discriminatedUnion('apply', [
 ]);
 const commonPublic = {
     expected_document_key: documentKeySchema,
-    target_uuid: uuidSchema.describe('Native PageItem.uuid of the target.'),
+    target_uuid: z.string().min(1).max(255).describe('Native PageItem.uuid of the target.'),
     target_type: targetTypeSchema.describe('Declared typename of the target; the target is resolved in that typed collection only.'),
     after: publicRequestedStateSchema,
 };
@@ -184,30 +187,33 @@ const propertyListSchema = z.array(z.enum(OBJECT_STATE_PROPERTIES)).max(OBJECT_S
     if (new Set(list).size !== list.length)
         context.addIssue({ code: 'custom', message: 'Property list must be unique.' });
 });
-const planSchema = z.strictObject({
-    operation: z.literal(SET_OBJECT_STATE_OPERATION),
-    documentKey: documentKeySchema,
-    targetUuid: uuidSchema,
-    targetType: targetTypeSchema,
-    requested: requestedStateSchema,
-    before: objectStateSnapshotSchema,
-    after: objectStateSnapshotSchema,
-    changes: z.array(changeSchema).max(OBJECT_STATE_PROPERTIES.length),
-    noOp: z.boolean(),
-    applyBlockedReasonCodes: z.array(blockerSchema),
-    confirmationStatus: z.enum(['required', 'confirmed']),
-    applyAllowed: z.boolean(),
-}).superRefine((plan, context) => {
-    if (plan.before.uuid !== plan.targetUuid || plan.before.type !== plan.targetType)
-        context.addIssue({ code: 'custom', message: 'Object-state plan must bind the target UUID and type.' });
-    const derived = deriveObjectState(plan.before, plan.requested);
-    if (!sameCanonical(derived.after, plan.after) || !sameCanonical(derived.changes, plan.changes) || plan.noOp !== (plan.changes.length === 0)) {
-        context.addIssue({ code: 'custom', message: 'Object-state plan after state and changes must be derived from the before state and the request.' });
-    }
-    if (plan.applyAllowed !== (plan.confirmationStatus === 'confirmed' && plan.applyBlockedReasonCodes.length === 0)) {
-        context.addIssue({ code: 'custom', message: 'Object-state applyAllowed must require confirmation and no blockers.' });
-    }
-});
+export function createObjectStatePlanSchema() {
+    return z.strictObject({
+        operation: z.literal(SET_OBJECT_STATE_OPERATION),
+        documentKey: documentKeySchema,
+        targetUuid: uuidSchema,
+        targetType: targetTypeSchema,
+        requested: requestedStateSchema,
+        before: objectStateSnapshotSchema,
+        after: objectStateSnapshotSchema,
+        changes: z.array(changeSchema).max(OBJECT_STATE_PROPERTIES.length),
+        noOp: z.boolean(),
+        applyBlockedReasonCodes: z.array(blockerSchema),
+        confirmationStatus: z.enum(['required', 'confirmed']),
+        applyAllowed: z.boolean(),
+    }).superRefine((plan, context) => {
+        if (plan.before.uuid !== plan.targetUuid || plan.before.type !== plan.targetType)
+            context.addIssue({ code: 'custom', message: 'Object-state plan must bind the target UUID and type.' });
+        const derived = deriveObjectState(plan.before, plan.requested);
+        if (!sameCanonical(derived.after, plan.after) || !sameCanonical(derived.changes, plan.changes) || plan.noOp !== (plan.changes.length === 0)) {
+            context.addIssue({ code: 'custom', message: 'Object-state plan after state and changes must be derived from the before state and the request.' });
+        }
+        if (plan.applyAllowed !== (plan.confirmationStatus === 'confirmed' && plan.applyBlockedReasonCodes.length === 0)) {
+            context.addIssue({ code: 'custom', message: 'Object-state applyAllowed must require confirmation and no blockers.' });
+        }
+    });
+}
+const planSchema = createObjectStatePlanSchema();
 const failureSchema = z.strictObject({ phase: z.enum(['apply', 'verify']), reasonCode: z.enum(['apply_failed', 'verify_mismatch']), message: z.string().min(1).max(500) })
     .superRefine((failure, context) => {
     if ((failure.phase === 'apply') !== (failure.reasonCode === 'apply_failed'))
@@ -351,9 +357,7 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
         throw new Error('Object-state terminal result requires attestation.');
     await assertOperationSafetyAdapterConformance({ registration: SET_OBJECT_STATE_SAFETY, plan, result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
-export const SET_OBJECT_STATE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
-${SUPPORTED_PATH_ITEM_HOST_SCRIPT}
-var OBJECT_STATE_PROPERTIES = ${JSON.stringify(OBJECT_STATE_PROPERTIES)};
+export const SET_OBJECT_STATE_MODULE_SCRIPT = `var OBJECT_STATE_PROPERTIES = ${JSON.stringify(OBJECT_STATE_PROPERTIES)};
 var OBJECT_STATE_TARGET_TYPES = ${JSON.stringify(OBJECT_STATE_TARGET_TYPES)};
 var OBJECT_STATE_BLEND_MODES = ${JSON.stringify(BLEND_MODE_ENUMS)};
 var OBJECT_STATE_NAME_MAX = ${OBJECT_STATE_NAME_MAX};
@@ -362,37 +366,15 @@ var OBJECT_STATE_OPACITY_TOLERANCE = ${OBJECT_STATE_OPACITY_TOLERANCE};
 var OBJECT_STATE_MAX_ANCESTORS = ${OBJECT_STATE_MAX_ANCESTORS};
 
 function objectStateIndexOf(list, value) { for (var i = 0; i < list.length; i++) if (list[i] === value) return i; return -1; }
-/** Typed native collection for the declared type (measured route; getPageItemFromUuid misreports the typename of PlacedItem / CompoundPathItem). */
-function objectStateCollection(document, type) {
-  if (type === "PathItem") return document.pathItems;
-  if (type === "GroupItem") return document.groupItems;
-  if (type === "TextFrame") return document.textFrames;
-  if (type === "PlacedItem") return document.placedItems;
-  if (type === "CompoundPathItem") return document.compoundPathItems;
-  throw mutationError("preflight_failed", "Unsupported object-state target type.");
+/** Resolves the target by native UUID (direct reference, type taken from its own collection row); null when the item is proved absent. */
+function objectStateResolved(document, uuid) {
+  return resolvePageItem(document, uuid);
 }
+/** The item, only when it reports the declared type. */
 function objectStateFind(document, type, uuid) {
-  var collection = objectStateCollection(document, type);
-  if (!collection || typeof collection.length !== "number") throw mutationError("preflight_failed", "The document collection for the declared type is unavailable.");
-  var found = null;
-  var matches = 0;
-  for (var index = 0; index < collection.length; index++) {
-    var candidate = collection[index];
-    if (String(candidate.uuid) === uuid) { matches++; if (found === null) found = candidate; }
-  }
-  if (matches > 1) throw mutationError("preflight_failed", "The declared collection holds more than one item with the target UUID.");
-  if (found !== null && String(found.typename) !== type) throw mutationError("preflight_failed", "The resolved item does not report the declared type.");
-  return found;
-}
-/** Only for the not-found error: report the typename the document-wide collection carries for that UUID, if any. */
-function objectStateOtherTypename(document, uuid) {
-  try {
-    for (var index = 0; index < document.pageItems.length; index++) {
-      var item = document.pageItems[index];
-      if (String(item.uuid) === uuid) return String(item.typename);
-    }
-  } catch (_scanError) {}
-  return null;
+  var resolved = objectStateResolved(document, uuid);
+  if (resolved === null || resolved.typename !== type) return null;
+  return resolved.item;
 }
 function objectStateAncestors(target) {
   var locked = false, hidden = false, depth = 0, parentType = null, node = target.parent;
@@ -537,12 +519,10 @@ function objectStateResolve(forApply) {
   if (typeof params.targetUuid !== "string" || params.targetUuid.length === 0) throw mutationError("preflight_failed", "target_uuid is required.");
   if (objectStateIndexOf(OBJECT_STATE_TARGET_TYPES, params.targetType) < 0) throw mutationError("preflight_failed", "target_type is unsupported.");
   objectStateValidateRequested(params.after);
-  var target = objectStateFind(document, params.targetType, params.targetUuid);
-  if (target === null) {
-    var other = objectStateOtherTypename(document, params.targetUuid);
-    if (other !== null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_TYPE_MISMATCH", uuid: params.targetUuid, expected: params.targetType, actual: other }));
-    throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: params.targetUuid }));
-  }
+  var resolved = objectStateResolved(document, params.targetUuid);
+  if (resolved === null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: params.targetUuid }));
+  if (resolved.typename !== params.targetType) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_TYPE_MISMATCH", uuid: params.targetUuid, expected: params.targetType, actual: resolved.typename }));
+  var target = resolved.item;
   var before = objectStateSnapshot(document, target, params.targetType, params.targetUuid);
   var derived = objectStateDerive(before, params.after);
   var blockers = objectStateBlockers(context, before, params.after);
@@ -619,7 +599,179 @@ function objectStateRollback(state) {
   return { status: "verified" };
 }
 
-var objectStateExecution = runMutationTransaction({
+`;
+export const SET_OBJECT_STATE_BATCH_SCRIPT = `function mixedObjectStateProfile(document, context) {
+  if (context.appVersion !== "30.8.2") throw mutationError("preflight_failed", "Object-state batch requires measured Illustrator 30.8.2.");
+  if (context.colorSpace !== "RGB" || document.layers.length !== 1 || document.layers[0].layers.length !== 0 || document.artboards.length !== 1 ||
+      document.pageItems.length > OBJECT_STATE_BATCH_MAX_STEPS) {
+    throw mutationError("preflight_failed", "Object-state batch supports small RGB documents with one root layer, one artboard and at most three rectangle PathItems only.");
+  }
+  for (var itemIndex = 0; itemIndex < document.pageItems.length; itemIndex++) {
+    var target = document.pageItems[itemIndex];
+    if (String(target.typename) !== "PathItem" || target.parent !== document.layers[0] ||
+        target.closed !== true || target.guides !== false || target.clipping !== false || target.pathPoints.length !== 4) {
+      throw mutationError("preflight_failed", "Object-state batch requires layer-direct plain four-point closed paths.");
+    }
+    if ((target.filled && String(target.fillColor.typename) !== "RGBColor") ||
+        (target.stroked && String(target.strokeColor.typename) !== "RGBColor")) {
+      throw mutationError("preflight_failed", "Object-state batch supports RGB paint only.");
+    }
+    var points = target.pathPoints;
+    for (var pointIndex = 0; pointIndex < 4; pointIndex++) {
+      var point = points[pointIndex];
+      var next = points[(pointIndex + 1) % 4];
+      if (!mutationSameSequence(point.anchor, point.leftDirection) || !mutationSameSequence(point.anchor, point.rightDirection) ||
+          (point.anchor[0] !== next.anchor[0] && point.anchor[1] !== next.anchor[1])) {
+        throw mutationError("preflight_failed", "Object-state batch supports straight axis-aligned rectangles only.");
+      }
+    }
+  }
+}
+function mixedObjectStateResolve() {
+  var resolved = objectStateResolve(false);
+  // The measured batch does not unlock/show an initially blocked target; its single-item tool keeps that capability.
+  var blockers = [];
+  if (!resolved.context.mutationAllowed) blockers.push("document_mutation_not_allowed");
+  if (resolved.before.locked) blockers.push("target_locked");
+  if (resolved.before.hidden) blockers.push("target_hidden");
+  if (!resolved.before.editable) blockers.push("target_not_editable");
+  if (!resolved.before.layerVisible) blockers.push("layer_hidden");
+  if (resolved.before.layerLocked) blockers.push("layer_locked");
+  resolved.blockers = blockers;
+  return resolved;
+}
+function mixedObjectStateSame(left, right) {
+  if (!left || !right) return false;
+  for (var key in left) {
+    if (!left.hasOwnProperty(key)) continue;
+    if (!right.hasOwnProperty(key)) return false;
+    if (key === "layerPath" || key === "geometricBounds") {
+      if (!mutationSameSequence(left[key], right[key])) return false;
+    } else if (left[key] !== right[key]) return false;
+  }
+  for (var rightKey in right) if (right.hasOwnProperty(rightKey) && !left.hasOwnProperty(rightKey)) return false;
+  return true;
+}
+function mixedObjectStateApply(resolved, plan, state) {
+  // Native F0 measured name -> opacity -> hidden -> locked. Never write name/opacity after locking.
+  var order = ["name", "opacity", "hidden", "locked"];
+  var changes = [];
+  for (var propertyIndex = 0; propertyIndex < order.length; propertyIndex++) {
+    for (var changeIndex = 0; changeIndex < plan.changes.length; changeIndex++) {
+      if (plan.changes[changeIndex].property === order[propertyIndex]) changes.push(plan.changes[changeIndex]);
+    }
+  }
+  return objectStateApply(resolved, { changes: changes }, state);
+}
+`;
+const batchObjectStateUuidSchema = z.string().min(1).max(255);
+export const batchObjectStateAfterSchema = z.strictObject({
+    name: z.string().max(OBJECT_STATE_NAME_MAX).optional(), opacity: z.number().finite().min(0).max(100).optional(),
+    hidden: z.boolean().optional(), locked: z.boolean().optional(),
+}).superRefine((value, context) => {
+    if (Object.values(value).every((property) => property === undefined))
+        context.addIssue({ code: 'custom', message: 'after must request at least one property.' });
+});
+const BATCH_OBJECT_STATE_BLOCKERS = [...POINT_TEXT_APPLY_BLOCKERS, 'ancestor_hidden', 'ancestor_locked'];
+export function batchObjectStateBlockers(mutationAllowed, before) {
+    const blockers = [];
+    if (!mutationAllowed)
+        blockers.push('document_mutation_not_allowed');
+    if (before.locked)
+        blockers.push('target_locked');
+    if (before.hidden)
+        blockers.push('target_hidden');
+    if (!before.editable)
+        blockers.push('target_not_editable');
+    if (!before.layerVisible)
+        blockers.push('layer_hidden');
+    if (before.layerLocked)
+        blockers.push('layer_locked');
+    return blockers;
+}
+const batchObjectStatePlanSchema = createObjectStatePlanSchema().safeExtend({
+    targetType: z.literal('PathItem'), requested: batchObjectStateAfterSchema, applyBlockedReasonCodes: z.array(z.enum(BATCH_OBJECT_STATE_BLOCKERS)),
+}).superRefine((plan, context) => {
+    if (plan.before.parentType !== 'Layer' || plan.before.layerPath.length !== 1 || plan.before.type !== 'PathItem' ||
+        plan.before.ancestorGroupHidden || plan.before.ancestorGroupLocked) {
+        context.addIssue({ code: 'custom', message: 'Batch object-state targets must be direct children of a root layer.' });
+    }
+});
+const batchPublicObjectStatePlan = z.strictObject({
+    operation: z.literal(SET_OBJECT_STATE_OPERATION), target_uuid: batchObjectStateUuidSchema,
+    target_type: z.literal('PathItem'), after: batchObjectStateAfterSchema,
+});
+const batchInternalObjectStatePlan = z.strictObject({
+    targetUuid: batchObjectStateUuidSchema, operation: z.literal(SET_OBJECT_STATE_OPERATION),
+    targetType: z.literal('PathItem'), after: batchObjectStateAfterSchema,
+});
+export const setObjectStateBatchStep = defineBatchStep({
+    operation: SET_OBJECT_STATE_OPERATION,
+    admittedProfile: 'mixed_batch_object_state_rgb_rectangles_30_8_2',
+    recipeAllowed: true,
+    publicPlan: batchPublicObjectStatePlan,
+    publicApply: z.strictObject({ ...batchPublicObjectStatePlan.shape,
+        expected_before: objectStateSnapshotSchema, confirmed_after: objectStateSnapshotSchema }),
+    internalPlan: batchInternalObjectStatePlan,
+    internalApply: z.strictObject({ ...batchInternalObjectStatePlan.shape,
+        expectedBefore: objectStateSnapshotSchema, confirmedAfter: objectStateSnapshotSchema }),
+    planSchema: batchObjectStatePlanSchema,
+    snapshotSchema: objectStateSnapshotSchema,
+    normalize: (step) => ({ operation: SET_OBJECT_STATE_OPERATION, targetUuid: step.target_uuid,
+        targetType: step.target_type, after: step.after,
+        ...('expected_before' in step ? { expectedBefore: step.expected_before, confirmedAfter: step.confirmed_after } : {}) }),
+    request: (plan) => ({ targetType: plan.targetType, after: plan.requested }),
+    same: (left, right) => canonicalSha256(left) === canonicalSha256(right),
+    planBlockers: (mutationAllowed, plan) => batchObjectStateBlockers(mutationAllowed, plan.before),
+    nextCall: SET_OBJECT_STATE_BATCH_NEXT_CALL,
+    host: {
+        fragments: [
+            { id: 'supported-path-item', source: SUPPORTED_PATH_ITEM_HOST_SCRIPT },
+            { id: 'set-object-state.module', source: SET_OBJECT_STATE_MODULE_SCRIPT },
+            { id: 'set-object-state.batch', source: SET_OBJECT_STATE_BATCH_SCRIPT },
+        ],
+        hooks: {
+            resolve: 'mixedObjectStateResolve', plan: 'objectStatePlan', same: 'mixedObjectStateSame', apply: 'mixedObjectStateApply',
+            verify: `function (resolved, plan, state) {
+  var snapshot = objectStateVerify(resolved, plan, state).state;
+  if (!mixedObjectStateSame(snapshot, plan.after)) throw mutationError("verify_mismatch", "Object-state batch requires exact after state.");
+  return snapshot;
+}`,
+            rollback: `function (state) {
+  var outcome = objectStateRollback(state);
+  var evidence = state.operationState.rollbackEvidence;
+  evidence.restoredSnapshot = evidence.restoredState;
+  if (outcome.status === "verified" && !mixedObjectStateSame(evidence.restoredState, state.preflight.before)) {
+    return { status: "failed", message: "Object-state batch did not restore the exact before state." };
+  }
+  return outcome;
+}`,
+        },
+        paramFields: ['targetType', 'after'],
+        dispatchLayout: `  set_object_state: {
+    resolve: mixedObjectStateResolve, plan: objectStatePlan,
+    same: mixedObjectStateSame,
+    apply: mixedObjectStateApply,
+    verify: function (resolved, plan, state) {
+      var snapshot = objectStateVerify(resolved, plan, state).state;
+      if (!mixedObjectStateSame(snapshot, plan.after)) throw mutationError("verify_mismatch", "Object-state batch requires exact after state.");
+      return snapshot;
+    },
+    rollback: function (state) {
+      var outcome = objectStateRollback(state);
+      var evidence = state.operationState.rollbackEvidence;
+      evidence.restoredSnapshot = evidence.restoredState;
+      if (outcome.status === "verified" && !mixedObjectStateSame(evidence.restoredState, state.preflight.before)) {
+        return { status: "failed", message: "Object-state batch did not restore the exact before state." };
+      }
+      return outcome;
+    }
+  }`,
+    },
+});
+export const SET_OBJECT_STATE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
+${SUPPORTED_PATH_ITEM_HOST_SCRIPT}
+${SET_OBJECT_STATE_MODULE_SCRIPT}var objectStateExecution = runMutationTransaction({
   apply: params.apply === true,
   // the items this change reads and writes, so an edit session can advance its item aggregate.
   editSessionAffected: function () { return [params.targetUuid]; },

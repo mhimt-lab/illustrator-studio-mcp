@@ -4,7 +4,7 @@
 
 Illustrator Studio MCP checks the change, not just the command. Planning the edit and verifying its actual result are one flow.
 
-> **Public Beta 0.1.0-beta.5.** A trial release. Try it on a copy of your artwork. Illustrator must be in the foreground with the screen unlocked. In the background or with the screen locked, operations are refused or fail with an unclear reason.
+> **Public Beta 0.1.0-beta.6.** A trial release. Try it on a copy of your artwork. Illustrator must be in the foreground with the screen unlocked. In the background or with the screen locked, operations are refused or fail with an unclear reason.
 
 ## Five steps that check each change
 
@@ -28,7 +28,7 @@ Editing operations separate planning from applying. Opening, saving, and backing
 
 ## Consecutive edits
 
-Continuous editing of saved files (edit sessions, experimental) requires a verified backup and exclusive use of the document. It supports 36 of 40 editing operations; delete, embed, vector import and artboard updates are excluded. The backup a session needs stops at 1,000 objects, so that is the effective session ceiling (checked in one 1,000-object live run). Do not edit the same document through another person or app during the session. Not every external change is detected.
+Continuous editing of saved files (edit sessions, experimental) requires a verified backup and exclusive use of the document. Delete, embed, vector import, artboard updates, in-document trim marks, barcodes, QR codes and stroke styles are excluded. Backups were measured up to 20,778 objects, and sessions up to 3,000 objects per scan and 20,779 objects with chunked scans. Do not edit the same document through another person or app during the session. Not every external change is detected.
 
 ## Known limits
 
@@ -90,7 +90,7 @@ For what to do when an operation stops, see the [recovery steps](runbook.en.md#n
 ## Saving over, exporting, and backups
 
 - **Saving over a file** (`illustrator_save_document`) requires the `backup_id` of a verified backup from `illustrator_create_backup`. If the hashes of the backup and the file on disk do not match, the call is rejected before Illustrator is touched.
-- **Backups** (`illustrator_create_backup`) copy the saved file create-exclusively, then open a restore-test copy and compare its structure. The source document and file are never modified. Backups are never deleted automatically. The effective ceiling is 1,000 objects (one 1,000-object live run took about 18.3 s).
+- **Backups** (`illustrator_create_backup`) copy the saved file create-exclusively, then open a restore-test copy and compare its structure. The source document and file are never modified. Backups are never deleted automatically. Up to 1,000 objects the structure is compared directly; larger documents are compared in full as a stream (measured at 20,778 objects, 12–15 s per pass; larger documents are refused).
 - **Save-as and export** (`illustrator_save_document_as`, `illustrator_export_outlined`, `illustrator_optimize_images`) write only to paths that do not exist yet. Outlining happens only on the export copy.
 - If a backup or export ends with an unknown result, changes stay blocked until `illustrator_reconcile_backup` / `illustrator_reconcile_export` releases the session.
 - **Embedding an image** (`illustrator_embed_image`) covers only a linked JPEG/PNG directly on a layer in an RGB document. It cannot be undone in the document, so like deletion it requires a clean saved document, a verified backup's `backup_id`, and the echo of the plan's before / after. If the result is unknown after the embed ran, the Illustrator lock stays held; after releasing it with `illustrator_reconcile` `action=release_unverified`, the unchanged file equals the backup, so closing without saving and reopening returns to the state before embedding (never done automatically). Only an `embed()` that Illustrator refused while the linked item still reads back unchanged is settled as "no change".
@@ -99,7 +99,7 @@ For what to do when an operation stops, see the [recovery steps](runbook.en.md#n
 ## Operational notes
 
 - A file-backed document must be saved with no pending changes before mutation (`mutationProfile: saved_file`); a never-saved document is mutable as `unsaved_document` because no existing file can be damaged, but it cannot be backed up. `expected_document_key` accepts the full key or the 16-hex `keyShort` from `illustrator_get_context`. Newly created point-text UUIDs may change at the next save.
-- To keep editing a saved file without intermediate saves, declare occupancy with `illustrator_open_edit_session` (a verified backup is required). While the session is open only declared operations change the dirty document; external changes are refused at the next change or by the full check before saving, and the file is not written. State the fingerprint does not cover (appearance stacks, placed-image pixels, and so on) is the user's responsibility. After a timeout the session is suspended. Reconcile the unknown command and inspect document state before considering session close → save under the backup contract → open a new session. Closing a session alone does not release an unresolved command lock. Deletion (`illustrator_delete_objects`) and image embedding (`illustrator_embed_image`) are not available while a session is open: their recovery reopens the unchanged file, which would drop the session's changes.
+- To keep editing a saved file without intermediate saves, declare occupancy with `illustrator_open_edit_session` (a verified backup is required). While the session is open only declared operations change the dirty document; external changes are refused at the next change or by the full check before saving, and the file is not written. State the fingerprint does not cover (appearance stacks, embedded- and placed-image pixels, profiles, and so on) is the user's responsibility. After a timeout the session is suspended. Reconcile the unknown command and inspect document state before considering session close → save under the backup contract → open a new session. Closing a session alone does not release an unresolved command lock. Deletion (`illustrator_delete_objects`) and image embedding (`illustrator_embed_image`) are not available while a session is open: their recovery reopens the unchanged file, which would drop the session's changes.
 - The server addresses `id:com.adobe.illustrator` by default. A LaunchServices name in `ILLUSTRATOR_APPLICATION` is refused as `application_ambiguous` while stable and Beta Illustrator run together; `illustrator_get_context` and `illustrator_list_documents` report `application { bundleId, version, channel }` so the answering instance is visible on every read.
 - Text editing accepts only supported styles. Range replacement preserves outside styles but rejects manual pair kerning, U+200D content, and unmeasured cluster boundaries. Paragraph-style mutation is unsupported.
 - Relinking replaces the native UUID; use the new UUID returned in the result. Different pixel dimensions and a missing original link are blocked.
@@ -112,3 +112,5 @@ For what to do when an operation stops, see the [recovery steps](runbook.en.md#n
 - Some GroupItem references intermittently become invalid through multiple read paths. Skipping unreadable targets, automatic retry, and guaranteed recovery by restarting Illustrator are not supported responses. A later successful measurement does not replace the earlier failure evidence.
 
 </details>
+
+QR Code is a registered trademark of DENSO WAVE INCORPORATED in Japan and in other countries.

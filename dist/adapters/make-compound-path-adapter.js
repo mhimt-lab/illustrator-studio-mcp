@@ -512,23 +512,21 @@ function compoundRevalidate(preflight, plan) {
   if (preflight.savedSelection === null) throw mutationBeforeSideEffectError("The selection is not a list of page items.");
 }
 
-/** The one CompoundPathItem in the typed collection whose pathItems are exactly the duplicates, in order. */
+/** The CompoundPathItem whose pathItems are exactly the duplicates, in order: the parent of the first duplicate, resolved by its own UUID. */
 function compoundFindByMembers(document, memberUuids) {
-  var collection = clipCollection(document, "CompoundPathItem");
-  var found = null;
-  for (var index = 0; index < collection.length; index++) {
-    var candidate = collection[index];
-    var members = candidate.pathItems;
-    if (!members || members.length !== memberUuids.length) continue;
-    var matches = true;
-    for (var memberIndex = 0; memberIndex < members.length; memberIndex++) {
-      if (String(members[memberIndex].uuid) !== memberUuids[memberIndex]) { matches = false; break; }
-    }
-    if (!matches) continue;
-    if (found !== null) throw mutationError("apply_failed", "More than one compound path holds the duplicates.");
-    found = candidate;
+  if (memberUuids.length < 1) return null;
+  var first = resolvePageItem(document, memberUuids[0]);
+  if (first === null || first.typename !== "PathItem") return null;
+  var parent = first.item.parent;
+  if (!parent || String(parent.typename) !== "CompoundPathItem") return null;
+  var compound = resolvePageItem(document, String(parent.uuid));
+  if (compound === null || compound.typename !== "CompoundPathItem") return null;
+  var members = compound.item.pathItems;
+  if (!members || members.length !== memberUuids.length) return null;
+  for (var memberIndex = 0; memberIndex < members.length; memberIndex++) {
+    if (String(members[memberIndex].uuid) !== memberUuids[memberIndex]) return null;
   }
-  return found;
+  return compound.item;
 }
 
 function compoundCaptureDuplicate(state, source, layer) {
@@ -672,7 +670,11 @@ function compoundMemberStateFacts(member, compound) {
   var names = ["polarity", "artworkKnockout", "blendingMode", "note", "uRL", "guides", "sliced", "isIsolated"];
   var facts = [];
   for (var index = 0; index < names.length; index++) {
-    try { facts.push(names[index] + "=" + String(member[names[index]])); }
+    try {
+      var observed = String(member[names[index]]);
+      // note and uRL carry document content: report only whether they are empty.
+      facts.push(names[index] + "=" + (names[index] === "note" || names[index] === "uRL" ? (observed === "" ? "empty" : "non-empty") : observed));
+    }
     catch (error) { facts.push(names[index] + "!" + compoundDescribeError(error)); }
   }
   try { facts.push("tags=" + member.tags.length); } catch (tagsError) { facts.push("tags!" + compoundDescribeError(tagsError)); }
@@ -910,7 +912,7 @@ export function mapCompoundExecutionError(error, detail) {
         return new Error(`No PageItem with UUID ${JSON.stringify(detail.uuid ?? '')} exists in the bound document.`);
     }
     if (detail?.code === 'CLIP_UNSUPPORTED_TARGET') {
-        return new Error(`Compound path source ${JSON.stringify(detail.uuid ?? '')} is outside the measured support profile (${detail.reason ?? 'unknown'}).`);
+        return new Error(`Compound path source ${JSON.stringify(detail.uuid ?? '')} is outside the measured support profile (${detail.reason ?? 'unknown'}${detail.facts?.length ? `: ${detail.facts.join(', ')}` : ''}).`);
     }
     if (detail?.code === 'COMPOUND_APPLY_BLOCKED') {
         return new Error(`Compound path apply is blocked: ${(detail.reasonCodes ?? []).join(', ') || 'unknown reason'}.`);

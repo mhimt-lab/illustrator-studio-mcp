@@ -69,9 +69,45 @@ function deleteRecoverySummary(doc, index) {
 function deleteRecoveryDocumentsAt(path) {
   var matches = [];
   for (var index = 0; index < app.documents.length; index++) {
-    if (lifecyclePathOf(app.documents[index]) === path) matches.push({ doc: app.documents[index], summary: deleteRecoverySummary(app.documents[index], index) });
+    var summary = deleteRecoverySummary(app.documents[index], index);
+    if (hostDocumentPathMatches(lifecyclePathOf(app.documents[index]), path, summary.key)) matches.push({ doc: app.documents[index], summary: summary });
   }
   return matches;
+}
+function deleteRecoveryRawInventory() {
+  var inventory = [];
+  for (var index = 0; index < app.documents.length; index++) {
+    var summary = deleteRecoverySummary(app.documents[index], index);
+    summary.path = lifecyclePathOf(app.documents[index]) || null;
+    inventory.push(summary);
+  }
+  return inventory;
+}
+/** A necessary alias test only: equal depth, ASCII components, and non-ASCII positions. No normalization. */
+function deleteRecoveryPathMayAlias(raw, path) {
+  var reported = raw.split("/");
+  var source = path.split("/");
+  if (reported.length !== source.length) return false;
+  var nonAscii = false;
+  for (var component = 0; component < source.length; component++) {
+    var sourceAscii = !/[^\\x00-\\x7f]/.test(source[component]);
+    var reportedAscii = !/[^\\x00-\\x7f]/.test(reported[component]);
+    if (sourceAscii !== reportedAscii) return false;
+    if (sourceAscii && source[component] !== reported[component]) return false;
+    if (!sourceAscii) nonAscii = true;
+  }
+  return nonAscii;
+}
+function deleteRecoveryRefuseMissedAlias(path, matches) {
+  for (var index = 0; index < app.documents.length; index++) {
+    var raw = lifecyclePathOf(app.documents[index]);
+    if (!raw) lifecycleError("DELETE_REVERT_AMBIGUOUS", { message: "An open document path is unavailable; absence cannot be established. Nothing was closed or opened." });
+    var summary = deleteRecoverySummary(app.documents[index], index);
+    if (hostDocumentPathMatches(raw, path, summary.key)) continue;
+    if (hostFilePathMissMayMatch(raw, path) || (matches.length === 0 && deleteRecoveryPathMayAlias(raw, path))) {
+      lifecycleError("DELETE_REVERT_AMBIGUOUS", { message: "Close the blocking document " + summary.name + " (" + raw + "); if it is the source file, run inspect and pass its full key as confirm_document_key. Nothing was closed or opened." });
+    }
+  }
 }
 /** Full or short expected key against a full key, with the positional "index=" field ignored. */
 function deleteRecoveryKeyMatches(expected, actualFullKey) {
@@ -96,6 +132,7 @@ export const DELETE_INSPECT_SCRIPT = `${DELETE_RECOVERY_SHARED}
 var deleteInspectMatches = deleteRecoveryDocumentsAt(params.sourcePath);
 var result = {
   documents: deleteRecoverySummaries(deleteInspectMatches),
+  inventory: deleteRecoveryRawInventory(),
   documentCount: app.documents.length,
   keyMatches: deleteInspectMatches.length === 1 && deleteRecoveryKeyMatches(params.expectedDocumentKey, deleteInspectMatches[0].summary.key),
   targets: deleteInspectMatches.length === 1 ? deleteRecoveryTargets(deleteInspectMatches[0].doc, params.targetUuids) : null
@@ -106,6 +143,7 @@ var deleteRevertStartedAt = new Date().getTime();
 var deleteRevertFile = new File(params.sourcePath);
 if (deleteRevertFile.exists !== true || deleteRevertFile.length !== params.bytes) lifecycleError("DELETE_REVERT_FILE_CHANGED", { message: "The file at the backup's source path is missing or no longer has the backup's size." });
 var deleteRevertMatches = deleteRecoveryDocumentsAt(params.sourcePath);
+deleteRecoveryRefuseMissedAlias(params.sourcePath, deleteRevertMatches);
 if (deleteRevertMatches.length > 1) lifecycleError("DELETE_REVERT_AMBIGUOUS", { message: "More than one open document uses the path; close the extra ones yourself first." });
 if (deleteRevertMatches.length === 1 && deleteRevertMatches[0].summary.key !== params.confirmDocumentKey) {
   lifecycleError("DELETE_REVERT_CONFIRMATION_MISMATCH", { expected: String(params.confirmDocumentKey), actual: deleteRevertMatches[0].summary.key });
@@ -149,7 +187,7 @@ try {
         closed: deleteRevertClosed,
         document: deleteRevertContext,
         checks: {
-          path: deleteRevertContext.path === params.sourcePath,
+          path: hostDocumentPathMatches(deleteRevertContext.path, params.sourcePath, deleteRevertContext.key),
           revision: deleteRevertSummary.fileRevision === params.sourceFileRevision,
           saved: deleteRevertSummary.saved === true,
           profile: deleteRevertContext.mutationProfile === "saved_file",

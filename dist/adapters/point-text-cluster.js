@@ -20,6 +20,9 @@ const EXTENDING_RANGES = [
     [0x1f3fb, 0x1f3ff],
     [0xe0100, 0xe01ef],
 ];
+export function clusterHostTable() {
+    return { extending: EXTENDING_RANGES.filter(([, high]) => high <= 0xffff), joiner: 0x200d };
+}
 const ZERO_WIDTH_JOINER = 0x200d;
 const REGIONAL_INDICATOR = [0x1f1e6, 0x1f1ff];
 const UNMEASURED_SCRIPT_RANGES = [

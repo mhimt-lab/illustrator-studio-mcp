@@ -23,14 +23,21 @@ const orderSchema = z.array(uuidSchema).min(1).max(SUPPORTED_PATH_ITEM_MAX_PAREN
     if (new Set(uuids).size !== uuids.length)
         context.addIssue({ code: 'custom', message: 'A layer order must contain unique native UUIDs.' });
 });
-const stackingPaintSchema = z.union([duplicateObjectSnapshotShape.fillColor.unwrap(), supportedPathCmykPaintSchema]);
+const stackingStrokePaintSchema = z.union([duplicateObjectSnapshotShape.fillColor.unwrap(), supportedPathCmykPaintSchema]);
+const stackingSpotPaintSchema = z.strictObject({ type: z.literal('SpotColor'), tint: z.number().finite().min(0).max(100), spotIndex: z.number().int().min(0).max(100_000) });
+const stackingFillPaintSchema = z.union([stackingStrokePaintSchema, stackingSpotPaintSchema]);
+export const STACKING_MAX_TAGS = 1;
+const { tagsEmpty: _tagsEmpty, ...stackingBaseShape } = duplicateObjectSnapshotShape;
 export const stackingTargetSnapshotSchema = z.strictObject({
-    ...duplicateObjectSnapshotShape,
-    fillColor: stackingPaintSchema.nullable(),
-    strokeColor: stackingPaintSchema.nullable(),
+    ...stackingBaseShape,
+    fillColor: stackingFillPaintSchema.nullable(),
+    strokeColor: stackingStrokePaintSchema.nullable(),
+    polarity: z.enum(['PolarityValues.POSITIVE', 'PolarityValues.NEGATIVE']),
+    tagCount: z.number().int().min(0).max(STACKING_MAX_TAGS),
 }).superRefine(refineDuplicateObjectSnapshot);
-function hasCmykPaint(snapshot) {
-    return snapshot.fillColor?.type === 'CMYKColor' || snapshot.strokeColor?.type === 'CMYKColor';
+function needsCmykDocument(snapshot) {
+    return snapshot.fillColor?.type === 'CMYKColor' || snapshot.strokeColor?.type === 'CMYKColor' || snapshot.fillColor?.type === 'SpotColor' ||
+        snapshot.tagCount > 0 || snapshot.polarity === 'PolarityValues.NEGATIVE';
 }
 const targetsSchema = z.array(uuidSchema).min(STACKING_MIN_TARGETS).max(STACKING_MAX_TARGETS).superRefine((uuids, context) => {
     if (new Set(uuids).size !== uuids.length)
@@ -151,9 +158,6 @@ const planSchema = z.strictObject({
     if (plan.applyAllowed !== (plan.confirmationStatus === 'confirmed' && plan.applyBlockedReasonCodes.length === 0)) {
         context.addIssue({ code: 'custom', message: 'Stacking applyAllowed must require confirmation and no blockers.' });
     }
-    if (plan.method !== 'front' && plan.targetsBefore.some(hasCmykPaint)) {
-        context.addIssue({ code: 'custom', message: 'CMYK paint is measured for the front method only.' });
-    }
 });
 const failureSchema = z.strictObject({ phase: z.enum(['apply', 'verify']), reasonCode: z.enum(['apply_failed', 'verify_mismatch']), message: z.string().min(1).max(500) })
     .superRefine((failure, context) => {
@@ -215,8 +219,8 @@ export const setStackingOrderResultSchema = z.union([
     z.strictObject({ operation: z.literal(SET_STACKING_ORDER_OPERATION), applied: z.literal(true), document: documentContextSchema, plan: planSchema,
         postcondition: z.strictObject({ parentOrder: orderSchema, targets: z.array(stackingTargetSnapshotSchema).min(STACKING_MIN_TARGETS).max(STACKING_MAX_TARGETS) }), transaction: transactionSchema }),
 ]).superRefine((result, context) => {
-    if (result.plan.targetsBefore.some(hasCmykPaint) && result.document.colorSpace !== 'CMYK') {
-        context.addIssue({ code: 'custom', message: 'CMYK paint is measured in a CMYK document only.' });
+    if (result.plan.targetsBefore.some(needsCmykDocument) && result.document.colorSpace !== 'CMYK') {
+        context.addIssue({ code: 'custom', message: 'CMYK paint, a spot fill, a tag, and NEGATIVE polarity are measured in a CMYK document only.' });
     }
     if (result.transaction.state === 'planned') {
         if (result.plan.confirmationStatus !== 'required' || !sameCanonical(result.plan.applyBlockedReasonCodes, targetBlockers(result.document.mutationAllowed, result.plan.targetsBefore))) {
@@ -342,15 +346,31 @@ function stackingBlockers(context, snapshots) {
   return blockers;
 }
 
-/** CMYK paint is measured only for BRINGTOFRONT in a CMYK document (CMYK-STACK-FRONT); every other scope refuses it. */
+/**
+ * What stacking admits beyond RGB (see the header): CMYK paint, a spot fill by tint and spot-list index, up to one tag by
+ * count, and polarity NEGATIVE, all in a CMYK document and for every method. This scope is the only caller that opts in.
+ * In another document the count and polarity admission is empty, so those states are refused with their value.
+ */
+var STACKING_MAX_TAGS = ${STACKING_MAX_TAGS};
 function stackingPaintScope(document) {
+  var cmykDocument = false;
+  try { cmykDocument = document.documentColorSpace === DocumentColorSpace.CMYK; } catch (spaceError) { cmykDocument = false; }
   return {
     cmykAdmitted: function () {
-      if (params.method !== "front") return false;
       try { return document.documentColorSpace === DocumentColorSpace.CMYK; }
       catch (spaceError) { throw mutationError("preflight_failed", "The bound document color space is unavailable."); }
     },
-    cmykRefusal: "is CMYKColor; stacking supports CMYK paint only for method front in a CMYK document."
+    cmykRefusal: "is CMYKColor; stacking supports CMYK paint only in a CMYK document.",
+    /** The spot's position in the document's spot list, found by name (never reported); the spot must be listed exactly once. */
+    spotFillIndex: function (value) {
+      if (!cmykDocument) throw mutationError("preflight_failed", "fillColor is a spot color; stacking supports a spot fill only in a CMYK document.");
+      var spots = document.spots; var found = -1; var matches = 0; var wanted;
+      try { wanted = String(value.spot.name); } catch (spotError) { throw mutationError("preflight_failed", "fillColor spot is unreadable."); }
+      for (var i = 0; i < spots.length; i++) if (String(spots[i].name) === wanted) { found = i; matches++; }
+      if (matches !== 1) throw mutationError("preflight_failed", "fillColor spot is not listed exactly once in the document.");
+      return found;
+    },
+    stateAdmit: { maxTags: cmykDocument ? STACKING_MAX_TAGS : 0, negativePolarity: cmykDocument }
   };
 }
 

@@ -15,7 +15,7 @@ const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
 const uuidSchema = z.string().min(1).max(255);
-const placementSchema = z.enum(['front', 'back']);
+export const placementSchema = z.enum(['front', 'back']);
 function orderSchema(min, max) {
     return z.array(uuidSchema).min(min).max(max).superRefine((uuids, context) => {
         if (new Set(uuids).size !== uuids.length) {
@@ -23,11 +23,11 @@ function orderSchema(min, max) {
         }
     });
 }
-const sourceOrderBeforeSchema = orderSchema(1, SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS);
-const destinationOrderBeforeSchema = orderSchema(0, SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS);
+export const sourceOrderBeforeSchema = orderSchema(1, SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS);
+export const destinationOrderBeforeSchema = orderSchema(0, SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS);
 const sourceOrderAfterSchema = orderSchema(0, SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS - 1);
 const destinationOrderAfterSchema = orderSchema(1, SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS);
-const observedLayerOrderSchema = orderSchema(0, SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS);
+export const observedLayerOrderSchema = orderSchema(0, SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS);
 const destinationLayerSchema = z.strictObject({
     path: layerPathSchema,
     name: z.string().max(255),
@@ -131,7 +131,7 @@ const blockerSchema = z.enum([
     'destination_layer_hidden', 'destination_ancestor_hidden', 'destination_layer_locked',
     'destination_ancestor_locked', 'destination_capacity_exceeded', 'result_size_limit_exceeded',
 ]);
-const planSchema = z.strictObject({
+export const moveObjectToLayerPlanSchema = z.strictObject({
     operation: z.literal(MOVE_OBJECT_TO_LAYER_OPERATION),
     documentKey: z.string().min(1).max(16_384),
     targetUuid: uuidSchema,
@@ -251,9 +251,9 @@ const postconditionSchema = z.strictObject({
 });
 export const moveObjectToLayerResultSchema = z.union([
     z.strictObject({ operation: z.literal(MOVE_OBJECT_TO_LAYER_OPERATION), applied: z.literal(false),
-        document: documentContextSchema, plan: planSchema, transaction: transactionSchema }),
+        document: documentContextSchema, plan: moveObjectToLayerPlanSchema, transaction: transactionSchema }),
     z.strictObject({ operation: z.literal(MOVE_OBJECT_TO_LAYER_OPERATION), applied: z.literal(true),
-        document: documentContextSchema, plan: planSchema, postcondition: postconditionSchema, transaction: transactionSchema }),
+        document: documentContextSchema, plan: moveObjectToLayerPlanSchema, postcondition: postconditionSchema, transaction: transactionSchema }),
 ]).superRefine((result, context) => {
     if (result.transaction.state === 'planned') {
         const expectedBlockers = [];
@@ -410,7 +410,7 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
     await assertOperationSafetyAdapterConformance({ registration: MOVE_OBJECT_TO_LAYER_SAFETY, plan,
         result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
-export const MOVE_OBJECT_TO_LAYER_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}${SUPPORTED_PATH_ITEM_HOST_SCRIPT}
+export const MOVE_OBJECT_TO_LAYER_MODULE_SCRIPT = `
 var MOVE_MAX_PARENT_ITEMS = ${SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS};
 var MOVE_TARGET_MAX_BYTES = 65536;
 var MOVE_ORDER_MAX_BYTES = 32768;
@@ -699,7 +699,8 @@ function moveRollback(state) {
   } catch (error) { return { status: "indeterminate", message: "Rollback verification is indeterminate." }; }
   return { status: "indeterminate", message: "Rollback produced an unrecognized structural state." };
 }
-
+`;
+export const MOVE_OBJECT_TO_LAYER_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}${SUPPORTED_PATH_ITEM_HOST_SCRIPT}${MOVE_OBJECT_TO_LAYER_MODULE_SCRIPT}
 var moveExecution = runMutationTransaction({
   apply: params.apply === true,
   editSessionLayers: function (phase, preflight) { return [preflight.sourceInfo.layer, preflight.destinationInfo.layer]; },

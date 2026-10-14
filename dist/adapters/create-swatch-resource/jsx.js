@@ -363,8 +363,6 @@ function resourcePlan(preflight) {
     applyAllowed: preflight.blockers.length === 0,
     applyBlockedReasonCodes: preflight.blockers
   };
-  var consent = hostVersionConsent(params);
-  if (consent !== null) plan.hostVersionConsent = consent;
   return plan;
 }
 

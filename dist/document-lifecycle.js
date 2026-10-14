@@ -1,11 +1,13 @@
+import { HOST_FILE_PATH_HELPERS } from './file-path.js';
 import { createHash } from 'node:crypto';
 import { link, lstat, open, realpath, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
-import { CTIME_ONLY_READ_ATTEMPTS, fileIdentitySchema, onlyCtimeDiffers, sameContentIdentity, sameFileIdentity, serializeFileIdentity, } from './document-backup.js';
+import { CTIME_ONLY_READ_ATTEMPTS, fileIdentitySchema, onlyCtimeDiffers, sameContentIdentity, sameFileIdentity, sameFilePath, serializeFileIdentity, } from './document-backup.js';
 export { sameContentIdentity };
 import { documentContextSchema, documentContextWithApplicationSchema } from './mutation-result-schema-core.js';
-import { EDIT_SESSION_JSX } from './edit-session-jsx.js';
+import { EDIT_SESSION_CHUNK_JSX, EDIT_SESSION_JSX } from './edit-session-jsx.js';
+import { editSessionScanProgressSchema, scanContinuationSchema } from './edit-session-chunked-scan.js';
 import { noFollowReadFlags } from './platform-primitives.js';
 export const LIFECYCLE_HOST_TIMEOUT_MS = 300_000;
 const HASH_CHUNK_BYTES = 1024 * 1024;
@@ -19,6 +21,8 @@ export const saveDocumentAsPublicInputSchema = z.strictObject({
 export const saveDocumentPublicInputSchema = z.strictObject({
     expected_document_key: documentKeyInputSchema,
     backup_id: z.uuid().describe('backupId of a verified illustrator_create_backup record whose bytes still equal the file that will be overwritten.'),
+    accept_chunked_scan_window: z.boolean().optional().describe('Ask before true: an attribute edit after its chunk scan but before save can be missed. Required above 3,000 session items; cap 20,779; production-copy P0 5/5.'),
+    scan_continuation: scanContinuationSchema.optional().describe('Single-use save scan token; resume with the same document key, backup_id and explicit consent.'),
 });
 export const openDocumentPublicInputSchema = z.strictObject({
     path: pathInputSchema.describe('Absolute, normalized path of an existing .ai file that is not open yet.'),
@@ -33,7 +37,9 @@ export function normalizeSaveDocumentAsPublicInput(input) {
 }
 export function normalizeSaveDocumentPublicInput(input) {
     const value = saveDocumentPublicInputSchema.parse(input);
-    return { expectedDocumentKey: value.expected_document_key, backupId: value.backup_id };
+    return { expectedDocumentKey: value.expected_document_key, backupId: value.backup_id,
+        ...(value.accept_chunked_scan_window === undefined ? {} : { acceptChunkedScanWindow: value.accept_chunked_scan_window }),
+        ...(value.scan_continuation === undefined ? {} : { scanContinuation: value.scan_continuation }) };
 }
 export function normalizeOpenDocumentPublicInput(input) {
     return { path: openDocumentPublicInputSchema.parse(input).path };
@@ -97,7 +103,7 @@ const saveAsIndeterminateSchema = indeterminateSchema.extend({
     nextCall: saveAsNextCallSchema.optional(),
 });
 export const saveDocumentAsRejectionReasonSchema = z.enum(['document_key_mismatch', 'document_not_admitted', 'output_path_invalid', 'output_exists', 'owner_identity_unavailable']);
-export const saveDocumentAsFailureReasonSchema = z.enum(['save_failed', 'output_exists', 'output_cross_device']);
+export const saveDocumentAsFailureReasonSchema = z.enum(['save_failed', 'output_exists', 'output_cross_device', 'output_already_open']);
 export const saveDocumentAsResultSchema = z.discriminatedUnion('outcome', [
     z.strictObject({
         outcome: z.literal('saved'),
@@ -122,8 +128,13 @@ export const saveDocumentAsResultSchema = z.discriminatedUnion('outcome', [
 ]);
 export const saveDocumentRejectionReasonSchema = z.enum([
     'document_key_mismatch', 'document_not_admitted', 'nothing_to_save', 'backup_not_found', 'backup_invalid', 'backup_mismatch', 'backup_stale', 'backup_file_unavailable', 'source_file_unavailable',
-    'edit_session_invalid', 'edit_session_suspended', 'edit_session_backup_mismatch', 'edit_session_mismatch',
+    'edit_session_invalid', 'edit_session_suspended', 'edit_session_backup_mismatch', 'edit_session_mismatch', 'edit_session_scan_incomplete',
+    'document_changed_during_scan', 'scan_incomplete', 'document_too_large', 'scan_no_progress', 'scan_too_slow', 'scan_time_limit', 'scan_call_limit', 'scan_expired', 'scan_context_mismatch',
 ]);
+export const chunkedSaveVerificationSchema = z.strictObject({
+    mode: z.literal('chunked'), calls: z.number().int().positive(), windowMs: z.number().nonnegative(),
+    scanMs: z.number().nonnegative(), saveMs: z.number().nonnegative(), verifyMs: z.number().nonnegative(), finalCallMs: z.number().nonnegative(),
+});
 export const saveDocumentResultSchema = z.discriminatedUnion('outcome', [
     z.strictObject({
         outcome: z.literal('saved'),
@@ -131,12 +142,14 @@ export const saveDocumentResultSchema = z.discriminatedUnion('outcome', [
         previous: z.strictObject({ key: z.string().min(1), fileRevision: z.string().min(1) }),
         backup: z.strictObject({ backupId: z.uuid(), backupPath: z.string().min(1), bytes: z.number().int().positive(), sha256: sha256Schema }),
         file: fileFactsSchema.extend({ inodeReplaced: z.boolean() }),
+        verification: chunkedSaveVerificationSchema.optional(),
         editSession: z.strictObject({
             sessionId: z.string().regex(/^es_[0-9a-f]{32}$/u),
             state: z.enum(['closed', 'open']).describe('closed once the saved file ends the session; open only if closing it failed (the next change then suspends it on the new file revision).'),
             scanMs: z.number().nonnegative(),
         }).optional().describe('Present when the file belonged to an open edit session; the full scan matched its head right before save.'),
     }),
+    z.strictObject({ outcome: z.literal('scan_in_progress'), scan_continuation: scanContinuationSchema, progress: editSessionScanProgressSchema }),
     z.strictObject({ outcome: z.literal('rejected'), reason: saveDocumentRejectionReasonSchema, message: z.string().min(1), document: documentContextSchema.nullable() }),
     z.strictObject({ outcome: z.literal('failed'), reason: z.literal('save_failed'), message: z.string().min(1), document: documentContextSchema.nullable() }),
     indeterminateSchema,
@@ -182,8 +195,9 @@ export const closeDocumentResultSchema = z.discriminatedUnion('outcome', [
 export const LIFECYCLE_PRE_ATTEMPT_CODES = Object.freeze([
     'DOCUMENT_MISMATCH', 'DOCUMENT_KEY_AMBIGUOUS', 'LIFECYCLE_INVALID_INPUT', 'LIFECYCLE_PATH_UNAVAILABLE', 'OUTPUT_EXISTS',
     'NOTHING_TO_SAVE', 'SAVE_PATH_MISMATCH', 'SOURCE_FILE_MISSING', 'ALREADY_OPEN', 'OPEN_FILE_MISSING', 'UNSAVED_CHANGES', 'SWITCH_PRECONDITION',
+    'OUTPUT_ALREADY_OPEN',
 ]);
-export const LIFECYCLE_SHARED = `
+export const LIFECYCLE_SHARED = `${HOST_FILE_PATH_HELPERS}
 var MUTATION_FORCE_INDETERMINATE = false;
 var MUTATION_RUNNER_DISPOSITION = null;
 function lifecycleBeginSideEffect() { MUTATION_FORCE_INDETERMINATE = true; }
@@ -253,6 +267,10 @@ export const LIFECYCLE_READ_SCRIPT = `
 ${LIFECYCLE_SHARED}
 var lifecycleReadContext = requireDocumentForRead(params.expectedDocumentKey);
 var result = { document: lifecycleReadContext, documentIndex: lifecycleIndexOf(app.activeDocument), documentCount: app.documents.length };
+if (params.inspectItemCount === true) {
+  result.pageItemCount = null;
+  try { result.pageItemCount = app.activeDocument.pageItems.length; } catch (_itemCountError) {}
+}
 `;
 export const SAVE_DOCUMENT_AS_SCRIPT = `
 ${LIFECYCLE_SHARED}
@@ -296,12 +314,12 @@ try {
       if (lifecycleIndexAfter !== lifecycleIndexBefore) lifecycleVerifyMessage = "The document changed its collection index during save-as.";
       else if (app.documents.length !== lifecycleCountBefore) lifecycleVerifyMessage = "The document count changed during save-as.";
       else if (app.activeDocument !== lifecycleDoc) lifecycleVerifyMessage = "The saved document is no longer the active document.";
-      else if (lifecyclePathOf(lifecycleDoc) !== params.outputPath) lifecycleVerifyMessage = "The document does not point at the requested output path after save-as (" + lifecyclePathOf(lifecycleDoc) + ").";
+      else if (!hostFilePathMatches(lifecyclePathOf(lifecycleDoc), params.outputPath)) lifecycleVerifyMessage = "The document does not point at the requested output path after save-as (" + lifecyclePathOf(lifecycleDoc) + ").";
       else if (!lifecycleOutputExists) lifecycleVerifyMessage = "saveAs returned but the output file does not exist.";
       else if (lifecycleDoc.saved !== true) lifecycleVerifyMessage = "The document is not clean after save-as.";
       else {
         lifecycleAfterContext = getDocumentContext();
-        if (lifecycleAfterContext.path !== params.outputPath || lifecycleAfterContext.saved !== true || lifecycleAfterContext.fileRevision === null) {
+        if (!hostFilePathMatches(lifecycleAfterContext.path, params.outputPath) || lifecycleAfterContext.saved !== true || lifecycleAfterContext.fileRevision === null) {
           lifecycleVerifyMessage = "The document context does not reflect the save-as (path, saved, or file revision).";
         }
       }
@@ -322,12 +340,13 @@ try {
 export const SAVE_DOCUMENT_SCRIPT = `
 ${LIFECYCLE_SHARED}
 ${EDIT_SESSION_JSX}
+${EDIT_SESSION_CHUNK_JSX}
 if (typeof params.path !== "string" || params.path.length === 0) lifecycleError("LIFECYCLE_INVALID_INPUT", { message: "path must be a non-empty string." });
 var lifecycleContextBefore = resolveExpectedDocument(params.expectedDocumentKey);
 var lifecycleDoc = app.activeDocument;
 if (!readDocumentPath(lifecycleDoc).available) lifecycleError("LIFECYCLE_PATH_UNAVAILABLE", { message: "The document path could not be read; save is refused." });
 if (lifecycleDoc.saved === true) lifecycleError("NOTHING_TO_SAVE", { message: "The document has no unsaved changes." });
-if (lifecyclePathOf(lifecycleDoc) !== params.path) lifecycleError("SAVE_PATH_MISMATCH", { expected: params.path, actual: lifecyclePathOf(lifecycleDoc) });
+if (!hostFilePathMatches(lifecyclePathOf(lifecycleDoc), params.path)) lifecycleError("SAVE_PATH_MISMATCH", { expected: params.path, actual: lifecyclePathOf(lifecycleDoc) });
 if (new File(params.path).exists !== true) lifecycleError("SOURCE_FILE_MISSING", { path: params.path });
 if (lifecycleContextBefore.fileRevision === null) lifecycleError("LIFECYCLE_PATH_UNAVAILABLE", { message: "The file revision of the document could not be read; save is refused." });
 if (typeof params.expectedRevision !== "string" || typeof params.expectedBytes !== "number") lifecycleError("LIFECYCLE_INVALID_INPUT", { message: "expectedRevision and expectedBytes are required." });
@@ -337,6 +356,9 @@ var lifecycleCountBefore = app.documents.length;
 var lifecyclePrevious = { key: lifecycleContextBefore.key, fileRevision: lifecycleContextBefore.fileRevision };
 var lifecyclePreviousInteraction = app.userInteractionLevel;
 var lifecycleSaveError = null;
+var lifecycleChunk = null;
+var lifecycleChunkStarted = esNow();
+var lifecycleSaveMs = 0;
 var result;
 function lifecycleObserveFile() {
   var observed = { length: null, revision: null };
@@ -353,42 +375,73 @@ try {
   var lifecycleObserved = lifecycleObserveFile();
   var lifecycleSessionCheck = null;
   if (params.editSession !== undefined && params.editSession !== null) {
-    var lifecycleSessionStructure = esStructure(lifecycleDoc);
-    var lifecycleSessionScan = esScan(lifecycleDoc, params.editSession.deadlineMs, params.editSession.maxItems);
-    lifecycleSessionCheck = { structureDigest: lifecycleSessionStructure.digest, itemAggregate: lifecycleSessionScan.aggregate,
-      total: lifecycleSessionScan.total, visited: lifecycleSessionScan.visited, truncated: lifecycleSessionScan.truncated,
-      overLimit: lifecycleSessionScan.overLimit, scanMs: lifecycleSessionStructure.durationMs + lifecycleSessionScan.durationMs };
+    if (params.editSession.chunk !== undefined) {
+      var lifecycleChunkInput = params.editSession.chunk;
+      lifecycleChunk = csChunk(lifecycleDoc, lifecycleChunkInput.cursor, lifecycleChunkInput.options);
+      var lifecyclePartial = lifecycleChunkInput.partial;
+      var lifecycleCombined = { a: (lifecyclePartial.a + lifecycleChunk.rows.a) % 4294967296,
+        b: (lifecyclePartial.b + lifecycleChunk.rows.b) % 4294967296, n: lifecyclePartial.n + lifecycleChunk.rows.n };
+      var lifecycleChunkStructure = lifecycleChunk.structureStart;
+      if (lifecycleChunk.structureEnd !== undefined) lifecycleChunkStructure = lifecycleChunk.structureEnd;
+      var lifecycleChunkInvalid = (lifecycleChunk.stopReason !== null && lifecycleChunk.stopReason !== "budget" && lifecycleChunk.stopReason !== "max_rows");
+      if (esNow() >= lifecycleChunkInput.scanDeadlineAt || lifecycleChunk.total !== lifecycleChunkInput.total ||
+          lifecycleChunk.cursorIn.position + lifecycleChunk.rowsRead !== lifecycleChunk.cursor.position ||
+          lifecycleChunk.rows.n !== lifecycleChunk.rowsRead + lifecycleChunk.cursor.lo.layer - lifecycleChunk.cursorIn.lo.layer) lifecycleChunkInvalid = true;
+      lifecycleSessionCheck = { structureDigest: lifecycleChunkStructure.digest, itemAggregate: esAggregateText(lifecycleCombined),
+        total: lifecycleChunk.total, visited: lifecyclePartial.visited + lifecycleChunk.rowsRead,
+        truncated: lifecycleChunkInvalid || !lifecycleChunk.done,
+        overLimit: lifecycleChunk.overLimit, scanMs: lifecyclePartial.durationMs + lifecycleChunk.durationMs };
+      // Missing/unmeasured rows or an invalid final count cannot authorize a write even when the digest matches.
+      if (lifecyclePartial.missingUuid + lifecycleChunk.missingUuid > 0 || lifecyclePartial.unmeasured + lifecycleChunk.unmeasured > 0 ||
+          (lifecycleChunk.done && lifecycleCombined.n !== lifecycleChunk.total + lifecycleChunkStructure.layerCount)) lifecycleChunkInvalid = true;
+      if (lifecycleChunkInvalid) lifecycleSessionCheck.truncated = true;
+    } else {
+      var lifecycleSessionStructure = esStructure(lifecycleDoc);
+      var lifecycleSessionScan = esScan(lifecycleDoc, params.editSession.deadlineMs, params.editSession.maxItems);
+      lifecycleSessionCheck = { structureDigest: lifecycleSessionStructure.digest, itemAggregate: lifecycleSessionScan.aggregate,
+        total: lifecycleSessionScan.total, visited: lifecycleSessionScan.visited, truncated: lifecycleSessionScan.truncated,
+        overLimit: lifecycleSessionScan.overLimit, scanMs: lifecycleSessionStructure.durationMs + lifecycleSessionScan.durationMs };
+    }
   }
   if (lifecycleObserved.length !== params.expectedBytes || lifecycleObserved.revision !== params.expectedRevision) {
     result = { outcome: "precondition_changed", message: "The file under the document changed between verification and save; nothing was written.", observed: lifecycleObserved, document: lifecycleSafeContext() };
+  } else if (lifecycleSessionCheck !== null && (lifecycleSessionCheck.structureDigest !== params.editSession.structureDigest ||
+      (lifecycleChunk !== null && lifecycleChunk.structureMismatch))) {
+    result = { outcome: "edit_session_mismatch", check: lifecycleSessionCheck, document: lifecycleSafeContext() };
+  } else if (lifecycleChunk !== null && !lifecycleChunk.done && !lifecycleChunkInvalid && !lifecycleChunk.overLimit) {
+    result = { outcome: "edit_session_scan_continue", chunk: lifecycleChunk, document: lifecycleSafeContext() };
   } else if (lifecycleSessionCheck !== null && (lifecycleSessionCheck.truncated || lifecycleSessionCheck.overLimit ||
-      lifecycleSessionCheck.structureDigest !== params.editSession.structureDigest ||
-      lifecycleSessionCheck.itemAggregate !== params.editSession.itemAggregate)) {
+      lifecycleSessionCheck.total === null || lifecycleSessionCheck.visited !== lifecycleSessionCheck.total)) {
+    // An unfinished scan proves nothing about the document: save() is not called, and the session is left as it is.
+    result = { outcome: "edit_session_scan_incomplete", check: lifecycleSessionCheck, document: lifecycleSafeContext() };
+  } else if (lifecycleSessionCheck !== null && lifecycleSessionCheck.itemAggregate !== params.editSession.itemAggregate) {
     result = { outcome: "edit_session_mismatch", check: lifecycleSessionCheck, document: lifecycleSafeContext() };
   } else {
     try {
       lifecycleBeginSideEffect();
-      lifecycleDoc.save();
+      var lifecycleSaveStarted = esNow();
+      try { lifecycleDoc.save(); } finally { lifecycleSaveMs = esNow() - lifecycleSaveStarted; }
     } catch (saveError) {
       lifecycleSaveError = lifecycleMessage(saveError);
     }
   }
   if (result !== undefined) {
-    // precondition_changed or edit_session_mismatch: no write attempted.
+    // precondition_changed, edit_session_mismatch or edit_session_scan_incomplete: no write attempted.
   } else if (lifecycleSaveError !== null) {
     result = { outcome: "save_failed", message: lifecycleSaveError, document: lifecycleSafeContext() };
   } else {
+    var lifecycleVerifyStarted = esNow();
     var lifecycleVerifyMessage = null;
     var lifecycleAfterContext = null;
     try {
       if (lifecycleIndexOf(lifecycleDoc) !== lifecycleIndexBefore) lifecycleVerifyMessage = "The document changed its collection index during save.";
       else if (app.documents.length !== lifecycleCountBefore) lifecycleVerifyMessage = "The document count changed during save.";
       else if (app.activeDocument !== lifecycleDoc) lifecycleVerifyMessage = "The saved document is no longer the active document.";
-      else if (lifecyclePathOf(lifecycleDoc) !== params.path) lifecycleVerifyMessage = "The document path changed during save (" + lifecyclePathOf(lifecycleDoc) + ").";
+      else if (!hostFilePathMatches(lifecyclePathOf(lifecycleDoc), params.path)) lifecycleVerifyMessage = "The document path changed during save (" + lifecyclePathOf(lifecycleDoc) + ").";
       else if (lifecycleDoc.saved !== true) lifecycleVerifyMessage = "The document is not clean after save.";
       else {
         lifecycleAfterContext = getDocumentContext();
-        if (lifecycleAfterContext.path !== params.path || lifecycleAfterContext.saved !== true || lifecycleAfterContext.fileRevision === null) {
+        if (!hostFilePathMatches(lifecycleAfterContext.path, params.path) || lifecycleAfterContext.saved !== true || lifecycleAfterContext.fileRevision === null) {
           lifecycleVerifyMessage = "The document context does not reflect the save (path, saved, or file revision).";
         } else if (lifecycleAfterContext.fileRevision === lifecyclePrevious.fileRevision) {
           lifecycleVerifyMessage = "The file revision did not change after save.";
@@ -399,7 +452,11 @@ try {
     }
     if (lifecycleVerifyMessage !== null) result = { outcome: "verify_mismatch", message: lifecycleVerifyMessage, document: lifecycleSafeContext() };
     else result = { outcome: "saved", document: lifecycleAfterContext, previous: lifecyclePrevious, editSessionCheck: lifecycleSessionCheck };
+    if (lifecycleChunk !== null && result.outcome === "saved") {
+      result.timing = { saveMs: lifecycleSaveMs, verifyMs: esNow() - lifecycleVerifyStarted, finalCallMs: esNow() - lifecycleChunkStarted };
+    }
   }
+  if (lifecycleChunk !== null) result.chunk = lifecycleChunk;
 } finally {
   app.userInteractionLevel = lifecyclePreviousInteraction;
 }
@@ -410,8 +467,11 @@ if (typeof params.path !== "string" || params.path.length === 0) lifecycleError(
 var lifecycleFile = new File(params.path);
 if (lifecycleFile.exists !== true) lifecycleError("OPEN_FILE_MISSING", { path: params.path });
 var lifecycleBefore = lifecycleInventory();
+// Measured on 30.8.2: app.open of another spelling of an open file added a second document whose returned reference
+// was unusable. A spelling outside the finite candidate set is refused too, never passed to app.open.
 for (var lifecycleScan = 0; lifecycleScan < lifecycleBefore.length; lifecycleScan++) {
-  if (lifecyclePathOf(lifecycleBefore[lifecycleScan].doc) === params.path) {
+  var lifecycleScanPath = lifecyclePathOf(lifecycleBefore[lifecycleScan].doc);
+  if (hostFilePathMatches(lifecycleScanPath, params.path) || hostFilePathMissMayMatch(lifecycleScanPath, params.path)) {
     lifecycleError("ALREADY_OPEN", { path: params.path, document: lifecycleSummary(lifecycleBefore[lifecycleScan].identity), index: lifecycleScan });
   }
 }
@@ -480,7 +540,7 @@ try {
       else if (app.documents.length !== lifecycleCountBefore + 1) lifecycleVerifyMessage = "The document count did not grow by exactly one.";
       else if (lifecycleOpenedIndex !== 0) lifecycleVerifyMessage = "The opened document is not at collection index 0.";
       else if (app.activeDocument !== lifecycleOpened) lifecycleVerifyMessage = "The opened document is not the active document.";
-      else if (lifecyclePathOf(lifecycleOpened) !== params.path) lifecycleVerifyMessage = "The opened document does not report the requested path (" + lifecyclePathOf(lifecycleOpened) + ").";
+      else if (!hostFilePathMatches(lifecyclePathOf(lifecycleOpened), params.path)) lifecycleVerifyMessage = "The opened document does not report the requested path (" + lifecyclePathOf(lifecycleOpened) + ").";
       else if (lifecycleOpened.saved !== true) lifecycleVerifyMessage = "The opened document is not clean.";
       else {
         lifecycleVerifyMessage = lifecycleExistingUnchanged(lifecycleBefore, null);
@@ -530,7 +590,7 @@ var saveAsInventory = [];
 for (var saveAsCursor = 0; saveAsCursor < app.documents.length; saveAsCursor++) {
   var saveAsDoc = app.documents[saveAsCursor];
   var saveAsPath = lifecyclePathOf(saveAsDoc);
-  if (saveAsPath === params.stagedPath || saveAsPath === params.outputPath) {
+  {
     var saveAsIdentity = getDocumentIdentity(saveAsDoc, saveAsCursor);
     saveAsInventory.push({ key: saveAsIdentity.key, path: saveAsPath, saved: saveAsIdentity.saved, index: saveAsCursor });
   }
@@ -542,7 +602,7 @@ ${LIFECYCLE_SHARED}
 if (typeof params.stagedPath !== "string" || typeof params.outputPath !== "string") lifecycleError("LIFECYCLE_INVALID_INPUT", { message: "stagedPath and outputPath are required." });
 var lifecycleContextBefore = resolveExpectedDocument(params.expectedDocumentKey);
 var lifecycleDoc = app.activeDocument;
-if (lifecyclePathOf(lifecycleDoc) !== params.stagedPath) lifecycleError("SWITCH_PRECONDITION", { message: "The document does not point at the staged file.", actual: lifecyclePathOf(lifecycleDoc) });
+if (!hostFilePathMatches(lifecyclePathOf(lifecycleDoc), params.stagedPath)) lifecycleError("SWITCH_PRECONDITION", { message: "The document does not point at the staged file.", actual: lifecyclePathOf(lifecycleDoc) });
 if (lifecycleDoc.saved !== true) lifecycleError("SWITCH_PRECONDITION", { message: "The document is not clean after save-as; it will not be closed." });
 if (new File(params.outputPath).exists !== true) lifecycleError("SWITCH_PRECONDITION", { message: "The published output does not exist." });
 var lifecycleBefore = lifecycleInventory();
@@ -553,8 +613,12 @@ for (var lifecycleExistingCursor = 0; lifecycleExistingCursor < lifecycleBefore.
   if (lifecycleBefore[lifecycleExistingCursor].doc !== lifecycleDoc) lifecycleExistingBefore.push(lifecycleBefore[lifecycleExistingCursor]);
 }
 var lifecycleCountBefore = app.documents.length;
+// Never app.open the output while any spelling of it is already open (a second document would appear).
 for (var lifecycleScan = 0; lifecycleScan < lifecycleBefore.length; lifecycleScan++) {
-  if (lifecyclePathOf(lifecycleBefore[lifecycleScan].doc) === params.outputPath) lifecycleError("SWITCH_PRECONDITION", { message: "A document already uses the output path." });
+  var lifecycleScanPath = lifecyclePathOf(lifecycleBefore[lifecycleScan].doc);
+  if (hostFilePathMatches(lifecycleScanPath, params.outputPath) || hostFilePathMissMayMatch(lifecycleScanPath, params.outputPath)) {
+    lifecycleError("OUTPUT_ALREADY_OPEN", { message: "A document already uses the output path.", document: lifecycleSummary(lifecycleBefore[lifecycleScan].identity), index: lifecycleScan });
+  }
 }
 var lifecyclePreviousInteraction = app.userInteractionLevel;
 var result;
@@ -586,13 +650,13 @@ try {
         else if (app.documents.length !== lifecycleCountBefore) lifecycleVerifyMessage = "The document count was not restored after reopening the output.";
         else if (lifecycleOpenedIndex !== 0) lifecycleVerifyMessage = "The reopened document is not at collection index 0.";
         else if (app.activeDocument !== lifecycleOpened) lifecycleVerifyMessage = "The reopened document is not the active document.";
-        else if (lifecyclePathOf(lifecycleOpened) !== params.outputPath) lifecycleVerifyMessage = "The reopened document does not report the output path (" + lifecyclePathOf(lifecycleOpened) + ").";
+        else if (!hostFilePathMatches(lifecyclePathOf(lifecycleOpened), params.outputPath)) lifecycleVerifyMessage = "The reopened document does not report the output path (" + lifecyclePathOf(lifecycleOpened) + ").";
         else if (lifecycleOpened.saved !== true) lifecycleVerifyMessage = "The reopened document is not clean.";
         else {
           lifecycleVerifyMessage = lifecycleExistingUnchanged(lifecycleExistingBefore, null);
           if (lifecycleVerifyMessage === null) {
             lifecycleContext = getDocumentContext();
-            if (lifecycleContext.path !== params.outputPath || lifecycleContext.mutationProfile !== "saved_file") lifecycleVerifyMessage = "The reopened document context is not admitted as saved_file at the output path.";
+            if (!hostFilePathMatches(lifecycleContext.path, params.outputPath) || lifecycleContext.mutationProfile !== "saved_file") lifecycleVerifyMessage = "The reopened document context is not admitted as saved_file at the output path.";
             else if (lifecycleContext.colorSpace !== lifecycleContextBefore.colorSpace || lifecycleContext.artboardCount !== lifecycleContextBefore.artboardCount) lifecycleVerifyMessage = "The reopened document differs from the saved one (color space or artboard count).";
           }
         }
@@ -880,7 +944,7 @@ export async function assertCanonicalDocumentPath(path) {
     catch (error) {
         throw new LifecyclePreconditionError('source_file_unavailable', `The document file could not be resolved: ${describeError(error)}`);
     }
-    if (real !== path)
+    if (!sameFilePath(real, path))
         throw new LifecyclePreconditionError('document_not_admitted', `The document path resolves through a symbolic link (${real}); in-place save requires the canonical path.`);
 }
 export function withApplication(document, application) {

@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from './command-id.js';
 import { canonicalSha256 } from './mutation-canonical.js';
-import { MUTATE_BATCH_ADAPTER_IDENTITY, MUTATE_BATCH_OPERATION, mutateBatchResponseSchema, mutateBatchToolContract, } from './adapters/mutate-batch-adapter.js';
+import { MUTATE_BATCH_ADAPTER_IDENTITY, MUTATE_BATCH_OPERATION, mutateBatchResponseSchema, mutateBatchRecipeInputSchema, mutateBatchRecipeResponseSchema, mutateBatchToolContract, } from './adapters/mutate-batch-adapter.js';
 import { bindRecipeInputs, buildRecipeBatchPlanRequest, recipeDefinitionSchema, recipeIdSchema, recipeInputValuesSchema, recipeVersionSchema, validateRecipeBindsStructurally, RECIPE_MAX_STEPS, RECIPE_MIN_STEPS, } from './recipe-schema.js';
 import { PUBLISHED_DEPTH_KEY } from './published-tool-schema.js';
 export const RECIPE_TOOL_VERSION = createRequire(import.meta.url)('../package.json').version;
@@ -59,8 +59,8 @@ export const planRecipeResultSchema = z.strictObject({
     tool_version: z.string().min(1),
     batch: z.strictObject({ operation: z.literal(MUTATE_BATCH_OPERATION), adapter_identity: hashSchema }),
     bound_inputs: z.record(z.string(), z.union([z.string(), z.number()])),
-    batch_request: mutateBatchToolContract.publicInputSchema,
-    plan: mutateBatchResponseSchema,
+    batch_request: mutateBatchRecipeInputSchema,
+    plan: mutateBatchRecipeResponseSchema,
 }).superRefine((result, context) => {
     if (result.batch_request.apply !== false || result.plan.outcome.applied !== false || result.plan.outcome.transaction.state !== 'planned') {
         context.addIssue({ code: 'custom', message: 'A recipe plan must be plan-only.' });
@@ -98,7 +98,7 @@ const approvedPlanSchema = planRecipeResultSchema.meta({
     description: 'The unchanged result of illustrator_plan_recipe for this recipe, inputs, and document.',
     [PUBLISHED_DEPTH_KEY]: 1,
 });
-const batchApplyRequestSchema = mutateBatchToolContract.publicInputSchema;
+const batchApplyRequestSchema = mutateBatchRecipeInputSchema;
 export const runRecipeResultSchema = z.strictObject({
     recipe_id: recipeIdSchema,
     recipe_version: recipeVersionSchema,
@@ -110,7 +110,7 @@ export const runRecipeResultSchema = z.strictObject({
     authority_state: z.enum(['closed_completed', 'closed_failed_pre_apply']),
     status: z.enum(['succeeded', 'recovered', 'failed']),
     batch_request: batchApplyRequestSchema,
-    batch: mutateBatchResponseSchema,
+    batch: mutateBatchRecipeResponseSchema,
 }).superRefine((result, context) => {
     if (result.batch_request.apply !== true || result.batch.delivery.mode !== 'original' && result.batch.delivery.mode !== 'replay') {
         context.addIssue({ code: 'custom', message: 'Recipe run must contain an apply batch request and a batch delivery.' });
@@ -323,7 +323,7 @@ export const recipeToolContracts = {
     plan: {
         name: 'illustrator_plan_recipe',
         title: 'Plan a Stored Illustrator Recipe',
-        description: 'Bind inputs to a stored recipe and plan the resulting illustrator_mutate_batch against the bound document: document-key validation, every step preflighted, nothing written. Unknown or missing inputs, type mismatches, a stale document key, and any step the batch rejects fail before or during planning. The result carries the recipe hash, tool version, batch adapter identity, bound inputs, the exact batch request, and the batch plan. Applying a recipe is not available in this slice.',
+        description: 'Bind typed inputs to a stored recipe and plan its document-bound batch without writes. Invalid inputs/key/steps refuse. Returns recipe hash, tool/adapter identity, inputs, exact request and plan; use run_recipe to apply an approved plan.',
         inputSchema: planRecipeInputSchema.shape,
         outputSchema: planRecipeResultSchema,
         annotations: READ_ONLY,
@@ -331,7 +331,7 @@ export const recipeToolContracts = {
     run: {
         name: 'illustrator_run_recipe',
         title: 'Run an Approved Declarative Illustrator Recipe',
-        description: 'Re-plan a stored declarative recipe, compare it to an explicit approved plan, then apply only the exact resulting illustrator_mutate_batch change set under the caller command_id. Recipe hash, inputs, document key, targets, before/after snapshots, and blockers must still match. The existing batch durable command remains the replay and reconciliation authority; arbitrary code, caller-supplied steps, and unapproved changes are rejected.',
+        description: 'Re-plan a stored recipe and CAS its approved hash/inputs/document/targets/snapshots/blockers before applying under command_id. Batch durable replay/reconcile remains authoritative. Arbitrary code/steps or unapproved changes refuse.',
         inputSchema: runRecipeInputSchema.shape,
         outputSchema: runRecipeResultSchema,
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },

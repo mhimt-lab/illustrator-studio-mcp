@@ -54,16 +54,8 @@ export function isClipImage(content) {
 }
 export const CLIPPING_IMAGE_CONTENT_SCRIPT = `
 function clipImageFind(document, uuid) {
-  var found = null, collections = [document.placedItems, document.rasterItems];
-  for (var c=0;c<collections.length;c++) {
-    var items=collections[c];
-    if (!items || typeof items.length!=="number") throw mutationError("preflight_failed","Image collection is unreadable.");
-    for (var i=0;i<items.length;i++) if (String(items[i].uuid)===uuid) {
-      if (found!==null) throw mutationError("preflight_failed","Image UUID is not unique.");
-      found=items[i];
-    }
-  }
-  return found;
+  var resolved = resolvePageItemDirect(document, uuid);
+  return resolved !== null && (resolved.typename === "PlacedItem" || resolved.typename === "RasterItem") ? resolved.item : null;
 }
 function clipIsImage(target) { return target.type === "PlacedItem" || target.type === "RasterItem"; }
 function clipImageNumber(value) {

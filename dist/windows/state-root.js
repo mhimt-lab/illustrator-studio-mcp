@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { dirname } from 'node:path';
 import { windowsPowerShellEnvironment } from './powershell-runner.js';
 const DISQUALIFYING_ATTRIBUTES = [
     ['ReparsePoint', 0x400],
@@ -7,13 +8,42 @@ const DISQUALIFYING_ATTRIBUTES = [
     ['Unpinned', 0x100000],
     ['RecallOnDataAccess', 0x400000],
 ];
+const DISQUALIFYING_ATTRIBUTE_MASK = DISQUALIFYING_ATTRIBUTES.reduce((mask, [, bit]) => mask | bit, 0);
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const FULL_CONTROL = 0x1f01ff;
 const CONTAINER_AND_OBJECT_INHERIT = 3;
 const SID = /^S-1-\d+(?:-\d+)+$/u;
+export const WINDOWS_STATE_ROOT_CHILD_OBSERVATION_SCRIPT = String.raw `
+function Get-StateRootChildFailure($failure) {
+  while ($null -ne $failure.InnerException -and
+      ($failure -is [Management.Automation.RuntimeException] -or $failure -is [Reflection.TargetInvocationException])) {
+    $failure = $failure.InnerException
+  }
+  return $failure
+}
+function Read-StateRootChild($child, $accessOnly) {
+  try {
+    $childAcl = $child.GetAccessControl($accessOnly)
+    $attributes = [int64][IO.File]::GetAttributes($child.FullName)
+  } catch {
+    $failure = Get-StateRootChildFailure $_.Exception
+    if (-not ($failure -is [IO.FileNotFoundException] -or $failure -is [IO.DirectoryNotFoundException])) { throw }
+    try { $null = [IO.File]::GetAttributes($child.FullName) }
+    catch {
+      $recheck = Get-StateRootChildFailure $_.Exception
+      if ($recheck -is [IO.FileNotFoundException] -or $recheck -is [IO.DirectoryNotFoundException]) { return $null }
+      throw
+    }
+    # The name still exists: preserve the original failure, including a replacement race.
+    throw $failure
+  }
+  return [pscustomobject]@{ acl = $childAcl; attributes = $attributes }
+}
+`;
 const SCRIPT = String.raw `
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+${WINDOWS_STATE_ROOT_CHILD_OBSERVATION_SCRIPT}
 $mode = [string]$env:ISM_STATE_ROOT_MODE
 $root = [string]$env:ISM_STATE_ROOT_PATH
 $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -45,13 +75,16 @@ while ($pending.Count -gt 0) {
   $directory = $pending.Pop()
   foreach ($child in $directory.EnumerateFileSystemInfos()) {
     $entryCount++
-    $childAcl = $child.GetAccessControl($accessOnly)
+    $observed = Read-StateRootChild $child $accessOnly
+    if ($null -eq $observed) { continue }
+    $childAcl = $observed.acl
+    $attributes = $observed.attributes
     $explicit = $childAcl.GetAccessRules($true, $false, $sidType).Count
     # Only candidates are reported (own ACL, or reparse / cloud bits); the caller judges them again.
-    if ($childAcl.AreAccessRulesProtected -or $explicit -ne 0 -or ([int64]$child.Attributes -band 0x5C0400) -ne 0) {
-      $entries.Add([pscustomobject]@{ path = $child.FullName; attributes = [int64]$child.Attributes; protected = [bool]$childAcl.AreAccessRulesProtected; explicitRules = $explicit })
+    if ($childAcl.AreAccessRulesProtected -or $explicit -ne 0 -or ($attributes -band ${DISQUALIFYING_ATTRIBUTE_MASK}) -ne 0) {
+      $entries.Add([pscustomobject]@{ path = $child.FullName; attributes = $attributes; protected = [bool]$childAcl.AreAccessRulesProtected; explicitRules = $explicit })
     }
-    if (($child.Attributes -band [IO.FileAttributes]::Directory) -and -not ($child.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $pending.Push($child) }
+    if (($attributes -band [IO.FileAttributes]::Directory) -and -not ($attributes -band [IO.FileAttributes]::ReparsePoint)) { $pending.Push($child) }
   }
 }
 $drive = New-Object System.IO.DriveInfo($item.Root.FullName)
@@ -136,8 +169,58 @@ export function parseWindowsStateRootObservation(output) {
         driveType: value.driveType,
     };
 }
-function disqualifyingAttributes(attributes) {
+export function disqualifyingAttributes(attributes) {
     return DISQUALIFYING_ATTRIBUTES.filter(([, bit]) => (attributes & bit) !== 0).map(([name]) => name);
+}
+export async function assertWindowsPathAttributes(path) {
+    const script = String.raw `
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$items = @()
+$cursor = Get-Item -LiteralPath $env:ISM_PRIVATE_IMAGE_PATH -Force
+while ($null -ne $cursor) {
+  $items += [pscustomobject]@{ path = $cursor.FullName; attributes = [int64]$cursor.Attributes }
+  if ($cursor -is [IO.FileInfo]) { $cursor = $cursor.Directory } else { $cursor = $cursor.Parent }
+}
+ConvertTo-Json -Compress -InputObject $items
+`;
+    const systemRoot = process.env.SystemRoot;
+    if (!systemRoot)
+        throw new Error('SystemRoot is not set; image attributes cannot be observed.');
+    const output = await new Promise((resolve, reject) => {
+        execFile(`${systemRoot.replace(/\\+$/u, '')}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { env: { ...windowsPowerShellEnvironment(process.env), ISM_PRIVATE_IMAGE_PATH: path },
+            windowsHide: true, timeout: 15_000, maxBuffer: 64 * 1024, encoding: 'utf8' }, (error, stdout) => {
+            if (error)
+                reject(Object.assign(new Error('Private image attributes could not be observed.'), { code: error.killed ? 'ETIMEDOUT' : error.code, signal: error.signal, killed: error.killed }));
+            else
+                resolve(stdout);
+        });
+    });
+    let values;
+    try {
+        values = JSON.parse(output);
+    }
+    catch {
+        throw new Error('Image attribute observation is not valid JSON.');
+    }
+    const expected = [];
+    for (let component = path;; component = dirname(component)) {
+        expected.push(component);
+        if (dirname(component) === component)
+            break;
+    }
+    if (!Array.isArray(values) || values.length !== expected.length)
+        throw new Error('Image attribute components are incomplete.');
+    for (let index = 0; index < expected.length; index++) {
+        const value = values[index];
+        if (!isRecord(value) || typeof value.path !== 'string' || value.path.toLowerCase() !== expected[index].toLowerCase() ||
+            !isInteger(value.attributes) || value.attributes < 0 || value.attributes > 0xffffffff) {
+            throw new Error('Image attribute observation is unrecognized.');
+        }
+        if (disqualifyingAttributes(value.attributes).length > 0) {
+            throw Object.assign(new Error('Private image path has reparse or cloud attributes.'), { code: 'ELOOP' });
+        }
+    }
 }
 export function judgeWindowsStateRootObservation(observation) {
     const reasons = [];

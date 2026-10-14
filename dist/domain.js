@@ -112,6 +112,26 @@ export class HostReferenceInvalidError extends Error {
         this.name = 'HostReferenceInvalidError';
     }
 }
+export class ReadScanLimitError extends Error {
+    code;
+    constructor(code, message) {
+        super(message);
+        this.code = code;
+        this.name = 'ReadScanLimitError';
+    }
+}
+export class ObjectAttributeUnreadableError extends Error {
+    attribute;
+    hostErrorNumber;
+    code = 'OBJECT_ATTRIBUTE_UNREADABLE';
+    constructor(attribute, hostErrorNumber) {
+        super(`Illustrator could not read "${attribute}"${hostErrorNumber === null ? '' : ` (error ${hostErrorNumber})`} of this object, so it cannot be described. ` +
+            'Nothing was changed. Do not treat the object as absent or skip it silently: tell the user which object could not be read.');
+        this.attribute = attribute;
+        this.hostErrorNumber = hostErrorNumber;
+        this.name = 'ObjectAttributeUnreadableError';
+    }
+}
 export class ObjectNotFoundError extends Error {
     constructor(uuid) {
         super(`No PageItem with UUID ${JSON.stringify(uuid)} exists in the bound document.`);

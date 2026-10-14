@@ -1,3 +1,4 @@
+import { HOST_FILE_PATH_HELPERS } from '../file-path.js';
 import { hostVersionPublicFields, hostVersionInternalFields, normalizeHostVersionConsent } from '../host-version-consent.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -339,7 +340,8 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
         throw new Error('Delete terminal result requires attestation.');
     await assertOperationSafetyAdapterConformance({ registration: DELETE_OBJECTS_SAFETY, plan, result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
-export const DELETE_OBJECTS_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
+export const DELETE_OBJECTS_SCRIPT = `${HOST_FILE_PATH_HELPERS}
+${MUTATION_TRANSACTION_SCRIPT}
 ${SUPPORTED_PATH_ITEM_HOST_SCRIPT}
 ${DELETE_TARGET_LOOKUP_SCRIPT}
 var DELETE_MEASURED_MAX_TARGETS = ${DELETE_MEASURED_MAX_TARGETS};
@@ -377,15 +379,16 @@ function deleteShapeSupported(item, typename) {
 
 function deleteAnalyze(document, context, forApply) {
   var blockers = [];
-  function block(code, uuid, message) { blockers.push({ code: code, uuid: uuid, message: message }); }
+  // #730: a blocker message is at most 500 characters (blockerSchema); the full reason stays in document.mutationBlockedReason.
+  function block(code, uuid, message) { blockers.push({ code: code, uuid: uuid, message: mutationTruncateMessage(message) }); }
   if (!params.targetUuids || !(params.targetUuids instanceof Array) || params.targetUuids.length === 0 || params.targetUuids.length > DELETE_TARGET_LIST_MAX) {
     throw mutationError("preflight_failed", "target_uuids must list 1-" + DELETE_TARGET_LIST_MAX + " UUIDs.");
   }
   if (!params.backup || typeof params.backup.sourcePath !== "string" || typeof params.backup.sourceFileRevision !== "string") {
     throw mutationError("preflight_failed", "The backup was not admitted; call through the MCP server.");
   }
-  if (!context.mutationAllowed) block("document_not_saved", null, "Only a clean saved_file document can be deleted from: " + String(context.mutationBlockedReason));
-  if (context.path !== params.backup.sourcePath) block("backup_mismatch", null, "Backup " + params.backup.backupId + " was taken from " + params.backup.sourcePath + ", not from " + String(context.path) + ".");
+  if (!context.mutationAllowed) block("document_not_saved", null, "Only a clean saved_file document can be deleted from (full reason in document.mutationBlockedReason): " + String(context.mutationBlockedReason));
+  if (!hostFilePathMatches(context.path, params.backup.sourcePath)) block("backup_mismatch", null, "Backup " + params.backup.backupId + " was taken from " + params.backup.sourcePath + ", not from " + String(context.path) + ".");
   else if (context.fileRevision !== params.backup.sourceFileRevision) block("backup_stale", null, "The document reports file revision " + String(context.fileRevision) + "; backup " + params.backup.backupId + " recorded " + params.backup.sourceFileRevision + ".");
   if (!hostVersionAdmitted("delete_objects", String(app.version))) {
     var deleteHostVersion = hostVersionEvaluate("delete_objects", String(app.version));
@@ -629,7 +632,7 @@ async function beforeHost(input, services) {
 export const deleteObjectsToolContract = {
     name: 'illustrator_delete_objects',
     title: 'Plan or Delete Objects',
-    description: `Plan or delete page items by native UUID, bound to a document key and a verified backup (illustrator_create_backup of the current file). Measured scope only (Illustrator ${describeHostVersionScope('delete_objects')}, foreground, unlocked): exactly ${DELETE_MEASURED_MAX_TARGETS} target per call; a clean saved document whose file still matches the backup; a layer-direct PathItem or point TextFrame, a GroupItem whose descendants are only PathItem, point TextFrame, and GroupItem, or a PathItem inside a group that keeps another child. Refused (nothing is deleted): unsaved or dirty documents, backup mismatch or staleness, PlacedItem, CompoundPathItem, clipping groups, other types, a TextFrame or group inside a group, a group's last child, locked or hidden items, groups, or layers, locked or hidden descendants, overlapping targets, more than ${DELETE_MAX_REMOVED_ITEMS} removed items, and other Illustrator versions. The plan lists every item that disappears (targets and descendants), removedCount, and targetSetHash; apply echoes confirm_target_set_hash and confirm_removed_count, recomputes both in the same host call, and deletes nothing unless they match. Success is verified absence: every removed UUID fails lookup, each parent keeps its other children in order, and the page-item count falls by removedCount. The document is then unsaved; save it with illustrator_save_document and the same backup_id. There is no in-call undo: a timeout or failure after the first removal is indeterminate and keeps the Illustrator lock (illustrator_reconcile cannot abandon it). The lock is released only by illustrator_reconcile with action=release_unverified (command_id and an identical confirm_command_id, once inspect reports canReleaseUnverified); after that release, illustrator_reconcile_delete inspects and, if needed, reopens the unchanged file.`,
+    description: `Plan or delete page items by native UUID, bound to a document key and a verified backup (illustrator_create_backup of the current file). Measured scope only (Illustrator ${describeHostVersionScope('delete_objects')}, foreground, unlocked): exactly ${DELETE_MEASURED_MAX_TARGETS} target per call; a clean saved document whose file still matches the backup; a layer-direct PathItem or point TextFrame, a GroupItem whose descendants are only PathItem, point TextFrame, and GroupItem, or a PathItem inside a group that keeps another child. Refused (nothing is deleted): unsaved or dirty documents, backup mismatch or staleness, PlacedItem, CompoundPathItem, clipping groups, other types, a TextFrame or group inside a group, a group's last child, locked or hidden items, groups, or layers, locked or hidden descendants, overlapping targets, more than ${DELETE_MAX_REMOVED_ITEMS} removed items, and blocked or unreadable Illustrator versions. The plan lists every item that disappears (targets and descendants), removedCount, and targetSetHash; apply echoes confirm_target_set_hash and confirm_removed_count, recomputes both in the same host call, and deletes nothing unless they match. Success is verified absence: every removed UUID fails lookup, each parent keeps its other children in order, and the page-item count falls by removedCount. The document is then unsaved; save it with illustrator_save_document and the same backup_id. There is no in-call undo: a timeout or failure after the first removal is indeterminate and keeps the Illustrator lock (illustrator_reconcile cannot abandon it). The lock is released only by illustrator_reconcile with action=release_unverified (command_id and an identical confirm_command_id, once inspect reports canReleaseUnverified); after that release, illustrator_reconcile_delete inspects and, if needed, reopens the unchanged file.`,
     inputSchema,
     publicInputSchema: deleteObjectsPublicInputSchema,
     outputSchema: deleteObjectsResponseSchema,

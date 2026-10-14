@@ -16,6 +16,7 @@ import { createAlignObjectsAdapter } from './adapters/align-objects-adapter.js';
 import { createSetStackingOrderAdapter } from './adapters/set-stacking-order-adapter.js';
 import { createPointTextAdapter } from './adapters/create-point-text-adapter.js';
 import { createAreaTextAdapter } from './adapters/create-area-text-adapter.js';
+import { createReplaceAreaTextRangeAdapter } from './adapters/replace-area-text-range-adapter.js';
 import { createReplaceTextRangeAdapter } from './adapters/replace-text-range-adapter.js';
 import { createSetTextStyleAdapter } from './adapters/set-text-style-adapter.js';
 import { createSetTextOrientationAdapter } from './adapters/set-text-orientation-adapter.js';
@@ -29,10 +30,13 @@ import { createRelinkImageAdapter } from './adapters/relink-image-adapter.js';
 import { createEmbedImageAdapter } from './adapters/embed-image-adapter.js';
 import { createSetObjectStateAdapter } from './adapters/set-object-state-adapter.js';
 import { createCreateLayerAdapter } from './adapters/create-layer-adapter.js';
+import { createCreateBarcodeAdapter } from './adapters/create-barcode-adapter.js';
 import { createCreateTrimMarksAdapter } from './adapters/create-trim-marks-adapter.js';
+import { createCreateQrCodeAdapter } from './adapters/create-qr-code-adapter.js';
 import { createSetLayerStateAdapter } from './adapters/set-layer-state-adapter.js';
 import { createReorderLayerAdapter } from './adapters/reorder-layer-adapter.js';
 import { createEditPathPointsAdapter } from './adapters/edit-path-points-adapter.js';
+import { createTransformPathAnchorsAdapter } from './adapters/transform-path-anchors-adapter.js';
 import { createCreateClippingMaskAdapter } from './adapters/create-clipping-mask-adapter.js';
 import { createReleaseClippingMaskAdapter } from './adapters/release-clipping-mask-adapter.js';
 import { createMakeCompoundPathAdapter } from './adapters/make-compound-path-adapter.js';
@@ -40,6 +44,7 @@ import { createSetAreaTextColumnsAdapter } from './adapters/set-area-text-column
 import { createApplyPathfinderAdapter } from './adapters/apply-pathfinder-adapter.js';
 import { createDeleteObjectsAdapter } from './adapters/delete-objects-adapter.js';
 import { createImportVectorArtworkAdapter } from './adapters/import-vector-artwork-adapter.js';
+import { createSetStrokeStyleAdapter } from './adapters/set-stroke-style-adapter.js';
 export function createCanonicalMutationOperationRegistry() {
     return new MutationOperationAdapterRegistry()
         .register(createUpdateArtboardAdapter())
@@ -54,6 +59,7 @@ export function createCanonicalMutationOperationRegistry() {
         .register(createPointTextAdapter())
         .register(createAreaTextAdapter())
         .register(createReplaceTextRangeAdapter())
+        .register(createReplaceAreaTextRangeAdapter())
         .register(createSetTextStyleAdapter())
         .register(createSetTextOrientationAdapter())
         .register(createSetNoBreakAdapter())
@@ -75,6 +81,7 @@ export function createCanonicalMutationOperationRegistry() {
         .register(createSetLayerStateAdapter())
         .register(createReorderLayerAdapter())
         .register(createEditPathPointsAdapter())
+        .register(createTransformPathAnchorsAdapter())
         .register(createCreateClippingMaskAdapter())
         .register(createReleaseClippingMaskAdapter())
         .register(createMakeCompoundPathAdapter())
@@ -83,6 +90,9 @@ export function createCanonicalMutationOperationRegistry() {
         .register(createDeleteObjectsAdapter())
         .register(createImportVectorArtworkAdapter())
         .register(createCreateTrimMarksAdapter())
+        .register(createCreateBarcodeAdapter())
+        .register(createCreateQrCodeAdapter())
+        .register(createSetStrokeStyleAdapter())
         .seal();
 }
 export function defaultMutationOperationRegistry() {

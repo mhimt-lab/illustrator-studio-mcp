@@ -4,6 +4,7 @@ import { link, lstat, open, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { z } from 'zod';
+import { summarizeValidationFailure } from './tool-arguments.js';
 import { canonicalCommandIdSchema } from './command-id.js';
 import { canonicalSha256 } from './mutation-canonical.js';
 import { boundAppearancePreviewResultSchema, pathAppearanceMutationSchema, pathAppearanceStateSchema, } from './adapters/set-path-appearance-adapter.js';
@@ -457,7 +458,8 @@ function canonicalValue(value) {
 function failureResult(error, failedStep, audit, publicationPlan, input, executionDigest, authorityState, appearanceEvidence, preApplyFailure = false, preApplyCommandId = null) {
     const indeterminate = !preApplyFailure || error instanceof IndeterminateExecutionError ||
         hasCode(error, 'PUBLICATION_INDETERMINATE');
-    const message = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+    const message = (error instanceof z.ZodError ? `Validation failed: ${summarizeValidationFailure(error)}`
+        : error instanceof Error ? error.message : String(error)).slice(0, 500);
     const reasonCode = typeof error === 'object' && error !== null && 'code' in error &&
         typeof error.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(error.code)
         ? error.code

@@ -1,33 +1,43 @@
+import { DIRTY_FILE_ADMISSION_OPERATIONS, SaveBarrierRefusedError, buildDirtyFileAdmission, saveBarrierRefusal } from './dirty-file-admission.js';
+import { assertSameFilePathIdentity, matchingDocumentPaths, proveSaveSessionIdentity, withFilePathComparisons } from './file-path-identity.js';
 import { lstat, open, readdir, realpath, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { CursorSigner } from './cursor.js';
 import { documentKeyMatches } from './document-key.js';
 import { OperationSafetyRegistry } from './operation-safety-policy-core.js';
 import { DeleteBackupError, verifyDeleteBackup } from './delete-shared.js';
 import { DELETE_INSPECT_SCRIPT, DELETE_REVERT_SCRIPT, reconcileDeleteResultSchema, } from './delete-recovery.js';
 import { canonicalSha256 } from './mutation-canonical.js';
-import { DocumentMismatchError, hostReferenceInvalidDetail, hostReferenceInvalidReason, IndeterminateExecutionError, InvalidCursorError, ObjectNotFoundError, ProvenPreApplyFailureError, StaleCursorError, } from './domain.js';
+import { OBJECT_WALK_HELPERS, OBJECT_WITNESS_HELPERS, READ_PAGE_ITEM_AT_HELPER } from './page-item-walk.js';
+import { DocumentMismatchError, hostReferenceInvalidDetail, hostReferenceInvalidReason, IndeterminateExecutionError, InvalidCursorError, ObjectAttributeUnreadableError, ObjectNotFoundError, ReadScanLimitError, ProvenPreApplyFailureError, StaleCursorError, } from './domain.js';
 import { defaultMutationOperationRegistry } from './default-mutation-operation-adapters.js';
 import { LIST_TEXT_STYLES_SCRIPT } from './text-style-resources.js';
-import { FIND_FONTS_SCRIPT, fontLookupInputSchema, fontLookupResultSchema } from './font-lookup.js';
+import { FIND_FONTS_QUERY_BYTE_LIMIT, FIND_FONTS_QUERY_SCRIPT, FIND_FONTS_SCRIPT, FONT_SEARCH_PAGE_SIZE, fontCursorSchema, fontLookupInputSchema, fontLookupResultSchema, fontQueryHostResultSchema, fontQueryNeedles, fontQuerySchema, fontSearchResultSchema, selectFontSearchPage } from './font-lookup.js';
 import { SystemFontVerifier } from './font-verification.js';
+import { CAPTURE_CLEAN_FONT_INVENTORY_SCRIPT, IllustratorFontInventory } from './illustrator-font-inventory.js';
 import { areaColumnsErrorMessage, GET_AREA_TEXT_OPTIONS_SCRIPT, getAreaTextOptionsResultSchema, } from './area-text-options.js';
 import { GET_PATH_POINTS_SCRIPT, getPathPointsResultSchema, pathEditErrorMessage } from './path-points.js';
-import { AUDIT_JAPANESE_TYPOGRAPHY_SCRIPT, judgeJapaneseTypography, jpAuditErrorMessage, jpAuditHostDataSchema, } from './jp-typography-audit.js';
+import { AUDIT_JAPANESE_TYPOGRAPHY_SCRIPT, judgeJapaneseTypography, jpAuditErrorMessage, jpAuditHostDataSchema, jpAuditPolicyError, } from './jp-typography-audit.js';
 import { executeM6P0AppearancePreviewRecipe, m6P0RecipeResultSchema, } from './m6-p0-recipe.js';
 import { defaultStateRoot } from './command-store.js';
-import { BACKUP_CLOSE_RESTORE_TEST_SCRIPT, BACKUP_INVENTORY_SCRIPT, BACKUP_MAX_PAGE_ITEMS, BACKUP_OPEN_PRE_ATTEMPT_CODES, BACKUP_OPEN_RESTORE_TEST_SCRIPT, BACKUP_RECONCILE_CLOSE_SCRIPT, backupFileName, BackupCopyError, BackupPreconditionError, BackupRecordError, BackupSessionGoneError, BackupSessionUnresolvedError, compareRestoredStructure, EMPTY_COMPOUND_DROPPED_ON_SAVE, explainRestoredStructure, copyErrorCreatedDestination, copyFileExclusive, deepDifferences, DocumentBackupStore, inspectSourceFile, newBackupId, removeRestoreTestFile, resolveBackupRoot, restoreTestFileName, sameFileOrSameBytes, serializeFileIdentity, verifyTrackedFile, withBackupRootScope, BACKUP_REQUIRES_SAVED_FILE_MESSAGE, } from './document-backup.js';
-import { assertOutputAbsent, closeRefusalReason, createStagingDirectory, DocumentExportStore, EXPORT_CLOSE_REFUSED_CODE, EXPORT_CLOSE_WORK_COPY_SCRIPT, EXPORT_HOST_TIMEOUT_MS, EXPORT_INVENTORY_SCRIPT, EXPORT_OPEN_PRE_ATTEMPT_CODES, EXPORT_OPEN_WORK_COPY_SCRIPT, hostRecordIdentityOf, EXPORT_OUTLINE_SCRIPT, EXPORT_READ_SOURCE_SCRIPT, EXPORT_RECONCILE_CLOSE_SCRIPT, EXPORT_SAVE_FAILED_CODE, EXPORT_SAVE_OUTPUT_SCRIPT, EXPORT_SAVE_PRE_ATTEMPT_CODES, ExportPreconditionError, ExportSessionGoneError, ExportSessionUnresolvedError, newExportId, OutputPublishError, OutputVerificationError, parseExportHostError, publishOutput, scanPdfObjects, validateOutputPath, verifyOutputFile, verifyOutputUnchanged, withOutputParentScope, workCopyFileName, EXPORT_REQUIRES_SAVED_FILE_MESSAGE, } from './document-export.js';
+import { BACKUP_CLOSE_RESTORE_TEST_SCRIPT, BACKUP_CAPTURE_BASELINE_JSX, backupBaselineHostDataSchema, backupSessionSchema, documentsOutsideBackupBaseline, hostDocumentIdentitySchema, BACKUP_INVENTORY_SCRIPT, BACKUP_MAX_PAGE_ITEMS, BACKUP_STREAM_MAX_PAGE_ITEMS, LARGE_DOCUMENT_WORKAROUND, backupTooLargeMessage, BACKUP_OPEN_PRE_ATTEMPT_CODES, BACKUP_OPEN_RESTORE_TEST_SCRIPT, BACKUP_RECONCILE_CLOSE_SCRIPT, backupFileName, BackupCopyError, BackupPreconditionError, BackupRecordError, BackupSessionGoneError, BackupSessionUnresolvedError, BackupSessionCapacityError, compareRestoredStructure, EMPTY_COMPOUND_DROPPED_ON_SAVE, explainRestoredStructure, copyErrorCreatedDestination, copyFileExclusive, deepDifferences, DocumentBackupStore, hostPathForms, inspectSourceFile, newBackupId, removeRestoreTestFile, resolveBackupRoot, restoreTestFileName, sameFileOrSameBytes, sameFilePath, serializeFileIdentity, verifyTrackedFile, withBackupRootScope, BACKUP_REQUIRES_SAVED_FILE_MESSAGE, } from './document-backup.js';
+import { assertOutputAbsent, closeRefusalReason, createStagingDirectory, DocumentExportStore, EXPORT_CLOSE_REFUSED_CODE, EXPORT_CLOSE_WORK_COPY_SCRIPT, EXPORT_HOST_TIMEOUT_MS, EXPORT_INVENTORY_SCRIPT, EXPORT_OPEN_PRE_ATTEMPT_CODES, EXPORT_OPEN_WORK_COPY_SCRIPT, hostRecordIdentityOf, EXPORT_OUTLINE_SCRIPT, EXPORT_READ_SOURCE_SCRIPT, EXPORT_REGISTRATION_SCAN_LIMITS, EXPORT_RECONCILE_CLOSE_SCRIPT, EXPORT_SAVE_FAILED_CODE, EXPORT_SAVE_OUTPUT_SCRIPT, EXPORT_SAVE_PRE_ATTEMPT_CODES, ExportPreconditionError, ExportSessionGoneError, ExportSessionUnresolvedError, newExportId, OutputPublishError, OutputVerificationError, parseExportHostError, publishOutput, scanPdfObjects, validateOutputPath, verifyOutputFile, verifyOutputUnchanged, withOutputParentScope, workCopyFileName, EXPORT_REQUIRES_SAVED_FILE_MESSAGE, } from './document-export.js';
 import { LeaseGuard, UnresolvedLeaseError } from './lease-guard.js';
-import { PDF_EXPORT_SAVE_PRE_ATTEMPT_CODES, PDF_EXPORT_SAVE_SCRIPT, pdfFacts, pdfSaveParams, planPdfExport, presetReport, verifyPdfStructure, } from './pdf-export.js';
+import { marksNeedRegistrationScan, PDF_EXPORT_SAVE_PRE_ATTEMPT_CODES, PDF_EXPORT_SAVE_PRESERVE_SCRIPT, PDF_EXPORT_SAVE_SCRIPT, pdfFacts, pdfSaveParams, preserveEditabilityOptions, PDFX_FONT_SCAN_FRAME_LIMIT, pdfxFontRefusal, pdfxReport, planPdfExport, normalizePdfBleed, presetReport, registrationScanWarnings, verifyPdfStructure, } from './pdf-export.js';
 import { SaveAsLeaseChangedError, SaveAsLeaseNotRecordedError, SaveAsLeaseRegistry, SaveAsSessionStore, UF_HIDDEN, newSaveAsId, syncDirectoryOf, syncFile } from './save-as-session.js';
 import { isMissingPath } from './private-state.js';
 import { classifySaveAs, collectSaveAsFacts, outputHiddenOf, outputIsDataless } from './save-as-reconcile.js';
-import { RasterExportOperation, RasterExportReconciler, rasterQuarantinePaths, } from './raster-export.js';
+import { RasterExportOperation, RasterExportReconciler, rasterExportInputSchema, rasterQuarantinePaths, } from './raster-export.js';
+import { RasterBatchExportOperation, isBatchExportId, isBatchInput, rasterBatchInputSchema } from './raster-batch-export.js';
+import { RasterBatchExportReconciler } from './raster-batch-export-reconcile.js';
 import { EditSessionStore } from './edit-session.js';
 import { EditSessionCoordinator } from './edit-session-coordinator.js';
-import { EDIT_SESSION_FOREGROUND_HINT, EDIT_SESSION_OPEN_SCRIPT, editSessionRefusal, editSessionSnapshotSchema, listEditSessionsResult, summarizeEditSession, } from './edit-session-tools.js';
+import { EDIT_SESSION_FOREGROUND_HINT, EDIT_SESSION_RESTART_HINT, EDIT_SESSION_OPEN_SCRIPT, editSessionRefusal, editSessionScanIncompleteMessage, saveSessionSuspension, editSessionTooLargeNote, listEditSessionsResult, summarizeEditSession, } from './edit-session-tools.js';
+import { NOT_SAVED_FILE_SESSION_HINT, USER_SAVED_SESSION_HINT } from './unsaved-document-guidance.js';
 import { EDIT_SESSION_MAX_ITEMS, EDIT_SESSION_SCAN_DEADLINE_MS } from './edit-session.js';
+import { chunkedAggregateText, editSessionChunkSchema, EditSessionNotSavedFileError, EditSessionOpenScans, EditSessionScanError, EDIT_SESSION_CHUNKED_MAX_ITEMS, EDIT_SESSION_CHUNKED_MAX_TOTAL_MS, EDIT_SESSION_CHUNK_TIMEOUT_MS, EDIT_SESSION_SCAN_MARGIN_MS, editSessionScanTiming, readEditSessionScanIdentity, } from './edit-session-chunked-scan.js';
+import { readStructureStream, StructureSpool, StructureStreamError } from './structure-stream.js';
 import { assertCanonicalDocumentPath, CLOSE_DOCUMENT_SCRIPT, fileRevisionSize, LIFECYCLE_HOST_TIMEOUT_MS, LIFECYCLE_READ_SCRIPT, LifecyclePreconditionError, linkStagedToOutput, OPEN_DOCUMENT_SCRIPT, OutputLinkError, readFileFacts, removeStagedFile, SAVE_AS_STAGING_PREFIX, SAVE_AS_SWITCH_SCRIPT, SAVE_AS_INVENTORY_SCRIPT, sameContentIdentity, SAVE_DOCUMENT_AS_SCRIPT, SAVE_DOCUMENT_SCRIPT, serializeFileFacts, validateOpenPath, withApplication, } from './document-lifecycle.js';
 import { CREATE_DOCUMENT_HOST_TIMEOUT_MS, CREATE_DOCUMENT_SCRIPT, } from './document-create.js';
 import { M6P0RecipeAuthorityStore } from './m6-p0-recipe-store.js';
@@ -37,32 +47,35 @@ import { RecipeStore } from './recipe-store.js';
 import { SipsImageFileInspector } from './image-file-inspector.js';
 import { createImagePreflightItem, ImageObjectRequiredError, } from './image-preflight.js';
 import { createPrintPreflightResult, PRINT_PREFLIGHT_LIMITS, } from './print-preflight.js';
+import { PREFLIGHT_SCOPE_NOTE } from './preflight-scope-note.js';
 import { computeStructureDiff, pageStructureDiff, assertStructurePagePlan, STRUCTURE_PAGE_LIMITS, STRUCTURE_SNAPSHOT_LIMITS, StructureDiffStore, StructureSnapshotChangedError, StructureSnapshotPagePlanError, StructureSnapshotStore, StructureSnapshotTooLargeError, summarizeStructureSnapshot, validateStructureDiffCursor, } from './structure-diff.js';
 import { checkTextConsistency, computeContrastPairs, contrastAutoDetectUnsupportedProfile, createDesignTokens, DESIGN_ANALYSIS_LIMITS, detectContrastOverlaps, } from './design-analysis.js';
 import { assertConsistentColorRead, buildReplacementPlanEntries, colorReplacementSnapshotDigest, findColorUsages, validateColorMatch, } from './color-replacement.js';
 import { OsascriptHostProfileProbe } from './host-profile.js';
 import { capturePreview } from './document-preview.js';
+import { renderArtboards, RenderSetStore } from './artboard-render.js';
+import { extractText } from './text-extract.js';
+import { decodeBarcodeRaster } from './barcode/raster-decode.js';
+import { decodeQrRaster } from './qr/raster-decode.js';
+import { analyzeDisplaySpacing } from './display-spacing.js';
 import { classifyRasters, IMAGE_OPTIMIZE_BASELINE_CODES, IMAGE_OPTIMIZE_BASELINE_SCRIPT, IMAGE_OPTIMIZE_GEOMETRY_TOLERANCE_PT, IMAGE_OPTIMIZE_CLOSE_WORK_COPY_SCRIPT, assertRenderBaseName, IMAGE_OPTIMIZE_HOST_TIMEOUT_MS, IMAGE_OPTIMIZE_ICC_NOTE, IMAGE_OPTIMIZE_MAX_SCANNED_IMAGES, IMAGE_OPTIMIZE_MAX_TARGETS, IMAGE_OPTIMIZE_QUALITY_CONTRACT, IMAGE_OPTIMIZE_RASTERIZE_SCRIPT, IMAGE_OPTIMIZE_READ_SOURCE_SCRIPT, IMAGE_OPTIMIZE_VERSION_GUARD, IMAGE_OPTIMIZE_RENDER_MAX_PIXELS, IMAGE_OPTIMIZE_SAVE_FAILED_CODE, IMAGE_OPTIMIZE_SAVE_PRE_ATTEMPT_CODES, IMAGE_OPTIMIZE_SAVE_SCRIPT, imageOptimizeSaveOptions, renderGeometry, renderQualityProblem, verifyTargetResult, workCopyDifferences, } from './image-optimize.js';
-import { comparePngImages } from './visual-diff.js';
-import { HOST_VERSION_PATTERN, HOST_VERSION_POLICY_JSX, evaluateHostVersion, hostVersionAdmitted } from './host-version-policy.js';
+import { comparePngImages, readStableImage } from './visual-diff.js';
+import { ImageOptimizeEvidenceError, retainImageOptimizeEvidence } from './image-optimize-evidence.js';
+import { HOST_VERSION_POLICY_JSX, evaluateHostVersion, hostVersionAdmitted } from './host-version-policy.js';
 import { admitHostVersionPlan, HostVersionChannelRefusedError } from './host-version-admission.js';
 import { directoryFlags } from './platform-primitives.js';
+import { ARTBOARD_INTEGER_TOLERANCE } from './artboard-integer.js';
+import { ZodError } from 'zod';
+import { describeUnreadableTextReads } from './unreadable-text-reads.js';
+import { formatToolArgumentError, summarizeValidationFailure, toolArgumentIssueMessage } from './tool-arguments.js';
 const GET_CONTEXT_SCRIPT = `var result = getDocumentContext();`;
 function isMeasuredLineHeightProfile(observation, appVersion) {
     return hostVersionAdmitted('line_height_read', appVersion) && observation.profile === 'foreground' &&
         observation.lockState === 'unlocked' && observation.expectedBundleId !== null &&
         observation.frontmostBundleId === observation.expectedBundleId;
 }
-const OBJECT_READ_HELPERS = `
-// An invalid reference while reading one item fails the whole read with its route and index; it is never skipped.
-function readPageItemAt(route, index, read) {
-  try { return read(); }
-  catch (readError) {
-    if (!isHostReferenceInvalidError(readError)) throw readError;
-    throw new Error(hostReferenceInvalidMessage({ route: route, index: index, hostError: hostErrorEvidence(readError) }));
-  }
-}
-
+export { OBJECT_WALK_HELPERS, OBJECT_WITNESS_HELPERS };
+export const OBJECT_READ_HELPERS = `${READ_PAGE_ITEM_AT_HELPER}
 function getLayerPath(doc, targetLayer) {
   var path = [];
   var current = targetLayer;
@@ -87,12 +100,14 @@ function sameNumberArray(left, right) {
 
 function boundsMatch(itemBounds, filterBounds, mode) {
   if (filterBounds === null) return true;
+  // An edge that sits on the filter edge within the integer tolerance is on it (an artboard edge carries host float noise).
+  var slack = ${ARTBOARD_INTEGER_TOLERANCE};
   if (mode === "contained") {
-    return itemBounds[0] >= filterBounds[0] && itemBounds[1] <= filterBounds[1] &&
-      itemBounds[2] <= filterBounds[2] && itemBounds[3] >= filterBounds[3];
+    return itemBounds[0] >= filterBounds[0] - slack && itemBounds[1] <= filterBounds[1] + slack &&
+      itemBounds[2] <= filterBounds[2] + slack && itemBounds[3] >= filterBounds[3] - slack;
   }
-  return itemBounds[0] <= filterBounds[2] && itemBounds[2] >= filterBounds[0] &&
-    itemBounds[1] >= filterBounds[3] && itemBounds[3] <= filterBounds[1];
+  return itemBounds[0] <= filterBounds[2] + slack && itemBounds[2] >= filterBounds[0] - slack &&
+    itemBounds[1] >= filterBounds[3] - slack && itemBounds[3] <= filterBounds[1] + slack;
 }
 
 function summarizePageItem(item, layerPath, bounds) {
@@ -105,16 +120,18 @@ function summarizePageItem(item, layerPath, bounds) {
   };
 }
 `;
-const OBJECT_DETAIL_HELPERS = `
+export const OBJECT_DETAIL_HELPERS = `
 var OBJECT_DETAIL_LIMITS = {
   contentCharacters: 10000,
   paragraphs: 100,
   paragraphPreviewCharacters: 200,
   scannedCharacters: 5000,
   scannedTextRuns: 400,
-  styleRuns: 200,
+  styleRuns: 32,
+  textPaintRuns: 200,
   fonts: 100,
-  missingFontRanges: 100
+  missingFontRanges: 100,
+  unreadable: 128
 };
 
 function truncateUtf16(value, limit) {
@@ -396,6 +413,35 @@ function readNumberDetail(attributes, propertyName) {
   catch (styleError) { return unavailableDetail("character_style_unavailable", styleError); }
 }
 
+// The two StyleRunAlignmentType members that exist (measured: #619 F0-1 enumerates exactly these on 30.8.2). Any other value is
+// reported as unavailable with its raw name, never replaced by center. A whole-range read of mixed alignment silently returns the
+// first character's value (measured), so this is only ever called on one native text run, which splits at an alignment change.
+function readAlignmentDetail(attributes) {
+  try {
+    var alignment = attributes.alignment;
+    if (alignment === undefined || alignment === null) throw new Error("characterAttributes.alignment is unavailable.");
+    var name = String(alignment);
+    if (name === "StyleRunAlignmentType.center") return availableDetail("center");
+    if (name === "StyleRunAlignmentType.ROMANBASELINE") return availableDetail("roman_baseline");
+    throw new Error("characterAttributes.alignment is an unsupported value: " + name);
+  }
+  catch (alignmentError) { return unavailableDetail("character_style_unavailable", alignmentError); }
+}
+
+// AutoLeadingType has exactly TOPTOTOP and BOTTOMTOBOTTOM (measured: #619 F0-1). Read per paragraph, never for a whole range.
+function readLeadingTypeDetail(paragraph) {
+  try {
+    var paragraphAttributes = paragraph.paragraphAttributes;
+    var leadingType = paragraphAttributes.leadingType;
+    if (leadingType === undefined || leadingType === null) throw new Error("paragraphAttributes.leadingType is unavailable.");
+    var name = String(leadingType);
+    if (name === "AutoLeadingType.TOPTOTOP") return availableDetail("top_to_top");
+    if (name === "AutoLeadingType.BOTTOMTOBOTTOM") return availableDetail("bottom_to_bottom");
+    throw new Error("paragraphAttributes.leadingType is an unsupported value: " + name);
+  }
+  catch (leadingError) { return unavailableDetail("paragraph_style_unavailable", leadingError); }
+}
+
 function readCharacterStyle(character) {
   var attributes;
   try { attributes = character.characterAttributes; }
@@ -406,7 +452,7 @@ function readCharacterStyle(character) {
         status: "unavailable", reason: "font_unavailable",
         message: detailErrorMessage(attributesError), fontName: null
       },
-      size: missing, tracking: missing, fill: missing, stroke: missing
+      size: missing, tracking: missing, fill: missing, stroke: missing, alignment: missing
     };
   }
   return {
@@ -414,12 +460,13 @@ function readCharacterStyle(character) {
     size: readNumberDetail(attributes, "size"),
     tracking: readNumberDetail(attributes, "tracking"),
     fill: readColorDetail(attributes, "fillColor", "character_style_unavailable"),
-    stroke: readColorDetail(attributes, "strokeColor", "character_style_unavailable")
+    stroke: readColorDetail(attributes, "strokeColor", "character_style_unavailable"),
+    alignment: readAlignmentDetail(attributes)
   };
 }
 
-function paragraphCollection(items, total) {
-  if (items.length === total) return { status: "complete", items: items };
+function paragraphCollection(items, attempted, total) {
+  if (attempted === total) return { status: "complete", items: items };
   return { status: "truncated", items: items, reason: "item_limit", total: total };
 }
 
@@ -452,15 +499,59 @@ function readNativeTextRunLength(textRange, remainingCharacters) {
   return Math.min(runLength, remainingCharacters);
 }
 
-function readTextDetails(item) {
+// A read that failed inside a text frame, kept as raw evidence for the Node side (reason and guidance are built there). The Illustrator
+// error number is the key; the message is localized. An invalid page-item reference is never listed: it always fails the read.
+function unreadableEvidence(scope, attribute, index, error) {
+  var evidence = hostErrorEvidence(error);
+  return { scope: scope, attribute: attribute, index: index, hostErrorNumber: evidence.number, hostErrorName: evidence.name,
+    hostMessage: evidence.message === null ? null : truncateUtf16(evidence.message, 200) };
+}
+
+// Measured on 30.8.2 (#682 F0): when the contents are empty or end with a carriage return or U+0003, the last paragraph item
+// (paragraphs[count-1]) cannot be read (Error 1302 No such element) in every frame kind and place. It is the empty paragraph after the
+// trailing break, not an unreadable read.
+function isTrailingEmptyParagraphFailure(error, paragraphIndex, paragraphCount, contents) {
+  if (paragraphIndex !== paragraphCount - 1 || hostErrorEvidence(error).number !== 1302) return false;
+  if (contents.length === 0) return true;
+  var last = contents.charCodeAt(contents.length - 1);
+  return last === 13 || last === 3;
+}
+
+function trailingEmptyParagraph(paragraphIndex) {
+  var detail = { status: "unavailable", reason: "trailing_empty_paragraph",
+    message: "The empty paragraph after a trailing line break cannot be read by the host; it holds no text." };
+  return { index: paragraphIndex, characterCount: 0, preview: "", previewTruncated: false, justification: detail, leadingType: detail };
+}
+
+// tolerant: a failed paragraph or text-run read is listed in \`unreadable\` and the rest is still returned. Without it (the default for
+// callers that compare or restore state) any failure throws, as before.
+function readTextDetails(item, tolerant) {
   var contents = detailString(item.contents, "TextFrame.contents");
   var contentText = truncateUtf16(contents, OBJECT_DETAIL_LIMITS.contentCharacters);
   var paragraphs = [];
+  var unreadable = [];
   var paragraphCount = item.paragraphs.length;
-  var paragraphReturned = Math.min(paragraphCount, OBJECT_DETAIL_LIMITS.paragraphs);
-  for (var paragraphIndex = 0; paragraphIndex < paragraphReturned; paragraphIndex++) {
-    var paragraph = item.paragraphs[paragraphIndex];
-    var paragraphText = detailString(paragraph.contents, "paragraph.contents");
+  // Up to the paragraph limit of returned paragraphs; an unreadable one does not count toward it (and is listed), so a truncated
+  // collection always holds exactly the limit. The loop also stops after 100 unreadable paragraphs (so \`unreadable\` holds at most
+  // 101 entries with the style-run one, under its limit of 128); a frame with that many unreadable paragraphs is not expected, and
+  // its truncated collection would then hold fewer than the limit.
+  var paragraphIndex = 0;
+  for (; paragraphIndex < paragraphCount && paragraphs.length < OBJECT_DETAIL_LIMITS.paragraphs &&
+      unreadable.length < OBJECT_DETAIL_LIMITS.paragraphs; paragraphIndex++) {
+    var paragraph;
+    var paragraphText;
+    try {
+      paragraph = item.paragraphs[paragraphIndex];
+      paragraphText = detailString(paragraph.contents, "paragraph.contents");
+    } catch (paragraphReadError) {
+      if (tolerant !== true || isHostReferenceInvalidError(paragraphReadError)) throw paragraphReadError;
+      if (isTrailingEmptyParagraphFailure(paragraphReadError, paragraphIndex, paragraphCount, contents)) {
+        paragraphs.push(trailingEmptyParagraph(paragraphIndex));
+      } else {
+        unreadable.push(unreadableEvidence("paragraph", "paragraphs[" + paragraphIndex + "]", paragraphIndex, paragraphReadError));
+      }
+      continue;
+    }
     var justification;
     try {
       if (paragraph.paragraphAttributes.justification === undefined || paragraph.paragraphAttributes.justification === null) {
@@ -474,7 +565,8 @@ function readTextDetails(item) {
       characterCount: paragraphText.length,
       preview: truncateUtf16(paragraphText, OBJECT_DETAIL_LIMITS.paragraphPreviewCharacters),
       previewTruncated: paragraphText.length > OBJECT_DETAIL_LIMITS.paragraphPreviewCharacters,
-      justification: justification
+      justification: justification,
+      leadingType: readLeadingTypeDetail(paragraph)
     });
   }
 
@@ -487,6 +579,7 @@ function readTextDetails(item) {
   var allCharactersScanned = scannedCharacterCount === characterCount;
   var styleRuns = [];
   var styleRunCount = 0;
+  var previousStyleKey = null;
   var fontUsages = [];
   var missingFontRanges = [];
   var missingFontRangeCount = 0;
@@ -504,6 +597,7 @@ function readTextDetails(item) {
 
   var scannedRunCount = 0;
   var characterIndex = 0;
+  var scanFailed = false;
   try {
     while (characterIndex < scannedCharacterCount && scannedRunCount < OBJECT_DETAIL_LIMITS.scannedTextRuns) {
       textRange.start = originalRangeStart + characterIndex;
@@ -511,13 +605,26 @@ function readTextDetails(item) {
       var runLength = readNativeTextRunLength(textRange, scannedCharacterCount - characterIndex);
       textRange.end = originalRangeStart + characterIndex + runLength;
       var style = readCharacterStyle(textRange);
-      styleRunCount++;
+      // Compare only the complete reported attributes, including availability diagnostics.
+      // Native run boundaries can reflect attributes that this read does not expose.
+      var styleKey = stringifyJson(style);
       scannedRunCount++;
-      if (styleRuns.length < OBJECT_DETAIL_LIMITS.styleRuns) {
-        style.start = characterIndex;
-        style.length = runLength;
-        styleRuns.push(style);
+      if (styleKey === previousStyleKey) {
+        if (styleRunCount <= OBJECT_DETAIL_LIMITS.styleRuns) {
+          var previousStyle = styleRuns[styleRuns.length - 1];
+          previousStyle.length += runLength;
+          previousStyle.mergedCount++;
+        }
+      } else {
+        styleRunCount++;
+        if (styleRuns.length < OBJECT_DETAIL_LIMITS.styleRuns) {
+          style.start = characterIndex;
+          style.length = runLength;
+          style.mergedCount = 1;
+          styleRuns.push(style);
+        }
       }
+      previousStyleKey = styleKey;
       if (style.font.status === "available") {
         closeMissingRange(characterIndex);
         var fontKey = style.font.value.postScriptName;
@@ -554,6 +661,10 @@ function readTextDetails(item) {
       }
       characterIndex += runLength;
     }
+  } catch (scanError) {
+    if (tolerant !== true || isHostReferenceInvalidError(scanError)) throw scanError;
+    scanFailed = true;
+    unreadable.push(unreadableEvidence("style_runs", "getTextRunLength@" + characterIndex, characterIndex, scanError));
   } finally {
     textRange.start = originalRangeStart;
     textRange.end = originalRangeEnd;
@@ -573,7 +684,8 @@ function readTextDetails(item) {
   var runLimitReached = characterIndex < scannedCharacterCount;
   var allTextRunsScanned = allCharactersScanned && !runLimitReached;
   var incompleteReason = "scan_limit";
-  if (runLimitReached) incompleteReason = "run_limit";
+  if (scanFailed) incompleteReason = "read_failed";
+  else if (runLimitReached) incompleteReason = "run_limit";
   else if (allCharactersScanned) incompleteReason = "item_limit";
   var styleRunsComplete = allTextRunsScanned && styleRunCount <= OBJECT_DETAIL_LIMITS.styleRuns;
   var fontsComplete = allTextRunsScanned && fontUsages.length <= OBJECT_DETAIL_LIMITS.fonts;
@@ -585,7 +697,7 @@ function readTextDetails(item) {
     kind: "text_frame",
     illustratorType: "TextFrame",
     content: content,
-    paragraphs: paragraphCollection(paragraphs, paragraphCount),
+    paragraphs: paragraphCollection(paragraphs, paragraphIndex, paragraphCount),
     styleRuns: scannedCollection(
       styleRuns,
       allTextRunsScanned ? styleRunCount : null,
@@ -603,7 +715,8 @@ function readTextDetails(item) {
       allTextRunsScanned ? missingFontRangeCount : null,
       missingFontsComplete,
       incompleteReason
-    )
+    ),
+    unreadable: unreadable
   };
 }
 
@@ -620,8 +733,8 @@ function readLinkedFile(item) {
   catch (fileError) { return unavailableDetail("link_file_unavailable", fileError); }
 }
 
-function readObjectTypeDetails(item) {
-  if (item.typename === "TextFrame") return readTextDetails(item);
+function readObjectTypeDetails(item, tolerant) {
+  if (item.typename === "TextFrame") return readTextDetails(item, tolerant);
   if (item.typename === "PlacedItem") {
     return {
       kind: "placed_item",
@@ -651,7 +764,34 @@ function readObjectTypeDetails(item) {
   return { kind: "other", reason: "unsupported_object_type" };
 }
 `;
-const SNAPSHOT_DIGEST_HELPERS = `
+export const EXPORT_FONT_SCAN_HELPERS = `
+function exportFontScan(doc, limit) {
+  var frames = doc.textFrames;
+  var total = frames.length;
+  var scanned = Math.min(total, limit);
+  var names = [];
+  var seen = {};
+  var incomplete = 0;
+  var unreadable = 0;
+  function noteName(name) {
+    if (typeof name !== "string" || name === "") { unreadable++; return; }
+    if (seen["n:" + name] !== true) { seen["n:" + name] = true; names.push(name); }
+  }
+  for (var frameIndex = 0; frameIndex < scanned; frameIndex++) {
+    try {
+      var details = readTextDetails(frames[frameIndex], true);
+      if (details.fonts.status !== "complete" || details.missingFonts.status !== "complete") incomplete++;
+      for (var fontIndex = 0; fontIndex < details.fonts.items.length; fontIndex++) noteName(details.fonts.items[fontIndex].postScriptName);
+      for (var missingIndex = 0; missingIndex < details.missingFonts.items.length; missingIndex++) noteName(details.missingFonts.items[missingIndex].fontName);
+    } catch (frameError) { unreadable++; }
+  }
+  return { totalFrames: total, scannedFrames: scanned, limit: limit, incompleteFrames: incomplete, unreadableFrames: unreadable, fontNames: names };
+}
+`;
+export const EXPORT_READ_SOURCE_FONTS_SCRIPT = `${OBJECT_READ_HELPERS}${OBJECT_DETAIL_HELPERS}${EXPORT_FONT_SCAN_HELPERS}${EXPORT_READ_SOURCE_SCRIPT}
+result.fontScan = exportFontScan(exportSourceDocument, params.fontScanLimit);
+`;
+export const SNAPSHOT_DIGEST_HELPERS = `
 var SNAPSHOT_SHA256_CONSTANTS = [
   1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993, 2453635748, 2870763221,
   3624381080, 310598401, 607225278, 1426881987, 1925078388, 2162078206, 2614888103, 3248222580,
@@ -777,64 +917,141 @@ function finishSnapshotDigest(digest) {
   return output;
 }
 `;
-export const LIST_OBJECTS_SCRIPT = `${OBJECT_READ_HELPERS}${SNAPSHOT_DIGEST_HELPERS}
+export const LIST_OBJECTS_SCRIPT = `${OBJECT_READ_HELPERS}${OBJECT_WITNESS_HELPERS}${OBJECT_WALK_HELPERS}
 var context = requireDocumentForRead(params.expectedDocumentKey);
 var doc = app.activeDocument;
+var scanStartedAt = new Date().getTime();
+var scanTotal = doc.pageItems.length;
+var scanVisited = 0;
+var scanTicks = 0;
 var pageItems = [];
 var matchedCount = 0;
 var previousUuid = null;
-var snapshotDigestState = createSnapshotDigest();
-for (var itemIndex = 0; itemIndex < doc.pageItems.length; itemIndex++) {
-  var matched = readPageItemAt("document.pageItems", itemIndex, function () {
-    var item = doc.pageItems[itemIndex];
-    var layerPath = getLayerPath(doc, item.layer);
-    var bounds = item.geometricBounds;
-    if (params.filters.type !== null && item.typename !== params.filters.type) return null;
-    if (params.filters.layerPath !== null && !sameNumberArray(layerPath, params.filters.layerPath)) return null;
-    if (!boundsMatch(bounds, params.filters.bounds, params.filters.boundsMode)) return null;
-    return { summary: summarizePageItem(item, layerPath, bounds), uuid: String(item.uuid) };
-  });
-  if (matched === null) continue;
-  var summary = matched.summary;
-  updateSnapshotDigest(snapshotDigestState, stringifyJson(summary));
-  if (matchedCount === params.offset - 1) previousUuid = matched.uuid;
-  if (matchedCount >= params.offset && pageItems.length < params.limit) {
-    pageItems.push(summary);
-  }
+var snapshotWitness = createSnapshotWitness();
+var typeWitnesses = {};
+walkDocumentTree(doc, function (item, typeName, layerInfo) {
+  if (params.filters.type !== null && typeName !== params.filters.type) return;
+  if (params.filters.layerPath !== null && !sameNumberArray(layerInfo.path, params.filters.layerPath)) return;
+  var bounds = item.geometricBounds;
+  if (!boundsMatch(bounds, params.filters.bounds, params.filters.boundsMode)) return;
+  var summary = {
+    uuid: String(item.uuid),
+    type: typeName,
+    name: item.name || "",
+    layer: { name: layerInfo.name, path: layerInfo.path },
+    bounds: [bounds[0], bounds[1], bounds[2], bounds[3]]
+  };
+  if (!typeWitnesses.hasOwnProperty("t:" + typeName)) typeWitnesses["t:" + typeName] = witnessText(typeName);
+  addSnapshotWitness(snapshotWitness, summary, layerInfo.witness, typeWitnesses["t:" + typeName], matchedCount);
+  if (matchedCount === params.offset - 1) previousUuid = summary.uuid;
+  if (matchedCount >= params.offset && pageItems.length < params.limit) pageItems.push(summary);
   matchedCount++;
-}
+});
+if (scanVisited !== scanTotal) readScanFailure("READ_WALK_INCOMPLETE", { reason: "count_mismatch" });
 var result = {
   document: context,
   items: pageItems,
   hasMore: matchedCount > params.offset + pageItems.length,
   snapshotCount: matchedCount,
   previousUuid: previousUuid,
-  snapshotDigest: finishSnapshotDigest(snapshotDigestState)
+  snapshotDigest: finishSnapshotWitness(snapshotWitness)
 };
 `;
-export const GET_OBJECT_SCRIPT = `${OBJECT_READ_HELPERS}${OBJECT_DETAIL_HELPERS}
+const OBJECT_LOOKUP_HELPERS = `
+function lookupViaNativeUuid(doc, uuid) {
+  var startedAt = new Date().getTime();
+  var item = null;
+  try { item = doc.getPageItemFromUuid(uuid); } catch (lookupError) { item = null; }
+  if (item === undefined || item === null) return null;
+  var itemUuid = null;
+  var typeName = null;
+  try { itemUuid = String(item.uuid); typeName = String(item.typename); } catch (readError) { itemUuid = null; }
+  if (itemUuid !== uuid) return null;
+  if (typeName === "PathItem" || typeName === "TextFrame") return item;
+  var siblings = null;
+  try {
+    var parent = item.parent;
+    if (parent.typename === "Layer" || parent.typename === "GroupItem") siblings = parent.pageItems;
+    else if (parent.typename === "CompoundPathItem") siblings = parent.pathItems;
+  } catch (parentError) { siblings = null; }
+  if (siblings === null || siblings === undefined) return null;
+  var count = siblings.length;
+  for (var siblingIndex = 0; siblingIndex < count; siblingIndex++) {
+    if ((siblingIndex & 15) === 0 && new Date().getTime() - startedAt > params.deadlineMs) return null;
+    var entry = readPageItemAt("parent.collection", siblingIndex, function () {
+      var candidate = siblings[siblingIndex];
+      return String(candidate.uuid) === uuid ? candidate : null;
+    });
+    if (entry !== null) return entry;
+  }
+  return null;
+}
+
+var lookupWalkFound = { walkFound: true };
+
+function lookupViaWalk(doc, uuid) {
+  var foundItem = null;
+  try {
+    walkDocumentTree(doc, function (item) {
+      if (String(item.uuid) === uuid) { foundItem = item; throw lookupWalkFound; }
+    });
+  } catch (walkError) {
+    if (walkError !== lookupWalkFound) throw walkError;
+    return foundItem;
+  }
+  if (scanVisited !== scanTotal) readScanFailure("READ_WALK_INCOMPLETE", { reason: "count_mismatch" });
+  return null;
+}
+
+function lookupPageItem(doc, uuid) {
+  var fast = lookupViaNativeUuid(doc, uuid);
+  if (fast !== null) return fast;
+  scanStartedAt = new Date().getTime();
+  scanTotal = doc.pageItems.length;
+  scanVisited = 0;
+  scanTicks = 0;
+  var walked = lookupViaWalk(doc, uuid);
+  if (walked === null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: uuid }));
+  return walked;
+}
+`;
+export const GET_OBJECT_SCRIPT = `${OBJECT_READ_HELPERS}${OBJECT_DETAIL_HELPERS}${OBJECT_WITNESS_HELPERS}${OBJECT_WALK_HELPERS}${OBJECT_LOOKUP_HELPERS}
+var scanStartedAt = 0;
+var scanTotal = 0;
+var scanVisited = 0;
+var scanTicks = 0;
 var context = requireDocumentForRead(params.expectedDocumentKey);
 var doc = app.activeDocument;
-var found = null;
-for (var itemIndex = 0; itemIndex < doc.pageItems.length && found === null; itemIndex++) {
-  found = readPageItemAt("document.pageItems", itemIndex, function () {
-    var item = doc.pageItems[itemIndex];
-    if (String(item.uuid) !== params.uuid) return null;
+var found = lookupPageItem(doc, params.uuid);
+// A read that still fails after the tolerant text reader (the summary, the flags, the contents) is reported with the attribute that
+// failed and the Illustrator error number, never as a bare host message. An MCP_ERROR and an invalid reference pass through unchanged.
+var readStage = "summary";
+var detail = readPageItemAt("lookup", 0, function () {
+  try {
+    var item = found;
     var layerPath = getLayerPath(doc, item.layer);
     var bounds = item.geometricBounds;
+    readStage = "visibleBounds";
     var visibleBounds = item.visibleBounds;
-    var detail = summarizePageItem(item, layerPath, bounds);
-    detail.visibleBounds = [visibleBounds[0], visibleBounds[1], visibleBounds[2], visibleBounds[3]];
-    detail.locked = detailBoolean(item.locked, "locked");
-    detail.hidden = detailBoolean(item.hidden, "hidden");
-    detail.editable = detailBoolean(item.editable, "editable");
-    detail.appearance = readObjectAppearance(item);
-    detail.details = readObjectTypeDetails(item);
-    return detail;
-  });
-}
-if (found === null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: params.uuid }));
-var result = { document: context, item: found };
+    var summary = summarizePageItem(item, layerPath, bounds);
+    summary.visibleBounds = [visibleBounds[0], visibleBounds[1], visibleBounds[2], visibleBounds[3]];
+    readStage = "locked";
+    summary.locked = detailBoolean(item.locked, "locked");
+    readStage = "hidden";
+    summary.hidden = detailBoolean(item.hidden, "hidden");
+    readStage = "editable";
+    summary.editable = detailBoolean(item.editable, "editable");
+    readStage = "appearance";
+    summary.appearance = readObjectAppearance(item);
+    readStage = "details";
+    summary.details = readObjectTypeDetails(item, true);
+    return summary;
+  } catch (readError) {
+    if (isHostReferenceInvalidError(readError) || String(readError && readError.message).substring(0, 10) === "MCP_ERROR:") throw readError;
+    throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_ATTRIBUTE_UNREADABLE", attribute: readStage, hostError: hostErrorEvidence(readError) }));
+  }
+});
+var result = { document: context, item: detail };
 `;
 export const READ_LINE_HEIGHT_SCRIPT = `${OBJECT_READ_HELPERS}${HOST_VERSION_POLICY_JSX}
 function lineHeightNumber(value, propertyName) {
@@ -1369,12 +1586,14 @@ function printBounds(value) {
 function printBoundsRelationship(bounds, artboards) {
   var contained = false;
   var intersects = false;
+  // An edge on the artboard edge within the integer tolerance is on it (an artboard edge carries host float noise).
+  var slack = ${ARTBOARD_INTEGER_TOLERANCE};
   for (var index = 0; index < artboards.length; index++) {
     var artboard = artboards[index];
-    if (bounds[0] >= artboard[0] && bounds[2] <= artboard[2] &&
-        bounds[1] <= artboard[1] && bounds[3] >= artboard[3]) contained = true;
-    if (bounds[0] <= artboard[2] && bounds[2] >= artboard[0] &&
-        bounds[1] >= artboard[3] && bounds[3] <= artboard[1]) intersects = true;
+    if (bounds[0] >= artboard[0] - slack && bounds[2] <= artboard[2] + slack &&
+        bounds[1] <= artboard[1] + slack && bounds[3] >= artboard[3] - slack) contained = true;
+    if (bounds[0] <= artboard[2] + slack && bounds[2] >= artboard[0] - slack &&
+        bounds[1] >= artboard[3] - slack && bounds[3] <= artboard[1] + slack) intersects = true;
   }
   return contained ? "inside" : (intersects ? "crossing" : "outside");
 }
@@ -1465,7 +1684,7 @@ function printReadTextPaints(item, context, state, target, record, digest) {
         overprintStroke: overprintStroke
       };
       if (!printColorComplete(fill) || !printColorComplete(stroke)) printAddIndeterminate(state, "color");
-      if (paints.length < OBJECT_DETAIL_LIMITS.styleRuns) paints.push(paint);
+      if (paints.length < OBJECT_DETAIL_LIMITS.textPaintRuns) paints.push(paint);
       updateSnapshotDigest(digest, stringifyJson(paint));
       if (context.colorSpace === "CMYK" && (printColorContainsRgb(fill) || printColorContainsRgb(stroke))) {
         printAddFinding(state, "color", "current_vector_rgb_in_cmyk_document", "error",
@@ -1741,7 +1960,7 @@ function printScanDocument(doc, context, collectFindings) {
             detailErrorMessage(textPaintError), target, "text paint scan unavailable", "complete text paint scan");
         }
         try {
-          var textDetails = readTextDetails(item);
+          var textDetails = readTextDetails(item, true);
           record.fonts = textDetails.fonts;
           record.missingFonts = textDetails.missingFonts;
           if (textDetails.fonts.status !== "complete" || textDetails.missingFonts.status !== "complete") {
@@ -1841,7 +2060,7 @@ for (var clipIndex = 0; clipIndex < clipTotal; clipIndex++) {
 }
 var result = { document: requireDocumentForRead(params.expectedDocumentKey), totalPageItems: clipTotal, items: clipItems };
 `;
-export const CAPTURE_STRUCTURE_SNAPSHOT_SCRIPT = `${OBJECT_READ_HELPERS}${OBJECT_DETAIL_HELPERS}${SNAPSHOT_DIGEST_HELPERS}
+const STRUCTURE_HELPERS = `
 var STRUCTURE_SNAPSHOT_LIMITS = {
   pageItems: ${STRUCTURE_SNAPSHOT_LIMITS.pageItems},
   artboards: ${STRUCTURE_SNAPSHOT_LIMITS.artboards},
@@ -1950,7 +2169,11 @@ function structureItemRecord(doc, itemIndex) {
 }
 
 function structureItemRecordAt(doc, itemIndex) {
-  var item = doc.pageItems[itemIndex];
+  return structureRecordOfItem(doc, doc.pageItems[itemIndex], itemIndex);
+}
+
+/** The canonical record of one item reference; \`position\` is its documentIndex (a position in the walk or in doc.pageItems). */
+function structureRecordOfItem(doc, item, itemIndex) {
   var layerPath = getLayerPath(doc, item.layer);
   var record = summarizePageItem(item, layerPath, structureBounds(item.geometricBounds, "geometricBounds"));
   record.visibleBounds = structureBounds(item.visibleBounds, "visibleBounds");
@@ -2208,7 +2431,8 @@ function structurePageScan(doc, context) {
     items: items
   };
 }
-
+`;
+export const CAPTURE_STRUCTURE_SNAPSHOT_SCRIPT = `${OBJECT_READ_HELPERS}${OBJECT_DETAIL_HELPERS}${SNAPSHOT_DIGEST_HELPERS}${STRUCTURE_HELPERS}
 var structureInitialContext = requireDocumentForRead(params.expectedDocumentKey);
 var structureDocument = app.activeDocument;
 var result;
@@ -2225,6 +2449,90 @@ if (params.mode === "page") {
   firstStructureScan.document = structureFinalContext;
   result = firstStructureScan;
 }
+`;
+export const CAPTURE_STRUCTURE_STREAM_SCRIPT = `${OBJECT_READ_HELPERS}${OBJECT_DETAIL_HELPERS}${OBJECT_WITNESS_HELPERS}${OBJECT_WALK_HELPERS}${STRUCTURE_HELPERS}
+var streamContext = requireDocumentForRead(params.expectedDocumentKey);
+var streamDoc = app.activeDocument;
+var scanStartedAt = new Date().getTime();
+var scanTotal = streamDoc.pageItems.length;
+var scanVisited = 0;
+var scanTicks = 0;
+var streamBudgetStop = { streamBudgetStop: true };
+var streamFile = new File(params.spoolPath);
+streamFile.encoding = "UTF-8";
+streamFile.lineFeed = "Unix";
+if (!streamFile.open("w")) throw new Error("MCP_ERROR:" + stringifyJson({ code: "STRUCTURE_STREAM_FILE_UNWRITABLE", error: String(streamFile.error) }));
+// A UTF-8 File.write of a string holding a surrogate can fail and write nothing (measured: U+E0100), so every surrogate code
+// unit is written as a JSON unicode escape, as the command records are (jsonFileText in the runtime). The JSON value is
+// unchanged, and the counts below are those of the text actually written. Almost every line has none: one test decides.
+var streamSurrogatePattern = /[\\uD800-\\uDFFF]/;
+function streamLine(text) { return streamSurrogatePattern.test(text) ? jsonFileText(text) : text; }
+// The only File.write of this script: a failed write stops the call (File.error is read before close() clears it).
+function streamWrite(text) {
+  var written = streamFile.write(text);
+  var writeError = String(streamFile.error);
+  if (written !== true || writeError !== "") throw new Error("MCP_ERROR:" + stringifyJson({ code: "STRUCTURE_STREAM_WRITE_FAILED", error: writeError }));
+}
+// The same bytes as stringifyJson, faster: a string with nothing to escape (almost every key and value of a record) is
+// returned between quotes without visiting its characters one by one. Measured: serialization was most of a pass.
+var streamEscapePattern = /[\\u0000-\\u001f"\\\\]/;
+function streamJson(value) {
+  if (value === null || value === undefined) return "null";
+  var type = typeof value;
+  if (type === "number" || type === "boolean") return String(value);
+  if (type === "string") return streamEscapePattern.test(value) ? stringifyJson(value) : '"' + value + '"';
+  if (value instanceof Array) {
+    var arrayParts = [];
+    for (var i = 0; i < value.length; i++) arrayParts.push(streamJson(value[i]));
+    return "[" + arrayParts.join(",") + "]";
+  }
+  var objectParts = [];
+  for (var key in value) {
+    if (value.hasOwnProperty(key)) objectParts.push(streamJson(key) + ":" + streamJson(value[key]));
+  }
+  return "{" + objectParts.join(",") + "}";
+}
+var streamLines = 0;
+var streamChars = 0;
+var streamBuffer = [];
+var streamDone = false;
+function streamFlush() {
+  if (streamBuffer.length === 0) return;
+  streamWrite(streamBuffer.join("\\n") + "\\n");
+  streamBuffer = [];
+}
+try {
+  var streamArtboardCount = streamDoc.artboards.length;
+  streamWrite(streamLine(stringifyJson({ h: 1, key: streamContext.key, pageItems: scanTotal, artboards: streamArtboardCount, saved: streamContext.saved, position: params.position })) + "\\n");
+  if (params.position === 0) streamWrite(streamLine(stringifyJson({ a: structureArtboards(streamDoc, streamArtboardCount) })) + "\\n");
+  try {
+    walkDocumentTree(streamDoc, function (item, typeName, layerInfo) {
+      var position = scanVisited - 1;
+      if (position < params.position) return;
+      if (new Date().getTime() - scanStartedAt > params.budgetMs) throw streamBudgetStop;
+      var line = streamLine(streamJson(structureRecordOfItem(streamDoc, item, position)));
+      streamBuffer.push(line);
+      streamChars += line.length + 1;
+      streamLines++;
+      if (streamBuffer.length >= 200) streamFlush();
+    });
+    streamDone = true;
+  } catch (walkStop) {
+    if (walkStop !== streamBudgetStop) throw walkStop;
+  }
+  streamFlush();
+  if (streamDone && scanVisited !== scanTotal) readScanFailure("READ_WALK_INCOMPLETE", { reason: "count_mismatch" });
+  streamWrite(stringifyJson({ t: 1, done: streamDone, lines: streamLines, chars: streamChars, position: params.position + streamLines }) + "\\n");
+} finally {
+  streamFile.close();
+}
+var result = {
+  done: streamDone,
+  lines: streamLines,
+  chars: streamChars,
+  position: params.position + streamLines,
+  document: requireDocumentForRead(params.expectedDocumentKey)
+};
 `;
 function validateImagePreflightCursor(value) {
     try {
@@ -2245,7 +2553,25 @@ function validateImagePreflightCursor(value) {
         throw new InvalidCursorError('The image-preflight cursor is invalid for this request.');
     }
 }
+const STRUCTURE_STREAM_BUDGET_MS = 10_000;
+const STRUCTURE_STREAM_DEADLINE_MS = 20_000;
+export const READ_SCAN_DEADLINE_MS = 12_000;
+function readScanLimitError(detail) {
+    if (detail?.code === 'READ_SCAN_DEADLINE') {
+        return new ReadScanLimitError('READ_SCAN_DEADLINE', `The read stopped after ${detail.elapsedMs ?? '?'} ms (limit ${detail.deadlineMs ?? READ_SCAN_DEADLINE_MS} ms) having scanned ${detail.scanned ?? '?'} of ${detail.total ?? '?'} page items: ` +
+            'the document is too large for one scan. Nothing was changed and no command is left running. Read specific objects with illustrator_get_object, or illustrator_list_selection.');
+    }
+    if (detail?.code === 'READ_WALK_INCOMPLETE') {
+        return new ReadScanLimitError('READ_WALK_INCOMPLETE', `The read reached ${detail.scanned ?? '?'} of ${detail.total ?? '?'} page items (${detail.reason ?? 'unknown reason'}) and refused to return a partial list as complete. ` +
+            'Nothing was changed.');
+    }
+    return null;
+}
 function validateCursorPayload(value) {
+    const earlier = value;
+    if (typeof earlier === 'object' && earlier !== null && earlier.version === 1 && earlier.kind === undefined && earlier.snapshotCount !== undefined) {
+        throw new StaleCursorError('The object-list cursor was issued before the listing order changed to layer-tree order; list again from the start.');
+    }
     try {
         const candidate = value;
         const filters = candidate.filters;
@@ -2259,10 +2585,10 @@ function validateCursorPayload(value) {
             (filters.type === null || (typeof filters.type === 'string' && filters.type.length >= 1 && filters.type.length <= 255)) &&
             validLayerPath && validBounds &&
             (filters.boundsMode === 'intersects' || filters.boundsMode === 'contained');
-        if (candidate.version !== 1 || typeof candidate.documentKey !== 'string' ||
+        if (candidate.version !== 2 || typeof candidate.documentKey !== 'string' ||
             !Number.isInteger(candidate.offset) || (candidate.offset ?? 0) < 1 ||
             typeof candidate.previousUuid !== 'string' || candidate.previousUuid.length < 1 || candidate.previousUuid.length > 255 ||
-            typeof candidate.snapshotDigest !== 'string' || !/^[a-f0-9]{64}$/.test(candidate.snapshotDigest) ||
+            typeof candidate.snapshotDigest !== 'string' || !/^[a-f0-9]{32,64}$/.test(candidate.snapshotDigest) ||
             !Number.isInteger(candidate.snapshotCount) || (candidate.snapshotCount ?? 0) < 1 ||
             !validFilters) {
             throw new Error('Invalid cursor payload.');
@@ -2401,8 +2727,10 @@ var result = {
 result.layerCount = layerCount;
 `;
 export const LIST_DOCUMENTS_SCRIPT = `
-var activeDocument = app.documents.length > 0 ? app.activeDocument : null;
-var documents = [];
+// Windows exposes read-only Application properties as global names in standalone JSX.
+// Never assign to "documents": it can remain the native Documents collection rather than an Array.
+var listedActiveDocument = app.documents.length > 0 ? app.activeDocument : null;
+var documentEntries = [];
 for (var documentIndex = 0; documentIndex < app.documents.length; documentIndex++) {
   var doc = app.documents[documentIndex];
   var identity = getDocumentIdentity(doc, documentIndex);
@@ -2418,7 +2746,7 @@ for (var documentIndex = 0; documentIndex < app.documents.length; documentIndex+
       active: artboardIndex === activeArtboardIndex
     });
   }
-  documents.push({
+  documentEntries.push({
     keyVersion: identity.keyVersion,
     key: identity.key,
     keyShort: identity.keyShort,
@@ -2428,7 +2756,7 @@ for (var documentIndex = 0; documentIndex < app.documents.length; documentIndex+
     fileRevision: identity.fileRevision,
     saved: identity.saved,
     colorSpace: identity.colorSpace,
-    active: doc === activeDocument,
+    active: doc === listedActiveDocument,
     artboards: artboards
   });
 }
@@ -2437,8 +2765,8 @@ var result = {
   coordinateSpace: "illustrator_document",
   unit: "pt",
   appVersion: app.version,
-  documentCount: documents.length,
-  documents: documents
+  documentCount: documentEntries.length,
+  documents: documentEntries
 };
 `;
 export const LIST_SWATCHES_SCRIPT = `
@@ -2628,7 +2956,7 @@ export class PostHostConformanceError extends Error {
     commandId;
     hostTerminalState;
     constructor(commandId, hostTerminalState, cause) {
-        const detail = cause instanceof Error ? cause.message : String(cause);
+        const detail = cause instanceof ZodError ? summarizeValidationFailure(cause) : cause instanceof Error ? cause.message : String(cause);
         super(`Illustrator finished command ${commandId} as "${hostTerminalState}", but the server could not confirm ` +
             `that result against the approved plan: ${detail} The document may already contain this change; ` +
             'inspect the document before retrying and do not re-run the operation with a new command_id.', { cause });
@@ -2643,6 +2971,16 @@ class EditSessionChangedDuringSaveError extends Error {
         this.name = 'EditSessionChangedDuringSaveError';
     }
 }
+class EditSessionOpenRejectedError extends Error {
+    result;
+    constructor(result) {
+        super(result.message);
+        this.result = result;
+        this.name = 'EditSessionOpenRejectedError';
+    }
+}
+class EditSessionSaveYield extends Error {
+}
 export class IllustratorOperationsCore {
     bridge;
     cursorSigner;
@@ -2655,13 +2993,20 @@ export class IllustratorOperationsCore {
     hostProfileProbe;
     recipeExecutionAuthorityStore;
     fontVerifier;
+    fontInventory;
+    hostApplicationActivator;
+    imagePreflightBatchGate;
     #operationSafetyRegistry = new OperationSafetyRegistry();
     #structureSnapshots = new StructureSnapshotStore();
     #structureDiffs = new StructureDiffStore();
     #leaseGuard;
     #saveAs;
     #editSessions;
-    constructor(bridge, cursorSigner = new CursorSigner(), mutationAdapters = defaultMutationOperationRegistry(), recipeAuthorityStore = new M6P0RecipeAuthorityStore(defaultStateRoot()), imageFileInspector = new SipsImageFileInspector(), backupStore = new DocumentBackupStore(defaultStateRoot()), recipeStore = new RecipeStore(defaultStateRoot()), exportStore = new DocumentExportStore(defaultStateRoot()), hostProfileProbe = new OsascriptHostProfileProbe(), recipeExecutionAuthorityStore = new RecipeExecutionAuthorityStore(defaultStateRoot()), editSessionStore = null, saveAsRegistry = null, fontVerifier = new SystemFontVerifier()) {
+    #openScans;
+    #saveScans;
+    #scanTiming;
+    #renderSets = new RenderSetStore();
+    constructor(bridge, cursorSigner = new CursorSigner(), mutationAdapters = defaultMutationOperationRegistry(), recipeAuthorityStore = new M6P0RecipeAuthorityStore(defaultStateRoot()), imageFileInspector = new SipsImageFileInspector(), backupStore = new DocumentBackupStore(defaultStateRoot()), recipeStore = new RecipeStore(defaultStateRoot()), exportStore = new DocumentExportStore(defaultStateRoot()), hostProfileProbe = new OsascriptHostProfileProbe(), recipeExecutionAuthorityStore = new RecipeExecutionAuthorityStore(defaultStateRoot()), editSessionStore = null, saveAsRegistry = null, fontVerifier = new SystemFontVerifier(), editSessionScanClock = Date.now, scanTiming = {}, fontInventory = new IllustratorFontInventory(), hostApplicationActivator = null, imagePreflightBatchGate) {
         this.bridge = bridge;
         this.cursorSigner = cursorSigner;
         this.mutationAdapters = mutationAdapters;
@@ -2673,9 +3018,15 @@ export class IllustratorOperationsCore {
         this.hostProfileProbe = hostProfileProbe;
         this.recipeExecutionAuthorityStore = recipeExecutionAuthorityStore;
         this.fontVerifier = fontVerifier;
+        this.fontInventory = fontInventory;
+        this.hostApplicationActivator = hostApplicationActivator;
+        this.imagePreflightBatchGate = imagePreflightBatchGate;
         if (!this.mutationAdapters.isSealed()) {
             throw new Error('Illustrator operations require a sealed mutation adapter registry.');
         }
+        this.#openScans = new EditSessionOpenScans(editSessionScanClock);
+        this.#saveScans = new EditSessionOpenScans(editSessionScanClock);
+        this.#scanTiming = editSessionScanTiming(scanTiming);
         this.#saveAs = saveAsRegistry ?? new SaveAsLeaseRegistry(new SaveAsSessionStore(this.exportStore.stateRootPath));
         this.#leaseGuard = new LeaseGuard(this.backupStore, this.exportStore, this.#saveAs);
         this.#editSessions = new EditSessionCoordinator(editSessionStore ?? new EditSessionStore(defaultStateRoot(), this.#leaseGuard));
@@ -2691,11 +3042,65 @@ export class IllustratorOperationsCore {
         return { bundleId: target?.bundleId ?? null, version, channel: target?.channel ?? 'unknown' };
     }
     async getContext() {
-        const result = await this.bridge.execute({ kind: 'read', script: GET_CONTEXT_SCRIPT, hostGate: this.editSessionHostGate(false) });
+        const result = await this.executeHost({ kind: 'read', script: GET_CONTEXT_SCRIPT, hostGate: this.editSessionHostGate(false, false, undefined, true, { source: 'context' }) });
         return { ...result.data, application: this.describeApplication(result.data.appVersion) };
     }
+    async executeHost(command) {
+        const barriers = this.bridge.releaseBarrierStore?.() ?? null;
+        if (barriers !== null && command.script !== CREATE_DOCUMENT_SCRIPT && command.script !== CLOSE_DOCUMENT_SCRIPT) {
+            const gate = command.hostGate;
+            command = { ...command, hostGate: { ...gate, beforeHost: async (context) => {
+                        const admission = await gate?.beforeHost?.(context);
+                        if (admission?.dirtyFileAdmission !== undefined)
+                            return admission;
+                        return { ...admission, dirtyFileAdmission: await buildDirtyFileAdmission(barriers, this.#editSessions.store, false) };
+                    } } };
+        }
+        if (command.kind !== 'read' || ![LIST_DOCUMENTS_SCRIPT, FIND_FONTS_SCRIPT, FIND_FONTS_QUERY_SCRIPT].includes(command.script)) {
+            return await this.bridge.execute(withFilePathComparisons(command));
+        }
+        const target = this.bridge.applicationTarget?.() ?? null;
+        const binding = await this.fontInventory.captureBinding(target);
+        if (binding === null || await this.observeEditSessionHostProfile() !== 'foreground_unlocked') {
+            return await this.bridge.execute(withFilePathComparisons(command));
+        }
+        const unwrap = (data) => {
+            if (data === null || typeof data !== 'object' || !Object.hasOwn(data, 'mcpCleanFontInventory') || !Object.hasOwn(data, 'mcpFontReadValue')) {
+                throw new Error('FONT_INVENTORY_RESPONSE_INVALID');
+            }
+            return { inventory: data.mcpCleanFontInventory,
+                value: data.mcpFontReadValue };
+        };
+        try {
+            const result = await this.bridge.execute(withFilePathComparisons({ ...command, kind: 'read',
+                script: CAPTURE_CLEAN_FONT_INVENTORY_SCRIPT + command.script + '\nresult = { mcpCleanFontInventory: mcpCleanFontInventory, mcpFontReadValue: result };',
+                hostGate: {
+                    beforeHost: async (context) => {
+                        const admission = await command.hostGate?.beforeHost?.(context);
+                        await this.fontInventory.assertBinding(binding, target);
+                        if (await this.observeEditSessionHostProfile() !== 'foreground_unlocked')
+                            throw new Error('FONT_INVENTORY_FOREGROUND_REQUIRED');
+                        return admission;
+                    },
+                    afterHost: async (context) => {
+                        const data = unwrap(context.data);
+                        await this.fontInventory.assertBinding(binding, target);
+                        if (await this.observeEditSessionHostProfile() !== 'foreground_unlocked')
+                            throw new Error('FONT_INVENTORY_FOREGROUND_REQUIRED');
+                        await command.hostGate?.afterHost?.({ ...context, data: data.value });
+                        this.fontInventory.accept(binding, data.inventory);
+                    },
+                },
+            }));
+            return { ...result, data: unwrap(result.data).value };
+        }
+        catch (error) {
+            this.fontInventory.clear();
+            throw error;
+        }
+    }
     async createDocument(input) {
-        const result = await this.bridge.execute({
+        const result = await this.executeHost({
             kind: 'read',
             script: CREATE_DOCUMENT_SCRIPT,
             params: {
@@ -2720,12 +3125,12 @@ export class IllustratorOperationsCore {
             },
         };
     }
-    async readLifecycleDocument(expectedDocumentKey) {
+    async readLifecycleDocument(expectedDocumentKey, inspectItemCount = false) {
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: LIFECYCLE_READ_SCRIPT,
-                params: { expectedDocumentKey },
+                params: { expectedDocumentKey, ...(inspectItemCount ? { inspectItemCount: true } : {}) },
                 hostGate: { beforeHost: async () => { await this.#leaseGuard.assertNoUnresolvedSession(); } },
             });
             return { read: result.data };
@@ -2738,6 +3143,19 @@ export class IllustratorOperationsCore {
                 return { rejected: { reason: 'document_key_mismatch', message: lifecycleMismatchMessage(detail) } };
             }
             throw error;
+        }
+    }
+    async saveSessionIdentityForDocument(document) {
+        if (document.path === null || document.fileRevision === null || document.fileRevision === '')
+            return { state: 'unproven', reason: 'document_file_unavailable' };
+        try {
+            const candidate = await this.#editSessions.store.findActiveForPath(document.path);
+            if (candidate.state !== 'valid')
+                return { state: 'unproven', reason: candidate.state === 'invalid' ? candidate.reason : 'no_session' };
+            return await proveSaveSessionIdentity(candidate.record, { path: document.path, fileRevision: document.fileRevision });
+        }
+        catch (error) {
+            return { state: 'unproven', reason: error instanceof Error ? error.message : String(error) };
         }
     }
     async saveDocumentAs(input) {
@@ -2763,6 +3181,9 @@ export class IllustratorOperationsCore {
         document = preflight.read.document;
         if (document.path === null)
             return rejected('document_not_admitted', document.mutationBlockedReason ?? 'The document path could not be read; save-as is refused.');
+        const barredEarly = await saveBarrierRefusal(this.bridge.releaseBarrierStore?.() ?? null, document, { prepare: false, ownPathOnly: true });
+        if (barredEarly !== null)
+            return rejected('document_not_admitted', barredEarly);
         stage = 'validate_path';
         let previousRealPath = null;
         let previousFacts = null;
@@ -2831,7 +3252,7 @@ export class IllustratorOperationsCore {
                 stage = 'save_as';
                 let data;
                 try {
-                    const result = await this.bridge.execute({
+                    const result = await this.executeHost({
                         kind: 'read',
                         script: SAVE_DOCUMENT_AS_SCRIPT,
                         params: { expectedDocumentKey: input.expectedDocumentKey, outputPath: stagedPath },
@@ -2839,6 +3260,9 @@ export class IllustratorOperationsCore {
                         hostGate: {
                             beforeHost: async () => {
                                 await this.#leaseGuard.assertNoUnresolvedSession();
+                                const sessionIdentity = await this.saveSessionIdentityForDocument(document);
+                                if (await saveBarrierRefusal(this.bridge.releaseBarrierStore?.() ?? null, document, { prepare: true, sessionIdentity }) !== null)
+                                    throw new SaveBarrierRefusedError();
                                 await parentScope.assertStable();
                                 await assertOutputAbsent(outputPath);
                                 const parent = await lstat(output.parent, { bigint: true });
@@ -2881,6 +3305,8 @@ export class IllustratorOperationsCore {
                     const preHost = error instanceof ExportPreconditionError ||
                         ['DOCUMENT_MISMATCH', 'DOCUMENT_KEY_AMBIGUOUS', 'OUTPUT_EXISTS', 'LIFECYCLE_PATH_UNAVAILABLE', 'LIFECYCLE_INVALID_INPUT'].includes(detail?.code ?? '');
                     if (pendingId === null) {
+                        if (error instanceof SaveBarrierRefusedError)
+                            return rejected('document_not_admitted', error.message);
                         if (error instanceof ExportPreconditionError)
                             return rejected(error.reason === 'output_exists' ? 'output_exists' : 'output_path_invalid', error.message);
                         throw error;
@@ -2967,7 +3393,7 @@ export class IllustratorOperationsCore {
                 stage = 'switch_reference';
                 let switched;
                 try {
-                    const result = await this.bridge.execute({
+                    const result = await this.executeHost({
                         kind: 'read',
                         script: SAVE_AS_SWITCH_SCRIPT,
                         params: { expectedDocumentKey: savedContext.key, stagedPath, outputPath },
@@ -2992,6 +3418,10 @@ export class IllustratorOperationsCore {
                     if (error instanceof LifecyclePreconditionError || error instanceof SaveAsLeaseChangedError)
                         return indeterminate(error.message);
                     const detail = parseMcpError(error);
+                    if (detail?.code === 'OUTPUT_ALREADY_OPEN') {
+                        lastMessage = `Another document already uses the output (collection index ${String(detail.index)}); nothing was closed or opened, so no second document was created. The document still points at the staged file. Close the document that uses ${outputPath}, then run illustrator_reconcile_save_as.`;
+                        return { outcome: 'failed', reason: 'output_already_open', message: lastMessage, document, files: { ...files }, ...pending() };
+                    }
                     if (detail?.code !== undefined)
                         return indeterminate(`The document could not be switched to the published output (${lifecycleDetailMessage(detail)}). It is still open and points at the staged file.`);
                     return indeterminate(`The document could not be switched to the published output: ${describe(error)}`);
@@ -3091,15 +3521,14 @@ export class IllustratorOperationsCore {
                 throw new SaveAsLeaseChangedError(saveAsId);
             }
         };
-        let documents;
+        let documents = [];
         try {
-            const inventory = await this.bridge.execute({
+            await this.executeHost({
                 kind: 'read',
                 script: SAVE_AS_INVENTORY_SCRIPT,
                 params: { stagedPath: session.stagedPath, outputPath: session.outputPath },
-                hostGate: { beforeHost: leaseUnchanged },
+                hostGate: { beforeHost: leaseUnchanged, afterHost: async ({ data }) => { documents = await matchingDocumentPaths(data, [session.stagedPath, session.outputPath]); } },
             });
-            documents = inventory.data.documents;
         }
         catch (error) {
             if (error instanceof IndeterminateExecutionError) {
@@ -3178,7 +3607,7 @@ export class IllustratorOperationsCore {
                     return await released('The save-as had already converged; its session was released.');
                 case 'published_staging_left': {
                     if (action !== 'cleanup_staging') {
-                        return { ...observed('published_staging_left', `The output ${session.outputPath} is published; only the staging name is left. Run action=cleanup_staging.${documents.some((document) => document.path === session.outputPath) ? '' : ' Then open the output with illustrator_open_document.'}`), nextCall: next({ action: 'cleanup_staging' }) };
+                        return { ...observed('published_staging_left', `The output ${session.outputPath} is published; only the staging name is left. Run action=cleanup_staging.${documents.some((document) => sameFilePath(document.path, session.outputPath)) ? '' : ' Then open the output with illustrator_open_document.'}`), nextCall: next({ action: 'cleanup_staging' }) };
                     }
                     await leaseUnchanged();
                     if (facts.staged.state === 'present' && facts.output.state === 'present') {
@@ -3209,7 +3638,7 @@ export class IllustratorOperationsCore {
                     const hashedIdentity = { dev: facts.output.dev, ino: facts.output.ino, size: facts.output.size, mtimeNs: facts.output.mtimeNs };
                     let switched;
                     try {
-                        const result = await this.bridge.execute({
+                        const result = await this.executeHost({
                             kind: 'read',
                             script: SAVE_AS_SWITCH_SCRIPT,
                             params: { expectedDocumentKey: classification.document.key, stagedPath: session.stagedPath, outputPath: session.outputPath },
@@ -3303,9 +3732,23 @@ export class IllustratorOperationsCore {
         let stage = 'read_document';
         let document = null;
         let sourcePath = null;
+        let scan = null;
+        const toolStarted = this.#saveScans.now();
         const indeterminate = (message, commandId = null) => ({ outcome: 'indeterminate', stage, message, commandId, document, path: sourcePath });
         const rejected = (reason, message) => ({ outcome: 'rejected', reason, message, document });
-        const preflight = await this.readLifecycleDocument(input.expectedDocumentKey);
+        if (input.scanContinuation !== undefined) {
+            try {
+                scan = this.#saveScans.start(input);
+                if (input.acceptChunkedScanWindow !== true || scan.save === undefined)
+                    throw new EditSessionScanError('scan_context_mismatch');
+            }
+            catch (error) {
+                if (error instanceof EditSessionScanError)
+                    return rejected(error.reason, 'The save scan token expired or does not match this request. Nothing was written; start a fresh save with explicit consent.');
+                throw error;
+            }
+        }
+        const preflight = await this.readLifecycleDocument(scan?.save?.documentKey ?? input.expectedDocumentKey, true);
         if ('indeterminate' in preflight)
             return indeterminate(preflight.indeterminate.message, preflight.indeterminate.commandId);
         if ('rejected' in preflight)
@@ -3320,6 +3763,9 @@ export class IllustratorOperationsCore {
         }
         if (document.saved)
             return rejected('nothing_to_save', 'The document has no unsaved changes.');
+        const barredEarly = await saveBarrierRefusal(this.bridge.releaseBarrierStore?.() ?? null, document, { prepare: false, ownPathOnly: true });
+        if (barredEarly !== null)
+            return rejected('document_not_admitted', barredEarly);
         try {
             await assertCanonicalDocumentPath(document.path);
         }
@@ -3351,7 +3797,7 @@ export class IllustratorOperationsCore {
             return rejected('source_file_unavailable', `The document file could not be resolved: ${error instanceof Error ? error.message : String(error)}`);
         }
         sourcePath = document.path;
-        if (record.sourcePath !== sourceReal)
+        if (!sameFilePath(record.sourcePath, sourceReal))
             return rejected('backup_mismatch', `Backup ${input.backupId} was taken from ${record.sourcePath}, not from ${sourceReal}.`);
         if (record.sourceFileRevision !== document.fileRevision) {
             return rejected('backup_stale', `Backup ${input.backupId} recorded file revision ${record.sourceFileRevision}; the document reports ${document.fileRevision}. Create a new backup.`);
@@ -3380,71 +3826,162 @@ export class IllustratorOperationsCore {
         if (sessionRead.state === 'invalid') {
             return rejected('edit_session_invalid', `An edit session record cannot be read (${sessionRead.reason}); inspect it with illustrator_get_edit_session before saving.`);
         }
-        const session = sessionRead.state === 'valid' ? sessionRead.record : null;
+        const currentSession = sessionRead.state === 'valid' ? sessionRead.record : null;
+        if (scan !== null && (currentSession === null || currentSession.sessionId !== scan.save.session.sessionId ||
+            currentSession.state !== 'open' || currentSession.head.sequence !== scan.save.session.head.sequence)) {
+            return rejected('edit_session_mismatch', new EditSessionChangedDuringSaveError().message);
+        }
+        const session = scan?.save?.session ?? currentSession;
         if (session?.state === 'suspended') {
             return rejected('edit_session_suspended', `Edit session ${session.sessionId} is suspended (${session.suspendReason ?? 'unknown'}); the document may hold changes the session cannot vouch for. ` +
-                'Restore the session backup, or close the session with illustrator_close_edit_session and save on your own judgement.');
+                'Restore the session backup, or close the session with illustrator_close_edit_session and save on your own judgement. ' + USER_SAVED_SESSION_HINT);
         }
         if (session !== null && session.backupId !== record.backupId) {
             return rejected('edit_session_backup_mismatch', `Edit session ${session.sessionId} was opened with backup ${session.backupId}; save with that backup_id.`);
         }
+        if (session !== null && (!Number.isSafeInteger(preflight.read.pageItemCount) || preflight.read.pageItemCount === null)) {
+            return rejected('edit_session_scan_incomplete', 'The item count could not be read; nothing was written and the session remains open.');
+        }
+        if (scan === null && session !== null && preflight.read.pageItemCount > EDIT_SESSION_MAX_ITEMS && input.acceptChunkedScanWindow === true) {
+            scan = this.#saveScans.start(input);
+            scan.save = { documentKey: document.key, session };
+            scan.backup = record;
+            scan.sourceIdentity = sourceFacts.identity;
+            scan.backupIdentity = backupFacts.identity;
+            scan.total = preflight.read.pageItemCount;
+        }
+        if (scan !== null && (!isDeepStrictEqual(record, scan.backup) || !sameContentIdentity(sourceFacts.identity, scan.sourceIdentity) ||
+            !sameContentIdentity(backupFacts.identity, scan.backupIdentity))) {
+            return rejected('backup_stale', 'The source or backup record/identity changed during the save scan. Nothing was written.');
+        }
+        const inProgress = () => ({ outcome: 'scan_in_progress', scan_continuation: this.#saveScans.continue(scan),
+            progress: { items: scan.partial.visited, total: scan.total, calls: scan.calls,
+                elapsedMs: this.#saveScans.now() - scan.startedAt, estimatedRemainingMs: scan.estimatedRemainingMs } });
+        const fitsDispatch = () => this.#saveScans.now() - toolStarted + this.#scanTiming.deadlineMs + EDIT_SESSION_SCAN_MARGIN_MS <= this.#scanTiming.toolWallMs;
+        const verifyBackup = async () => {
+            const currentRecord = await this.backupStore.readRecord(record.backupId);
+            const currentBackup = await readFileFacts(record.backupPath);
+            if (!isDeepStrictEqual(currentRecord, record) || !sameContentIdentity(currentBackup.identity, backupFacts.identity) ||
+                currentBackup.sha256 !== record.sha256 || currentBackup.bytes !== record.bytes) {
+                throw new LifecyclePreconditionError('backup_stale', 'The verified backup changed during the save scan.');
+            }
+        };
+        let verification;
         let sessionOutcome;
         stage = 'save';
         let data;
         try {
-            const result = await this.bridge.execute({
-                kind: 'read',
-                script: SAVE_DOCUMENT_SCRIPT,
-                params: {
-                    expectedDocumentKey: input.expectedDocumentKey, path: sourceReal, expectedRevision: record.sourceFileRevision, expectedBytes: record.bytes,
-                    ...(session === null ? {} : { editSession: {
-                            structureDigest: session.head.structureDigest, itemAggregate: session.head.itemAggregate,
-                            deadlineMs: EDIT_SESSION_SCAN_DEADLINE_MS, maxItems: EDIT_SESSION_MAX_ITEMS,
-                        } }),
-                },
-                timeoutMs: LIFECYCLE_HOST_TIMEOUT_MS,
-                hostGate: {
-                    beforeHost: async () => {
-                        await this.#leaseGuard.assertNoUnresolvedSession();
-                        const current = await readFileFacts(sourceReal);
-                        if (!sameContentIdentity(current.identity, sourceFacts.identity) || current.sha256 !== sourceFacts.sha256) {
-                            throw new LifecyclePreconditionError('backup_stale', 'The document file changed after the backup was verified; save is refused.');
-                        }
-                        const sessionNow = await this.#editSessions.store.findActiveForPath(sourceReal);
-                        const sameSession = session === null
-                            ? sessionNow.state === 'missing'
-                            : sessionNow.state === 'valid' && sessionNow.record.sessionId === session.sessionId && sessionNow.record.state === 'open' &&
-                                sessionNow.record.head.sequence === session.head.sequence;
-                        if (!sameSession)
-                            throw new EditSessionChangedDuringSaveError();
+            for (;;) {
+                if (scan !== null) {
+                    this.#saveScans.checkLimits(scan);
+                    if (!fitsDispatch())
+                        return inProgress();
+                }
+                const result = await this.executeHost({
+                    kind: 'read',
+                    script: SAVE_DOCUMENT_SCRIPT,
+                    params: {
+                        expectedDocumentKey: scan?.save?.documentKey ?? input.expectedDocumentKey, path: document.path, expectedRevision: record.sourceFileRevision, expectedBytes: record.bytes,
+                        ...(session === null ? {} : { editSession: {
+                                structureDigest: session.head.structureDigest, itemAggregate: session.head.itemAggregate,
+                                deadlineMs: EDIT_SESSION_SCAN_DEADLINE_MS, maxItems: EDIT_SESSION_MAX_ITEMS,
+                                ...(scan === null ? {} : { chunk: { cursor: scan.cursor, partial: scan.partial, total: scan.total,
+                                        scanDeadlineAt: scan.startedAt + EDIT_SESSION_CHUNKED_MAX_TOTAL_MS,
+                                        options: { budgetMs: this.#scanTiming.budgetMs, deadlineMs: this.#scanTiming.deadlineMs,
+                                            maxItems: EDIT_SESSION_CHUNKED_MAX_ITEMS, maxRows: EDIT_SESSION_CHUNKED_MAX_ITEMS,
+                                            loMaxRows: EDIT_SESSION_CHUNKED_MAX_ITEMS, expectStructure: session.head.structureDigest } } }),
+                            } }),
                     },
-                    afterHost: async ({ data: hostData }) => {
-                        if (session === null)
-                            return;
-                        const host = hostData;
-                        if (host.outcome === 'edit_session_mismatch') {
-                            await this.#editSessions.store.suspend(session.sessionId, host.check.structureDigest !== session.head.structureDigest ? 'structure_changed' : 'item_aggregate_mismatch');
-                        }
-                        else if (host.outcome === 'saved') {
-                            let state = 'open';
-                            try {
-                                state = (await this.#editSessions.store.close(session.sessionId)).state === 'closed' ? 'closed' : 'open';
+                    timeoutMs: LIFECYCLE_HOST_TIMEOUT_MS,
+                    hostGate: {
+                        beforeHost: async () => {
+                            await this.#leaseGuard.assertNoUnresolvedSession();
+                            await assertSameFilePathIdentity(sourcePath, sourceReal);
+                            await assertSameFilePathIdentity(record.sourcePath, sourceReal);
+                            const current = await readFileFacts(sourceReal);
+                            if (!sameContentIdentity(current.identity, sourceFacts.identity) || current.sha256 !== sourceFacts.sha256) {
+                                throw new LifecyclePreconditionError('backup_stale', 'The document file changed after the backup was verified; save is refused.');
                             }
-                            catch {
-                                state = 'open';
+                            const sessionNow = await this.#editSessions.store.findActiveForPath(sourceReal);
+                            const sameSession = session === null
+                                ? sessionNow.state === 'missing'
+                                : sessionNow.state === 'valid' && sessionNow.record.sessionId === session.sessionId && sessionNow.record.state === 'open' &&
+                                    sessionNow.record.head.sequence === session.head.sequence;
+                            if (!sameSession)
+                                throw new EditSessionChangedDuringSaveError();
+                            const sessionIdentity = sessionNow.state === 'valid'
+                                ? await proveSaveSessionIdentity(sessionNow.record, { path: sourcePath, fileRevision: document.fileRevision })
+                                : { state: 'unproven', reason: 'no_session' };
+                            if (await saveBarrierRefusal(this.bridge.releaseBarrierStore?.() ?? null, document, { prepare: true, sessionIdentity }) !== null)
+                                throw new SaveBarrierRefusedError();
+                            if (scan !== null) {
+                                await verifyBackup();
+                                this.#saveScans.checkLimits(scan);
+                                if (!fitsDispatch())
+                                    throw new EditSessionSaveYield();
                             }
-                            sessionOutcome = { sessionId: session.sessionId, state, scanMs: host.editSessionCheck?.scanMs ?? 0 };
-                        }
+                        },
+                        afterHost: async ({ commandId, data: hostData }) => {
+                            if (session === null)
+                                return;
+                            const host = hostData;
+                            if (scan !== null && (host.outcome === 'edit_session_scan_continue' || host.outcome === 'saved')) {
+                                try {
+                                    const chunk = editSessionChunkSchema.parse(host.chunk);
+                                    this.#saveScans.accept(scan, chunk, host.outcome === 'saved');
+                                    if (host.outcome === 'saved') {
+                                        if (!chunk.done || host.timing === undefined)
+                                            throw new Error('A saved chunk has no complete scan or timing evidence.');
+                                        await verifyBackup();
+                                        const facts = await readFileFacts(sourceReal);
+                                        await assertSameFilePathIdentity(host.document.path, sourceReal);
+                                        if (fileRevisionSize(host.document.fileRevision) !== facts.bytes)
+                                            throw new Error('The saved file facts differ from the host revision.');
+                                        verification = { mode: 'chunked', calls: scan.calls,
+                                            windowMs: Math.max(0, this.#saveScans.now() - scan.startedAt - host.timing.saveMs - host.timing.verifyMs),
+                                            scanMs: scan.partial.durationMs, ...host.timing };
+                                    }
+                                }
+                                catch (error) {
+                                    if (host.outcome === 'saved')
+                                        throw new IndeterminateExecutionError('The saved chunk could not be verified under the lock; reconcile before any further mutation. ' +
+                                            (error instanceof Error ? error.message : String(error)), commandId);
+                                    throw error;
+                                }
+                            }
+                            const suspension = saveSessionSuspension(host.outcome, 'check' in host ? host.check : null, session.head.structureDigest);
+                            if (suspension !== null) {
+                                await this.#editSessions.store.suspend(session.sessionId, suspension);
+                            }
+                            else if (host.outcome === 'saved') {
+                                let state = 'open';
+                                try {
+                                    state = (await this.#editSessions.store.close(session.sessionId)).state === 'closed' ? 'closed' : 'open';
+                                }
+                                catch {
+                                    state = 'open';
+                                }
+                                sessionOutcome = { sessionId: session.sessionId, state, scanMs: host.editSessionCheck?.scanMs ?? 0 };
+                            }
+                        },
                     },
-                },
-            });
-            data = result.data;
+                });
+                data = result.data;
+                if (data.outcome !== 'edit_session_scan_continue')
+                    break;
+            }
         }
         catch (error) {
+            if (error instanceof EditSessionSaveYield)
+                return inProgress();
+            if (error instanceof EditSessionScanError)
+                return rejected(error.reason, 'The save scan stopped: ' + error.reason + '. Nothing was written; the session is unchanged. Do not restart Illustrator before saving its pending changes.');
             if (error instanceof IndeterminateExecutionError)
                 return indeterminate(error.message, error.commandId);
             if (error instanceof EditSessionChangedDuringSaveError)
                 return rejected('edit_session_mismatch', error.message);
+            if (error instanceof SaveBarrierRefusedError)
+                return rejected('document_not_admitted', error.message);
             if (error instanceof LifecyclePreconditionError)
                 return rejected('backup_stale', error.message);
             const detail = parseMcpError(error);
@@ -3479,12 +4016,16 @@ export class IllustratorOperationsCore {
             document = data.document;
             return indeterminate(data.message);
         }
+        if (data.outcome === 'edit_session_scan_incomplete') {
+            document = data.document;
+            return rejected('edit_session_scan_incomplete', editSessionScanIncompleteMessage(session?.sessionId ?? '', data.check) +
+                (data.check.overLimit && input.acceptChunkedScanWindow !== true ? ` Chunked save supports up to ${EDIT_SESSION_CHUNKED_MAX_ITEMS.toLocaleString('en-US')} items and requires accept_chunked_scan_window=true after asking the user.` : ''));
+        }
         if (data.outcome === 'edit_session_mismatch') {
             document = data.document;
             const check = data.check;
             return rejected('edit_session_mismatch', `Nothing was written: the document no longer matches edit session ${session?.sessionId ?? ''} ` +
-                `(${check.truncated || check.overLimit ? 'the full scan did not complete' : check.structureDigest !== session?.head.structureDigest
-                    ? 'the structure changed' : 'an item changed outside the session'}), and the session is suspended. ` +
+                `(${check.structureDigest !== session?.head.structureDigest ? 'the structure changed' : 'an item changed outside the session'}), and the session is suspended. ` +
                 'Restore the session backup, or close the session and save on your own judgement.');
         }
         document = data.document;
@@ -3507,6 +4048,7 @@ export class IllustratorOperationsCore {
             backup: { backupId: record.backupId, backupPath: record.backupPath, bytes: record.bytes, sha256: record.sha256 },
             file: { ...serializeFileFacts(facts), inodeReplaced: facts.identity.ino !== sourceFacts.identity.ino },
             ...(sessionOutcome === undefined ? {} : { editSession: sessionOutcome }),
+            ...(verification === undefined ? {} : { verification }),
         };
     }
     async openDocument(input) {
@@ -3527,7 +4069,7 @@ export class IllustratorOperationsCore {
         stage = 'open';
         let data;
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: OPEN_DOCUMENT_SCRIPT,
                 params: { path: validated.path },
@@ -3591,7 +4133,7 @@ export class IllustratorOperationsCore {
         stage = 'close';
         let data;
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: CLOSE_DOCUMENT_SCRIPT,
                 params: { expectedDocumentKey: input.expectedDocumentKey, discardChanges: input.discardChanges },
@@ -3637,17 +4179,17 @@ export class IllustratorOperationsCore {
         };
     }
     async listLayers() {
-        const result = await this.bridge.execute({ kind: 'read', script: LIST_LAYERS_SCRIPT, hostGate: this.reportingReadGate() });
+        const result = await this.executeHost({ kind: 'read', script: LIST_LAYERS_SCRIPT, hostGate: this.reportingReadGate() });
         return result.data;
     }
     async listDocuments() {
-        const result = await this.bridge.execute({ kind: 'read', script: LIST_DOCUMENTS_SCRIPT, hostGate: this.reportingReadGate() });
+        const result = await this.executeHost({ kind: 'read', script: LIST_DOCUMENTS_SCRIPT, hostGate: this.reportingReadGate('list') });
         const { appVersion, ...list } = result.data;
         return { ...list, application: this.describeApplication(appVersion) };
     }
     async listSwatches(input) {
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: LIST_SWATCHES_SCRIPT, hostGate: this.reportingReadGate(),
                 params: input,
@@ -3664,7 +4206,7 @@ export class IllustratorOperationsCore {
     }
     async listTextStyles(input) {
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: LIST_TEXT_STYLES_SCRIPT, hostGate: this.reportingReadGate(),
                 params: {
@@ -3688,23 +4230,48 @@ export class IllustratorOperationsCore {
         const names = fontLookupInputSchema.parse(input.postScriptNames);
         if (new Set(names).size !== names.length)
             throw new Error('post_script_names must not repeat a name.');
-        const result = await this.bridge.execute({ kind: 'read', script: FIND_FONTS_SCRIPT,
+        const result = await this.executeHost({ kind: 'read', script: FIND_FONTS_SCRIPT,
             params: { postScriptNames: names } });
         const parsed = fontLookupResultSchema.parse(result.data);
         if (parsed.fonts.length !== names.length || parsed.fonts.some((entry, index) => entry.requested !== names[index])) {
             throw new Error('Font lookup did not answer exactly the requested names.');
         }
         const resolved = parsed.fonts.filter((entry) => entry.status === 'installed').map((entry) => entry.requested);
+        const target = this.bridge.applicationTarget?.() ?? null;
         const verification = resolved.length === 0 ? {}
-            : await this.fontVerifier.verify(resolved, this.bridge.applicationTarget?.()?.bundleId ?? null);
+            : await this.fontInventory.verify(await this.fontVerifier.verify(resolved, target?.bundleId ?? null), target);
         return fontLookupResultSchema.parse({ complete: true, fonts: parsed.fonts.map((entry) => entry.status === 'installed' && !verification[entry.requested]
                 ? { requested: entry.requested, status: 'unverified', font: entry.font, reason: 'not_found_outside_illustrator' }
                 : entry) });
     }
+    async searchFonts(input) {
+        const query = fontQuerySchema.parse(input.query);
+        const cursor = input.cursor === undefined ? null : fontCursorSchema.parse(input.cursor);
+        const result = await this.executeHost({ kind: 'read', script: FIND_FONTS_QUERY_SCRIPT,
+            params: { needles: fontQueryNeedles(query), byteLimit: FIND_FONTS_QUERY_BYTE_LIMIT } });
+        const host = fontQueryHostResultSchema.parse(result.data);
+        if (host.truncated) {
+            const guidance = host.fonts.length === 0
+                ? 'The installed font list is too large for one read, so no query can be answered here: pass the exact PostScript name in post_script_names.'
+                : 'Use a longer or more specific query.';
+            throw new Error(`FONT_QUERY_TOO_BROAD: the query matches more fonts than one read can return (stopped after ${host.fonts.length} rows, `
+                + `${host.scanned} of ${host.total} fonts scanned). ${guidance}`);
+        }
+        const page = selectFontSearchPage(host.fonts, query, cursor, FONT_SEARCH_PAGE_SIZE);
+        const target = this.bridge.applicationTarget?.() ?? null;
+        const names = page.fonts.map((font) => font.postScriptName);
+        const verification = names.length === 0 ? {}
+            : await this.fontInventory.verify(await this.fontVerifier.verify(names, target?.bundleId ?? null), target);
+        return fontSearchResultSchema.parse({ complete: true, matched: page.matched,
+            fonts: page.fonts.map((font) => verification[font.postScriptName]
+                ? { ...font, status: 'installed' }
+                : { ...font, status: 'unverified', reason: 'not_found_outside_illustrator' }),
+            next_cursor: page.nextCursor });
+    }
     async getPathPoints(input) {
         let data;
         try {
-            const result = await this.bridge.execute({ kind: 'read', script: GET_PATH_POINTS_SCRIPT, hostGate: this.reportingReadGate(), params: input });
+            const result = await this.executeHost({ kind: 'read', script: GET_PATH_POINTS_SCRIPT, hostGate: this.reportingReadGate(), params: input });
             data = result.data;
         }
         catch (error) {
@@ -3723,7 +4290,7 @@ export class IllustratorOperationsCore {
     async getAreaTextOptions(input) {
         let data;
         try {
-            const result = await this.bridge.execute({ kind: 'read', script: GET_AREA_TEXT_OPTIONS_SCRIPT, hostGate: this.reportingReadGate(), params: input });
+            const result = await this.executeHost({ kind: 'read', script: GET_AREA_TEXT_OPTIONS_SCRIPT, hostGate: this.reportingReadGate(), params: input });
             data = result.data;
         }
         catch (error) {
@@ -3743,11 +4310,16 @@ export class IllustratorOperationsCore {
         if (input.targetUuids !== undefined && new Set(input.targetUuids).size !== input.targetUuids.length) {
             throw new Error('target_uuids must not repeat a UUID.');
         }
+        const policies = input.policies ?? ['jp_line_break_v1'];
+        const policyError = jpAuditPolicyError(policies, input.justifyBody, input.paragraphShape);
+        if (policyError !== null)
+            throw new Error(policyError);
         let data;
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read', script: AUDIT_JAPANESE_TYPOGRAPHY_SCRIPT, hostGate: this.reportingReadGate(),
-                params: { expectedDocumentKey: input.expectedDocumentKey, targetUuids: input.targetUuids ?? null },
+                params: { expectedDocumentKey: input.expectedDocumentKey, targetUuids: input.targetUuids ?? null,
+                    readJustifyBody: policies.includes('jp_justify_body_v1') },
             });
             data = result.data;
         }
@@ -3767,6 +4339,9 @@ export class IllustratorOperationsCore {
             halfwidthPunctuation: input.halfwidthPunctuation,
             protectedTerms: [...new Set(input.protectedTerms)],
             maxFindings: input.maxFindings,
+            policies,
+            ...(input.justifyBody === undefined ? {} : { justifyBody: input.justifyBody }),
+            ...(input.paragraphShape === undefined ? {} : { paragraphShape: input.paragraphShape }),
         });
     }
     async listObjects(input) {
@@ -3781,7 +4356,7 @@ export class IllustratorOperationsCore {
             throw new InvalidCursorError();
         }
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: LIST_OBJECTS_SCRIPT, hostGate: this.reportingReadGate(),
                 params: {
@@ -3789,6 +4364,7 @@ export class IllustratorOperationsCore {
                     limit: input.limit,
                     offset: cursor?.offset ?? 0,
                     filters,
+                    deadlineMs: READ_SCAN_DEADLINE_MS,
                 },
             });
             if (cursor && (cursor.snapshotDigest !== result.data.snapshotDigest || cursor.snapshotCount !== result.data.snapshotCount)) {
@@ -3809,7 +4385,7 @@ export class IllustratorOperationsCore {
                 if (!lastItem)
                     throw new Error('Illustrator returned an invalid paginated object result.');
                 const nextCursor = await this.cursorSigner.sign({
-                    version: 1,
+                    version: 2,
                     documentKey: result.data.document.key,
                     filters,
                     offset: nextOffset,
@@ -3830,17 +4406,25 @@ export class IllustratorOperationsCore {
                     throw new StaleCursorError();
                 throw new DocumentMismatchError(detail.expected ?? '', detail.actual ?? '');
             }
+            const limit = readScanLimitError(detail);
+            if (limit !== null)
+                throw limit;
             throw error;
         }
     }
     async getObject(input) {
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: GET_OBJECT_SCRIPT, hostGate: this.reportingReadGate(),
-                params: input,
+                params: { ...input, deadlineMs: READ_SCAN_DEADLINE_MS },
             });
-            return result.data;
+            const data = result.data;
+            const raw = data.item.details;
+            if (data.item.details.kind === 'text_frame') {
+                data.item.details.unreadable = describeUnreadableTextReads(raw.unreadable ?? []);
+            }
+            return data;
         }
         catch (error) {
             const detail = parseMcpError(error);
@@ -3848,12 +4432,19 @@ export class IllustratorOperationsCore {
                 throw new DocumentMismatchError(detail.expected ?? '', detail.actual ?? '');
             if (detail?.code === 'OBJECT_NOT_FOUND')
                 throw new ObjectNotFoundError(detail.uuid ?? input.uuid);
+            if (detail?.code === 'OBJECT_ATTRIBUTE_UNREADABLE') {
+                const hostError = detail.hostError;
+                throw new ObjectAttributeUnreadableError(String(detail.attribute ?? 'unknown'), hostError?.number ?? null);
+            }
+            const limit = readScanLimitError(detail);
+            if (limit !== null)
+                throw limit;
             throw error;
         }
     }
     async readMeasuredLineHeights(input) {
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: READ_LINE_HEIGHT_SCRIPT, hostGate: this.reportingReadGate(),
                 params: input,
@@ -3877,7 +4468,60 @@ export class IllustratorOperationsCore {
             throw error;
         }
     }
-    async preflightImagesInternal(input) {
+    async inspectPreflightImageItems(items, minimumEffectivePpi) {
+        if (process.platform === 'win32' && !this.imagePreflightBatchGate) {
+            throw new Error('WINDOWS_IMAGE_PREFLIGHT_GATE_MISSING: linked files were not opened.');
+        }
+        const linkedPaths = [...new Set(items.flatMap((item) => item.file.status === 'available' ? [item.file.value.path] : []))];
+        let verdicts = null;
+        if (this.imagePreflightBatchGate && linkedPaths.length > 0) {
+            try {
+                const observed = await this.imagePreflightBatchGate(linkedPaths);
+                if (!(observed instanceof Map) || observed.size !== linkedPaths.length) {
+                    throw new Error('Linked image attribute observation is incomplete.');
+                }
+                const local = new Map();
+                for (const path of linkedPaths) {
+                    const verdict = observed.get(path);
+                    if (!verdict || (verdict.status !== 'clear' && verdict.status !== 'missing' &&
+                        verdict.status !== 'unavailable') || (verdict.status !== 'clear' && verdict.path !== path) ||
+                        (verdict.status === 'unavailable' && (verdict.reason !== 'file_stat_failed' || typeof verdict.message !== 'string'))) {
+                        throw new Error('Linked image attribute observation is invalid.');
+                    }
+                    local.set(path, verdict.status === 'clear' ? { status: 'clear' } : verdict.status === 'missing'
+                        ? { status: 'missing', path } : { ...verdict, message: verdict.message.slice(0, 500) });
+                }
+                verdicts = local;
+            }
+            catch (error) {
+                const detail = error instanceof Error ? error.message : String(error);
+                const message = `The linked file attributes were not observed; files were not opened (${detail}).`.slice(0, 500);
+                verdicts = new Map(linkedPaths.map((path) => [path,
+                    { status: 'unavailable', path, reason: 'file_stat_failed', message }]));
+            }
+        }
+        const inspections = new Map();
+        const inspectedItems = [];
+        for (const item of items) {
+            let inspection = null;
+            if (item.file.status === 'available') {
+                const path = item.file.value.path;
+                inspection = inspections.get(path) ?? null;
+                if (inspection === null) {
+                    const verdict = verdicts?.get(path);
+                    inspection = verdicts === null || verdict?.status === 'clear'
+                        ? await this.imageFileInspector.inspect(path)
+                        : verdict ?? { status: 'unavailable', path, reason: 'file_stat_failed',
+                            message: 'The linked file attributes were not observed; the file was not opened.' };
+                    if (inspection.status === 'available')
+                        inspections.set(path, inspection);
+                }
+            }
+            inspectedItems.push(createImagePreflightItem(item, inspection, minimumEffectivePpi));
+        }
+        return inspectedItems;
+    }
+    async preflightImagesInternal(input, deferContentInspection = false) {
         const documentScope = input.scope.mode === 'document' ? input.scope : null;
         const objectScope = input.scope.mode === 'objects' ? input.scope : null;
         const cursor = documentScope?.cursor !== undefined
@@ -3888,7 +4532,7 @@ export class IllustratorOperationsCore {
             throw new InvalidCursorError('The image-preflight cursor does not match this request.');
         }
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: IMAGE_PREFLIGHT_SCRIPT, hostGate: this.reportingReadGate(),
                 params: {
@@ -3910,28 +4554,16 @@ export class IllustratorOperationsCore {
                 cursor.previousUuid !== result.data.previousUuid)) {
                 throw new InvalidCursorError('The image-preflight cursor position is invalid.');
             }
-            const inspections = new Map();
-            const inspectedItems = [];
-            const eligibility = new Map();
-            for (const item of result.data.items) {
-                eligibility.set(item.uuid, {
+            const inspectedItems = deferContentInspection
+                ? result.data.items.map(item => createImagePreflightItem(item, null, input.minimumEffectivePpi))
+                : await this.inspectPreflightImageItems(result.data.items, input.minimumEffectivePpi);
+            const eligibility = new Map(result.data.items.map(item => [item.uuid, {
                     visible: item.effectiveVisible.status === 'available' ? item.effectiveVisible.value : null,
                     printable: item.effectivePrintable.status === 'available' ? item.effectivePrintable.value : null,
-                });
-                let inspection = null;
-                if (item.file.status === 'available') {
-                    const path = item.file.value.path;
-                    inspection = inspections.get(path) ?? null;
-                    if (inspection === null) {
-                        inspection = await this.imageFileInspector.inspect(path);
-                        if (inspection.status === 'available')
-                            inspections.set(path, inspection);
-                    }
-                }
-                inspectedItems.push(createImagePreflightItem(item, inspection, input.minimumEffectivePpi));
-            }
+                }]));
             const base = {
                 document: result.data.document,
+                scopeNote: PREFLIGHT_SCOPE_NOTE,
                 threshold: { minimumEffectivePpi: input.minimumEffectivePpi },
                 scope: documentScope !== null
                     ? { mode: 'document' }
@@ -3956,6 +4588,7 @@ export class IllustratorOperationsCore {
                 });
                 return {
                     page: { ...base, hasMore: true, nextCursor, complete: false, absenceConclusive: false },
+                    hostItems: result.data.items,
                     snapshotDigest: result.data.snapshotDigest,
                     snapshotCount: result.data.snapshotCount,
                     eligibility,
@@ -3963,6 +4596,7 @@ export class IllustratorOperationsCore {
             }
             return {
                 page: { ...base, hasMore: false, nextCursor: null, complete: true, absenceConclusive: true },
+                hostItems: result.data.items,
                 snapshotDigest: result.data.snapshotDigest,
                 snapshotCount: result.data.snapshotCount,
                 eligibility,
@@ -3995,7 +4629,7 @@ export class IllustratorOperationsCore {
     }
     async preflightPrint(input) {
         try {
-            const first = await this.bridge.execute({
+            const first = await this.executeHost({
                 kind: 'read',
                 script: PRINT_PREFLIGHT_SCRIPT, hostGate: this.reportingReadGate(),
                 params: {
@@ -4008,6 +4642,8 @@ export class IllustratorOperationsCore {
                 throw new Error('Illustrator did not verify print-preflight read integrity.');
             }
             const imageItems = [];
+            const batchImages = this.imagePreflightBatchGate !== undefined || process.platform === 'win32';
+            const hostImages = [];
             const imageEligibility = new Map();
             let imageComplete = first.data.scan.totalImages === 0;
             let cursor;
@@ -4021,7 +4657,7 @@ export class IllustratorOperationsCore {
                         limit: Math.min(50, remaining),
                         ...(cursor === undefined ? {} : { cursor }),
                     },
-                });
+                }, batchImages);
                 if (imagePage.snapshotDigest !== first.data.scan.imageSnapshotDigest ||
                     imagePage.snapshotCount !== first.data.scan.totalImages) {
                     throw new StaleCursorError('The Illustrator image snapshot changed during print preflight.');
@@ -4031,6 +4667,8 @@ export class IllustratorOperationsCore {
                     throw new StaleCursorError('The active document changed during print preflight.');
                 }
                 imageItems.push(...page.items);
+                if (batchImages)
+                    hostImages.push(...imagePage.hostItems);
                 for (const [uuid, state] of imagePage.eligibility)
                     imageEligibility.set(uuid, state);
                 if (!page.hasMore)
@@ -4041,7 +4679,10 @@ export class IllustratorOperationsCore {
             if (imageComplete && imageItems.length !== first.data.scan.totalImages) {
                 throw new StaleCursorError('The Illustrator image count changed during print preflight.');
             }
-            const final = await this.bridge.execute({
+            if (batchImages && hostImages.length > 0) {
+                imageItems.splice(0, imageItems.length, ...await this.inspectPreflightImageItems(hostImages, input.conditions.minimumEffectivePpi));
+            }
+            const final = await this.executeHost({
                 kind: 'read',
                 script: PRINT_PREFLIGHT_SCRIPT, hostGate: this.reportingReadGate(),
                 params: {
@@ -4096,9 +4737,10 @@ export class IllustratorOperationsCore {
     }
     async readStructureDigest(expectedDocumentKey, options = {}) {
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
-                script: CAPTURE_STRUCTURE_SNAPSHOT_SCRIPT, hostGate: this.reportingReadGate(),
+                script: options.captureBackupBaseline ? `${CAPTURE_STRUCTURE_SNAPSHOT_SCRIPT}\n${BACKUP_CAPTURE_BASELINE_JSX}` : CAPTURE_STRUCTURE_SNAPSHOT_SCRIPT,
+                hostGate: this.reportingReadGate(),
                 params: {
                     expectedDocumentKey,
                     mode: 'digest',
@@ -4131,7 +4773,7 @@ export class IllustratorOperationsCore {
         for (const page of digest.pages) {
             let data;
             try {
-                const result = await this.bridge.execute({
+                const result = await this.executeHost({
                     kind: 'read',
                     script: CAPTURE_STRUCTURE_SNAPSHOT_SCRIPT, hostGate: this.reportingReadGate(),
                     params: {
@@ -4188,6 +4830,7 @@ export class IllustratorOperationsCore {
             throw new StaleCursorError('The Illustrator document changed during design-token extraction.');
         }
         const textDetails = new Map();
+        const unreadableTextFrames = [];
         const textFrames = first.items.filter((item) => item.type === 'TextFrame');
         const measuredFrames = textFrames.slice(0, DESIGN_ANALYSIS_LIMITS.textFrameDetailReads);
         for (const frame of measuredFrames) {
@@ -4199,6 +4842,10 @@ export class IllustratorOperationsCore {
                 if (error instanceof ObjectNotFoundError) {
                     throw new StaleCursorError('The Illustrator document changed during design-token extraction.');
                 }
+                if (error instanceof ObjectAttributeUnreadableError) {
+                    unreadableTextFrames.push({ uuid: frame.uuid, name: frame.name, attributes: [error.attribute] });
+                    continue;
+                }
                 throw error;
             }
             if (detail.item.details.kind !== 'text_frame') {
@@ -4208,8 +4855,12 @@ export class IllustratorOperationsCore {
                 throw new StaleCursorError('The Illustrator document changed during design-token extraction.');
             }
             textDetails.set(frame.uuid, detail.item.details);
+            if (detail.item.details.unreadable.length > 0) {
+                const attributes = [...new Set(detail.item.details.unreadable.map((read) => read.attribute))].slice(0, 8);
+                unreadableTextFrames.push({ uuid: frame.uuid, name: frame.name, attributes });
+            }
         }
-        const uuids = measuredFrames.map((frame) => frame.uuid);
+        const uuids = measuredFrames.map((frame) => frame.uuid).filter((uuid) => textDetails.has(uuid));
         const beforeObservation = await this.hostProfileProbe.observe();
         const lineHeightBefore = isMeasuredLineHeightProfile(beforeObservation, first.document.appVersion)
             ? await this.readMeasuredLineHeights({ expectedDocumentKey: input.expectedDocumentKey, uuids })
@@ -4238,7 +4889,7 @@ export class IllustratorOperationsCore {
         if (lineHeightStableProfile && lineHeightAfter !== null)
             for (const [uuid, read] of lineHeightAfter)
                 lineHeightReads.set(uuid, read);
-        return createDesignTokens({ snapshot: first, swatches, textDetails, format: input.format,
+        return createDesignTokens({ snapshot: first, swatches, textDetails, unreadableTextFrames, format: input.format,
             lineHeightForeground: lineHeightStableProfile, lineHeightReads,
             lineHeightUnavailableReason: hostVersionAdmitted('line_height_read', first.document.appVersion)
                 ? 'foreground_profile_required' : 'unsupported_host_version' });
@@ -4263,6 +4914,8 @@ export class IllustratorOperationsCore {
                 catch (error) {
                     if (error instanceof ObjectNotFoundError)
                         throw new StaleCursorError('The Illustrator document changed during color replacement planning.');
+                    if (error instanceof ObjectAttributeUnreadableError)
+                        continue;
                     throw error;
                 }
                 if (detail.item.details.kind !== 'text_frame')
@@ -4400,12 +5053,46 @@ export class IllustratorOperationsCore {
         return await capturePreview({
             bridge: this.bridge,
             hostProfileProbe: this.hostProfileProbe,
+            activator: this.hostApplicationActivator,
+            previewRoot: join(this.exportStore.stateRootPath, 'previews'),
+        }, input);
+    }
+    async renderArtboards(input) {
+        return await renderArtboards({
+            bridge: this.bridge,
+            hostProfileProbe: this.hostProfileProbe,
+            store: this.#renderSets,
+            renderRoot: join(this.exportStore.stateRootPath, 'renders'),
+        }, input);
+    }
+    async extractText(input) {
+        return await extractText(this.bridge, this.hostProfileProbe, input, this.hostApplicationActivator);
+    }
+    async decodeBarcodeRaster(input) {
+        return await decodeBarcodeRaster({
+            bridge: this.bridge,
+            hostProfileProbe: this.hostProfileProbe,
+            previewRoot: join(this.exportStore.stateRootPath, 'previews'),
+        }, input);
+    }
+    async decodeQrRaster(input) {
+        return await decodeQrRaster({
+            bridge: this.bridge,
+            hostProfileProbe: this.hostProfileProbe,
+            previewRoot: join(this.exportStore.stateRootPath, 'previews'),
+        }, input);
+    }
+    async analyzeDisplaySpacing(input) {
+        return await analyzeDisplaySpacing({
+            bridge: this.bridge,
+            hostProfileProbe: this.hostProfileProbe,
+            reportingReadGate: this.reportingReadGate(),
             previewRoot: join(this.exportStore.stateRootPath, 'previews'),
         }, input);
     }
     async readClipFlags(expectedDocumentKey) {
         try {
-            const result = await this.bridge.execute({ kind: 'read', script: CLIP_FLAGS_SCRIPT, hostGate: this.reportingReadGate(), params: { expectedDocumentKey } });
+            const result = await this.executeHost({ kind: 'read', script: CLIP_FLAGS_SCRIPT, hostGate: this.reportingReadGate(), params: { expectedDocumentKey } });
             if (!documentKeyMatches(expectedDocumentKey, result.data.document.key))
                 throw new DocumentMismatchError(expectedDocumentKey, result.data.document.key);
             return result.data;
@@ -4471,15 +5158,71 @@ export class IllustratorOperationsCore {
             return false;
         return await this.bridge.commandExecutionState(commandId) === 'inactive';
     }
-    async releaseLeaseOnEvidence(session, remainingDocuments) {
-        if (remainingDocuments !== 0)
-            throw new Error(`The restore-test copy is still open (${remainingDocuments} document(s)).`);
+    async assertSameBackupSession(session) {
+        const current = await this.backupStore.readSession(session.backupId);
+        if (current === null)
+            throw new BackupSessionGoneError(session.backupId);
+        if (!isDeepStrictEqual(backupSessionSchema.parse(current), backupSessionSchema.parse(session))) {
+            throw new Error('The backup session binding changed; it stays unresolved.');
+        }
+    }
+    async releaseLeaseOnEvidence(session, inventory) {
+        await this.assertSameBackupSession(session);
+        if (inventory.documents.length !== 0)
+            return false;
+        if (session.version === 2) {
+            if (!Number.isSafeInteger(inventory.documentCount) || inventory.documentCount < 0 ||
+                !Array.isArray(inventory.allDocuments) || inventory.allDocuments.length !== inventory.documentCount) {
+                throw new Error('Illustrator returned an incomplete document inventory; the backup session stays unresolved.');
+            }
+            const documents = inventory.allDocuments.map((document) => hostDocumentIdentitySchema.parse(document));
+            if (documentsOutsideBackupBaseline(session, documents).length > 0)
+                return false;
+        }
         if (!(await this.commandInactive(session.openCommandId))) {
             throw new Error(`The host open command ${session.openCommandId} is not proven inactive; the backup session stays unresolved.`);
         }
         await this.backupStore.releaseSession(session.backupId);
+        return true;
     }
     async createBackup(input) {
+        const spoolHolder = { spool: null };
+        try {
+            return await this.runCreateBackup(input, spoolHolder);
+        }
+        finally {
+            await spoolHolder.spool?.dispose();
+        }
+    }
+    async readStructureStreamFor(expectedDocumentKey, spoolHolder, labelPrefix, hostGate, captureBackupBaseline = false) {
+        spoolHolder.spool ??= await StructureSpool.create(this.backupStore.stateRootPath);
+        const spool = spoolHolder.spool;
+        const host = {
+            newFile: (label) => spool.newFile(`${labelPrefix}-${label}`),
+            call: async (file, position) => {
+                try {
+                    const result = await this.executeHost({
+                        kind: 'read',
+                        script: captureBackupBaseline ? `${CAPTURE_STRUCTURE_STREAM_SCRIPT}\n${BACKUP_CAPTURE_BASELINE_JSX}` : CAPTURE_STRUCTURE_STREAM_SCRIPT,
+                        params: {
+                            expectedDocumentKey, spoolPath: file.path, position,
+                            budgetMs: STRUCTURE_STREAM_BUDGET_MS, deadlineMs: STRUCTURE_STREAM_DEADLINE_MS,
+                        },
+                        hostGate: hostGate ?? this.reportingReadGate(),
+                    });
+                    return result.data;
+                }
+                catch (error) {
+                    const scanLimit = readScanLimitError(parseMcpError(error));
+                    if (scanLimit !== null)
+                        throw scanLimit;
+                    throw this.structureReadError(error, expectedDocumentKey);
+                }
+            },
+        };
+        return await readStructureStream(host, labelPrefix);
+    }
+    async runCreateBackup(input, spoolHolder) {
         const files = { backupPath: null, restoreTestPath: null };
         let stage = 'read_source';
         let sessionId = null;
@@ -4491,10 +5234,21 @@ export class IllustratorOperationsCore {
             return indeterminate(error instanceof Error ? error.message : String(error));
         };
         const leaseGuard = async () => { await this.#leaseGuard.assertNoUnresolvedSession(); };
-        let source;
+        const baselineHolder = { value: null };
+        const sourceGate = {
+            beforeHost: leaseGuard,
+            afterHost: async ({ commandId, data }) => {
+                const captured = backupBaselineHostDataSchema.parse(data.backupBaseline);
+                baselineHolder.value = { ...captured, commandId };
+            },
+        };
+        let source = null;
+        let sourceStream = null;
+        const rejectTooLarge = (message) => ({ outcome: 'rejected', reason: 'document_too_large', message: `${message} Nothing was copied or opened. ${LARGE_DOCUMENT_WORKAROUND}`, document: null });
         try {
             source = await this.readStructureDigest(input.expectedDocumentKey, {
-                hostGate: { beforeHost: leaseGuard },
+                hostGate: sourceGate,
+                captureBackupBaseline: true,
                 maxPageItems: BACKUP_MAX_PAGE_ITEMS,
             });
         }
@@ -4506,15 +5260,40 @@ export class IllustratorOperationsCore {
             if (error instanceof DocumentMismatchError) {
                 return { outcome: 'rejected', reason: 'document_key_mismatch', message: error.message, document: null };
             }
-            if (error instanceof StructureSnapshotTooLargeError || error instanceof StructureSnapshotPagePlanError) {
-                return { outcome: 'rejected', reason: 'document_too_large', message: error.message, document: null };
+            if (error instanceof StructureSnapshotTooLargeError && error.collection === 'pageItems' && error.total <= BACKUP_STREAM_MAX_PAGE_ITEMS) {
+                try {
+                    sourceStream = await this.readStructureStreamFor(input.expectedDocumentKey, spoolHolder, 'source', sourceGate, true);
+                }
+                catch (streamError) {
+                    if (streamError instanceof BackupSessionUnresolvedError || streamError instanceof ExportSessionUnresolvedError || streamError instanceof UnresolvedLeaseError)
+                        throw streamError;
+                    if (streamError instanceof IndeterminateExecutionError)
+                        return asIndeterminate(streamError);
+                    if (streamError instanceof DocumentMismatchError || streamError instanceof StructureSnapshotChangedError) {
+                        return { outcome: 'rejected', reason: 'document_key_mismatch', message: streamError.message, document: null };
+                    }
+                    if (streamError instanceof StructureStreamError || streamError instanceof ReadScanLimitError) {
+                        return rejectTooLarge(`The structure of this ${error.total}-item document could not be read completely for a backup (${streamError.message}).`);
+                    }
+                    throw streamError;
+                }
             }
-            if (error instanceof StructureSnapshotChangedError) {
+            else if (error instanceof StructureSnapshotTooLargeError || error instanceof StructureSnapshotPagePlanError) {
+                return { outcome: 'rejected', reason: 'document_too_large', message: backupTooLargeMessage(error), document: null };
+            }
+            else if (error instanceof StructureSnapshotChangedError) {
                 return { outcome: 'rejected', reason: 'document_key_mismatch', message: error.message, document: null };
             }
-            throw error;
+            else {
+                throw error;
+            }
         }
-        const document = source.document;
+        const document = (source ?? sourceStream).document;
+        if (baselineHolder.value === null)
+            throw new Error('The source read did not return a completed backup baseline.');
+        const capturedBaseline = baselineHolder.value;
+        const sourceItemCount = source !== null ? source.scan.totalPageItems : sourceStream.items.length;
+        const sourceArtboardCount = source !== null ? source.scan.artboardCount : sourceStream.artboards.length;
         const admittedKey = document.key;
         if (document.mutationProfile !== 'saved_file' || document.path === null || document.fileRevision === null) {
             return {
@@ -4578,17 +5357,17 @@ export class IllustratorOperationsCore {
             let session = null;
             let opened;
             try {
-                const result = await this.bridge.execute({
+                const result = await this.executeHost({
                     kind: 'read',
                     script: BACKUP_OPEN_RESTORE_TEST_SCRIPT,
-                    params: { expectedDocumentKey: admittedKey, restoreTestPath },
+                    params: { expectedDocumentKey: admittedKey, restoreTestPath, restoreTestPathForms: hostPathForms(restoreTestPath) },
                     hostGate: {
                         beforeHost: async ({ commandId }) => {
                             await this.#leaseGuard.assertNoUnresolvedSession();
                             await rootScope.assertStable();
                             await verifyTrackedFile(restoreTestPath, restoreCopy.identity, copied.sha256);
                             const lease = {
-                                version: 1,
+                                version: 2,
                                 backupId,
                                 documentKey: input.expectedDocumentKey,
                                 sourcePath: sourceFile.path,
@@ -4601,6 +5380,9 @@ export class IllustratorOperationsCore {
                                 openCommandId: commandId,
                                 phase: 'open_pending',
                                 createdAt: new Date().toISOString(),
+                                documentCountBefore: capturedBaseline.documentCount,
+                                baselineDocuments: capturedBaseline.documents,
+                                baselineCaptureCommandId: capturedBaseline.commandId,
                             };
                             await this.backupStore.openSession(lease);
                             session = lease;
@@ -4617,6 +5399,8 @@ export class IllustratorOperationsCore {
                         throw error;
                     if (error instanceof BackupCopyError)
                         return failed('file_replaced', error.message);
+                    if (error instanceof BackupSessionCapacityError)
+                        return failed('baseline_capacity_exceeded', error.message);
                     return asIndeterminate(error);
                 }
                 if (error instanceof IndeterminateExecutionError)
@@ -4632,12 +5416,21 @@ export class IllustratorOperationsCore {
                     }
                     return failed('restore_test_open_failed', `The restore-test copy could not be opened (${detail.code}).`);
                 }
+                if ((detail?.code === 'BACKUP_RESTORE_TEST_PATH_MISMATCH' || detail?.code === 'BACKUP_RESTORE_TEST_NOT_ACTIVE') &&
+                    detail.closed === true && typeof detail.documentCountBefore === 'number' && Number.isInteger(detail.documentCountBefore) &&
+                    detail.documentCount === detail.documentCountBefore) {
+                    const release = await this.releaseViaInventory(session, detail.documentCountBefore);
+                    if (release !== 'released')
+                        return indeterminate(`The restore-test copy was closed after an unexpected open (${detail.code}) but the lease could not be released (${release}).`);
+                    sessionId = null;
+                    return failed('restore_test_open_failed', `The restore-test copy opened in an unexpected state (${detail.code}) and was closed; no backup record was written.`);
+                }
                 return asIndeterminate(error);
             }
             if (session === null)
                 return indeterminate('The open command completed without publishing its lease.');
             const lease = session;
-            if (!documentKeyMatches(admittedKey, opened.source.key) || opened.restored.path !== restoreTestPath ||
+            if (!documentKeyMatches(admittedKey, opened.source.key) || opened.restored.path === null || !sameFilePath(opened.restored.path, restoreTestPath) ||
                 documentKeyMatches(admittedKey, opened.restored.key) || opened.restored.fileRevision === null ||
                 opened.documentCountAfter !== opened.documentCountBefore + 1) {
                 return indeterminate('Illustrator reported an unexpected document inventory after opening the restore-test copy.');
@@ -4647,11 +5440,16 @@ export class IllustratorOperationsCore {
             let restoredRecords = null;
             let readFailure = null;
             try {
-                restored = await this.readStructureDigest(opened.restored.key, { maxPageItems: BACKUP_MAX_PAGE_ITEMS });
-                if (restored.scan.comparableDigest !== source.scan.comparableDigest ||
-                    restored.scan.totalPageItems !== source.scan.totalPageItems ||
-                    restored.scan.artboardCount !== source.scan.artboardCount) {
-                    restoredRecords = await this.readStructureSnapshotPaged(opened.restored.key, restored);
+                if (sourceStream !== null) {
+                    restoredRecords = await this.readStructureStreamFor(opened.restored.key, spoolHolder, 'restored');
+                }
+                else {
+                    restored = await this.readStructureDigest(opened.restored.key, { maxPageItems: BACKUP_MAX_PAGE_ITEMS });
+                    if (restored.scan.comparableDigest !== source.scan.comparableDigest ||
+                        restored.scan.totalPageItems !== source.scan.totalPageItems ||
+                        restored.scan.artboardCount !== source.scan.artboardCount) {
+                        restoredRecords = await this.readStructureSnapshotPaged(opened.restored.key, restored);
+                    }
                 }
             }
             catch (error) {
@@ -4662,11 +5460,12 @@ export class IllustratorOperationsCore {
             stage = 'close_restore_test';
             let closed;
             try {
-                const result = await this.bridge.execute({
+                const result = await this.executeHost({
                     kind: 'read',
                     script: BACKUP_CLOSE_RESTORE_TEST_SCRIPT,
                     params: {
                         restoreTestPath,
+                        restoreTestPathForms: hostPathForms(restoreTestPath),
                         restoredDocumentKey: opened.restored.key,
                         restoredFileRevision: opened.restored.fileRevision,
                         sourcePath,
@@ -4679,7 +5478,9 @@ export class IllustratorOperationsCore {
                             if (result.documentCount !== opened.documentCountBefore) {
                                 throw new Error('Illustrator reported an unexpected document inventory after closing the restore-test copy.');
                             }
-                            await this.releaseLeaseOnEvidence(lease, 0);
+                            if (!await this.releaseLeaseOnEvidence(lease, result)) {
+                                throw new Error('Documents outside the backup baseline remain open. Close them and run illustrator_reconcile_backup with action inspect.');
+                            }
                             sessionId = null;
                         },
                     },
@@ -4716,7 +5517,7 @@ export class IllustratorOperationsCore {
                 stage = 'compare_structure';
                 let sourceRecords;
                 try {
-                    sourceRecords = await this.readStructureSnapshotPaged(admittedKey, source);
+                    sourceRecords = sourceStream ?? await this.readStructureSnapshotPaged(admittedKey, source);
                 }
                 catch (error) {
                     if (error instanceof IndeterminateExecutionError)
@@ -4772,8 +5573,8 @@ export class IllustratorOperationsCore {
                     restoreTestPath,
                     restoreTestRemoved,
                     restoredDocumentKey: opened.restored.key,
-                    comparedItemCount: source.scan.totalPageItems,
-                    comparedArtboardCount: source.scan.artboardCount,
+                    comparedItemCount: sourceItemCount,
+                    comparedArtboardCount: sourceArtboardCount,
                     sourcePreserved: true,
                     verifiedAt: now,
                 },
@@ -4793,25 +5594,25 @@ export class IllustratorOperationsCore {
             return { outcome: 'verified', record, recordPath, retention: 'manual' };
         });
     }
-    async releaseViaInventory(session) {
+    async releaseViaInventory(session, expectedDocumentCount) {
         let released = false;
         let inventory;
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: BACKUP_INVENTORY_SCRIPT,
-                params: { restoreTestPath: session.restoreTestPath },
+                params: { restoreTestPath: session.restoreTestPath, restoreTestPathForms: hostPathForms(session.restoreTestPath) },
                 hostGate: {
                     beforeHost: async () => {
-                        if (await this.backupStore.readSession(session.backupId) === null)
-                            throw new BackupSessionGoneError(session.backupId);
+                        await this.assertSameBackupSession(session);
                     },
                     afterHost: async ({ data }) => {
                         const result = data;
                         if (result.documents.length !== 0)
                             return;
-                        await this.releaseLeaseOnEvidence(session, 0);
-                        released = true;
+                        if (expectedDocumentCount !== undefined && result.documentCount !== expectedDocumentCount)
+                            return;
+                        released = await this.releaseLeaseOnEvidence(session, result);
                     },
                 },
             });
@@ -4833,21 +5634,19 @@ export class IllustratorOperationsCore {
         let released = false;
         let inventory;
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: BACKUP_INVENTORY_SCRIPT,
-                params: { restoreTestPath: session.restoreTestPath },
+                params: { restoreTestPath: session.restoreTestPath, restoreTestPathForms: hostPathForms(session.restoreTestPath) },
                 hostGate: {
                     beforeHost: async () => {
-                        if (await this.backupStore.readSession(session.backupId) === null)
-                            throw new BackupSessionGoneError(session.backupId);
+                        await this.assertSameBackupSession(session);
                     },
                     afterHost: async ({ data }) => {
                         const result = data;
                         if (result.documents.length !== 0)
                             return;
-                        await this.releaseLeaseOnEvidence(session, 0);
-                        released = true;
+                        released = await this.releaseLeaseOnEvidence(session, result);
                     },
                 },
             });
@@ -4862,32 +5661,37 @@ export class IllustratorOperationsCore {
             return {
                 status: 'released', backupId: session.backupId, action: 'inspect', restoreTestPath: session.restoreTestPath,
                 documentCount: inventory.documentCount, closedDocument: null,
+                baseline: session.version === 1 ? 'absent' : 'captured', documentCountBefore: session.version === 1 ? null : session.documentCountBefore,
             };
         }
         if (input.action === 'inspect' || inventory.documents.length !== 1) {
+            if (inventory.documents.length === 0)
+                return this.backupReleaseRefused(session, inventory);
             return {
                 status: 'restore_test_open', backupId: session.backupId, restoreTestPath: session.restoreTestPath,
                 documents: inventory.documents, documentCount: inventory.documentCount,
+                baseline: session.version === 1 ? 'absent' : 'captured', documentCountBefore: session.version === 1 ? null : session.documentCountBefore,
             };
         }
         const target = inventory.documents[0];
         let closed;
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: BACKUP_RECONCILE_CLOSE_SCRIPT,
-                params: { restoreTestPath: session.restoreTestPath, expectedKey: target.key, expectedFileRevision: target.fileRevision },
+                params: {
+                    restoreTestPath: session.restoreTestPath, restoreTestPathForms: hostPathForms(session.restoreTestPath),
+                    expectedKey: target.key, expectedFileRevision: target.fileRevision,
+                },
                 hostGate: {
                     beforeHost: async () => {
-                        if (await this.backupStore.readSession(session.backupId) === null)
-                            throw new BackupSessionGoneError(session.backupId);
+                        await this.assertSameBackupSession(session);
                     },
                     afterHost: async ({ data }) => {
                         const result = data;
                         if (result.documents.length !== 0)
                             return;
-                        await this.releaseLeaseOnEvidence(session, 0);
-                        released = true;
+                        released = await this.releaseLeaseOnEvidence(session, result);
                     },
                 },
             });
@@ -4899,14 +5703,28 @@ export class IllustratorOperationsCore {
             throw error;
         }
         if (!released) {
+            if (closed.documents.length === 0)
+                return this.backupReleaseRefused(session, closed);
             return {
                 status: 'restore_test_open', backupId: session.backupId, restoreTestPath: session.restoreTestPath,
                 documents: closed.documents, documentCount: closed.documentCount,
+                baseline: session.version === 1 ? 'absent' : 'captured', documentCountBefore: session.version === 1 ? null : session.documentCountBefore,
             };
         }
         return {
             status: 'released', backupId: session.backupId, action: 'close_restore_test', restoreTestPath: session.restoreTestPath,
             documentCount: closed.documentCount, closedDocument: closed.closed,
+            baseline: session.version === 1 ? 'absent' : 'captured', documentCountBefore: session.version === 1 ? null : session.documentCountBefore,
+        };
+    }
+    backupReleaseRefused(session, inventory) {
+        return {
+            status: 'release_refused', backupId: session.backupId, restoreTestPath: session.restoreTestPath,
+            documentCount: inventory.documentCount, documentCountBefore: session.version === 1 ? null : session.documentCountBefore,
+            baseline: session.version === 1 ? 'absent' : 'captured',
+            outsideBaselineDocuments: documentsOutsideBackupBaseline(session, inventory.allDocuments),
+            message: 'Close the listed documents outside the backup baseline yourself, then run illustrator_reconcile_backup with action inspect. This tool closes only an identity-verified restore-test path match.',
+            nextCall: { tool: 'illustrator_reconcile_backup', arguments: { backup_id: session.backupId, action: 'inspect' } },
         };
     }
     async reconcileDelete(input) {
@@ -4922,10 +5740,16 @@ export class IllustratorOperationsCore {
         }
         if (record === null)
             return refused('backup_not_found', `No backup record exists for backup_id ${input.backupId}.`);
-        if (record.sourcePath !== input.expectedDocumentPath) {
+        if (!sameFilePath(record.sourcePath, input.expectedDocumentPath)) {
             return refused('backup_mismatch', `Backup ${input.backupId} was taken from ${record.sourcePath}, not from ${input.expectedDocumentPath}.`);
         }
         const sourcePath = record.sourcePath;
+        try {
+            await assertSameFilePathIdentity(input.expectedDocumentPath, sourcePath);
+        }
+        catch {
+            return refused('backup_mismatch', 'The expected path does not identify the recorded source entry.');
+        }
         if (input.action === 'inspect') {
             let fileMatchesBackup = false;
             try {
@@ -4935,12 +5759,21 @@ export class IllustratorOperationsCore {
             catch {
                 fileMatchesBackup = false;
             }
+            let documents = [];
             let data;
             try {
-                data = (await this.bridge.execute({
+                data = (await this.executeHost({
                     kind: 'read',
                     script: DELETE_INSPECT_SCRIPT,
                     params: { sourcePath, expectedDocumentKey: input.expectedDocumentKey, targetUuids: input.targetUuids },
+                    hostGate: {
+                        beforeHost: async () => { await assertSameFilePathIdentity(input.expectedDocumentPath, sourcePath); },
+                        afterHost: async ({ data }) => {
+                            const inventory = data;
+                            const matches = await matchingDocumentPaths({ documents: inventory.inventory, documentCount: inventory.documentCount }, [sourcePath]);
+                            documents = matches.map(({ path: _path, ...summary }) => summary);
+                        },
+                    },
                 })).data;
             }
             catch (error) {
@@ -4949,17 +5782,17 @@ export class IllustratorOperationsCore {
                     return refused('command_locked', locked);
                 throw error;
             }
-            const only = data.documents.length === 1 ? data.documents[0] : null;
+            const only = documents.length === 1 ? documents[0] : null;
             const allPresent = data.targets !== null && data.targets.every((target) => target.present);
             if (only !== null && only.saved && data.keyMatches && allPresent && fileMatchesBackup) {
                 return reconcileDeleteResultSchema.parse({
                     status: 'not_applied', action: 'inspect', backupId: input.backupId, path: sourcePath, fileMatchesBackup: true,
-                    documents: data.documents, targets: data.targets,
+                    documents: documents, targets: data.targets,
                     message: 'No deletion effect is present: the document is clean, carries the apply key, every target resolves, and the file matches the backup. No revert is needed.',
                 });
             }
             const reasons = [
-                data.documents.length === 1 ? null : `${data.documents.length} open documents use the path`,
+                documents.length === 1 ? null : `${documents.length} open documents use the path`,
                 only !== null && !only.saved ? 'the document has unsaved changes' : null,
                 only !== null && !data.keyMatches ? 'the document key differs from the apply key' : null,
                 data.targets !== null && !allPresent ? 'some targets no longer resolve' : null,
@@ -4967,7 +5800,7 @@ export class IllustratorOperationsCore {
             ].filter((reason) => reason !== null);
             return reconcileDeleteResultSchema.parse({
                 status: 'revert_required', action: 'inspect', backupId: input.backupId, path: sourcePath, fileMatchesBackup,
-                documents: data.documents, keyMatches: data.keyMatches, targets: data.targets,
+                documents: documents, keyMatches: data.keyMatches, targets: data.targets,
                 message: `A deletion may have happened (${reasons.join('; ') || 'not provably unapplied'}). To reopen the unchanged file, call action revert with confirm_document_key set to ${only === null ? 'null' : 'documents[0].key'}; unsaved changes in that document are discarded.`,
             });
         }
@@ -4987,7 +5820,7 @@ export class IllustratorOperationsCore {
         let fileUnchanged = false;
         let data;
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: DELETE_REVERT_SCRIPT,
                 params: {
@@ -4998,6 +5831,7 @@ export class IllustratorOperationsCore {
                 hostGate: {
                     beforeHost: async () => {
                         await this.#leaseGuard.assertNoUnresolvedSession();
+                        await assertSameFilePathIdentity(input.expectedDocumentPath, sourcePath);
                         const current = await verifyDeleteBackup(this.backupStore, input.backupId);
                         if (canonicalSha256(current) !== verifiedDigest) {
                             throw new DeleteBackupError('backup_stale', 'The backup record or file changed after it was verified; revert is refused.');
@@ -5097,7 +5931,7 @@ export class IllustratorOperationsCore {
             prepare: async ({ workCopyPath, opened }) => {
                 let data;
                 try {
-                    const result = await this.bridge.execute({
+                    const result = await this.executeHost({
                         kind: 'read',
                         script: EXPORT_OUTLINE_SCRIPT,
                         params: { workCopyPath, workCopyKey: opened.opened.key },
@@ -5183,7 +6017,12 @@ export class IllustratorOperationsCore {
         const started = performance.now();
         const elapsed = () => Math.round(performance.now() - started);
         const rejected = (reason, message, document = null, availablePresets = null) => ({ outcome: 'rejected', reason, message, document, availablePresets });
-        const read = await this.readExportSource(input.expectedDocumentKey, input.apply);
+        const bleedInput = normalizePdfBleed(input.bleed);
+        if ('reason' in bleedInput)
+            return rejected(bleedInput.reason, bleedInput.message);
+        const scanLimit = !input.apply && marksNeedRegistrationScan(input.marks) ? EXPORT_REGISTRATION_SCAN_LIMITS.pathItems : undefined;
+        const fontScanLimit = input.pdfx === undefined ? undefined : PDFX_FONT_SCAN_FRAME_LIMIT;
+        const read = await this.readExportSource(input.expectedDocumentKey, input.apply, scanLimit, fontScanLimit);
         if (read.kind === 'indeterminate') {
             return { outcome: 'indeterminate', stage: 'read_source', message: read.message, commandId: read.commandId, files: { workCopyPath: null, stagedPath: null, outputPath: null }, sessionId: null };
         }
@@ -5192,10 +6031,22 @@ export class IllustratorOperationsCore {
         const { source, document } = read;
         if (source.artboards.length === 0)
             return rejected('document_not_admitted', 'The document has no artboards.', document);
+        if (scanLimit !== undefined && (source.registrationScan === null || source.registrationScan === undefined)) {
+            throw new Error('The export source read did not return the requested Registration-line scan.');
+        }
         const plan = planPdfExport(input, document, source.artboards, source.pdfPresets);
         if ('reason' in plan)
             return rejected(plan.reason, plan.message, document, plan.reason === 'pdf_preset_unknown' ? source.pdfPresets : null);
         const preset = presetReport(plan.preset);
+        if (plan.pdfx !== null) {
+            if (source.fontScan === null || source.fontScan === undefined)
+                throw new Error('The export source read did not return the requested font scan.');
+            const names = source.fontScan.fontNames;
+            const verification = names.length === 0 ? {} : await this.fontVerifier.verify(names, this.bridge.applicationTarget?.()?.bundleId ?? null);
+            const refusal = pdfxFontRefusal(source.fontScan, verification);
+            if (refusal !== null)
+                return rejected('pdfx_fonts_unverified', refusal, document);
+        }
         if (!input.apply) {
             try {
                 const sourceRealPath = await realpath(document.path);
@@ -5209,17 +6060,28 @@ export class IllustratorOperationsCore {
             return {
                 outcome: 'planned',
                 document,
-                plan: { preset, artboardRange: plan.artboardRange, pages: plan.pages, marks: plan.marks, bleed: plan.bleed, outputPath: plan.outputPath, planDigest: plan.planDigest },
+                plan: { preset, artboardRange: plan.artboardRange, pages: plan.pages, marks: plan.marks, bleed: plan.bleed, bleedSource: plan.bleedSource, expectedBleedMm: plan.expectedBleedMm, pdfx: plan.pdfx, outputPath: plan.outputPath, planDigest: plan.planDigest },
                 nextCall: {
                     expected_document_key: input.expectedDocumentKey,
                     output_path: plan.outputPath,
                     pdf_preset: plan.preset,
                     artboards: plan.artboardRange,
                     marks: { trim: plan.marks.trim, registration: plan.marks.registration, color_bars: plan.marks.colorBars, page_information: plan.marks.pageInformation, style: plan.marks.style },
-                    bleed: { ...plan.bleed },
+                    bleed: plan.bleedSource === 'document_via_preset' ? { mode: 'document', expected_mm: 3 } : { ...plan.bleed },
+                    ...(plan.pdfx === null ? {} : { pdfx: {
+                            standard: plan.pdfx.standard,
+                            ...(plan.pdfx.outputCondition === null ? {} : { output_condition: {
+                                    identifier: plan.pdfx.outputCondition.identifier,
+                                    ...(plan.pdfx.outputCondition.condition === null ? {} : { condition: plan.pdfx.outputCondition.condition }),
+                                    ...(plan.pdfx.outputCondition.registry === null ? {} : { registry: plan.pdfx.outputCondition.registry }),
+                                } }),
+                        } }),
+                    ...(plan.preserveEditability === null ? {} : { preserve_editability: plan.preserveEditability }),
                     apply: true,
                     expected_plan_digest: plan.planDigest,
                 },
+                warnings: registrationScanWarnings(source.registrationScan),
+                registrationScan: source.registrationScan ?? null,
                 hostCalls: 1,
                 durationMs: elapsed(),
             };
@@ -5236,7 +6098,7 @@ export class IllustratorOperationsCore {
             outputPath: input.outputPath,
             source,
             document,
-            saveScript: PDF_EXPORT_SAVE_SCRIPT,
+            saveScript: input.preserveEditability === undefined ? PDF_EXPORT_SAVE_SCRIPT : PDF_EXPORT_SAVE_PRESERVE_SCRIPT,
             savePreAttemptCodes: PDF_EXPORT_SAVE_PRE_ATTEMPT_CODES,
             saveParams: ({ workCopyPath, workCopyKey, stagedPath, outputPath }) => ({ workCopyPath, workCopyKey, stagedPath, outputPath, ...pdfSaveParams(plan, source.artboards) }),
             verify: async (stagedPath, stagingDirectory) => {
@@ -5259,7 +6121,7 @@ export class IllustratorOperationsCore {
                 const verified = structure;
                 if (verified === null)
                     throw new Error('The PDF structure was not recorded before publication.');
-                const { verification, published, workCopyPath, workCopyRemoved, stagingDirectory, outputPath } = outcome.value;
+                const { verification, published, workCopyPath, workCopyRemoved, stagingDirectory, outputPath, save } = outcome.value;
                 return {
                     outcome: 'verified',
                     outputPath,
@@ -5269,10 +6131,14 @@ export class IllustratorOperationsCore {
                     artboardRange: plan.artboardRange,
                     marks: plan.marks,
                     bleed: plan.bleed,
+                    bleedSource: plan.bleedSource,
+                    expectedBleedMm: plan.expectedBleedMm,
                     pages: plan.pages.map((page, index) => ({
                         ...page, mediaBox: verified.pages[index].mediaBox, trimBox: verified.pages[index].trimBox, bleedBox: verified.pages[index].bleedBox,
                     })),
                     pdf: pdfFacts(verified),
+                    pdfx: pdfxReport(verified, plan.pdfx),
+                    ...preserveEditabilityOptions(plan.preserveEditability, save),
                     workCopy: { path: workCopyPath, removed: workCopyRemoved },
                     staging: { directory: stagingDirectory, removed: published.stagingRemoved },
                     sourcePreserved: true,
@@ -5282,13 +6148,13 @@ export class IllustratorOperationsCore {
             }
         }
     }
-    async readExportSource(expectedDocumentKey, leaseCheck) {
+    async readExportSource(expectedDocumentKey, leaseCheck, registrationScanLimit, fontScanLimit) {
         let source;
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
-                script: EXPORT_READ_SOURCE_SCRIPT,
-                params: { expectedDocumentKey },
+                script: fontScanLimit === undefined ? EXPORT_READ_SOURCE_SCRIPT : EXPORT_READ_SOURCE_FONTS_SCRIPT,
+                params: { expectedDocumentKey, ...(registrationScanLimit === undefined ? {} : { registrationScanLimit }), ...(fontScanLimit === undefined ? {} : { fontScanLimit }) },
                 ...(leaseCheck ? { hostGate: { beforeHost: async () => { await this.#leaseGuard.assertNoUnresolvedSession(); } } } : {}),
             });
             source = result.data;
@@ -5382,7 +6248,7 @@ export class IllustratorOperationsCore {
             let opened;
             try {
                 hostCalls += 1;
-                const result = await this.bridge.execute({
+                const result = await this.executeHost({
                     kind: 'read',
                     script: EXPORT_OPEN_WORK_COPY_SCRIPT,
                     params: { expectedDocumentKey: admittedKey, workCopyPath, stagedPath, outputPath: output.path, sessionPaths },
@@ -5461,7 +6327,7 @@ export class IllustratorOperationsCore {
             if (session === null)
                 return indeterminate('The open command completed without publishing its lease.');
             const lease = session;
-            if (opened.source.key !== admittedKey || opened.opened.path !== workCopyPath ||
+            if (opened.source.key !== admittedKey || (opened.opened.path === null || !sameFilePath(opened.opened.path, workCopyPath)) ||
                 opened.opened.key === admittedKey || opened.documentCountAfter !== opened.documentCountBefore + 1) {
                 return indeterminate('Illustrator reported an unexpected document inventory after opening the work copy.');
             }
@@ -5483,7 +6349,7 @@ export class IllustratorOperationsCore {
                 stage = 'save_output';
                 try {
                     hostCalls += 1;
-                    const result = await this.bridge.execute({
+                    const result = await this.executeHost({
                         kind: 'read',
                         script: spec.saveScript,
                         params: spec.saveParams({ workCopyPath, workCopyKey, stagedPath, outputPath: output.path }),
@@ -5525,7 +6391,7 @@ export class IllustratorOperationsCore {
                 }
                 if (saved !== null) {
                     files.stagedPath = stagedPath;
-                    if (saved.pathAfter !== stagedPath && saved.pathAfter !== workCopyPath) {
+                    if (!sameFilePath(saved.pathAfter, stagedPath) && !sameFilePath(saved.pathAfter, workCopyPath)) {
                         return indeterminate(`Illustrator reported an unexpected document path after saving (${saved.pathAfter}).`);
                     }
                     closeTarget = { path: saved.pathAfter, key: saved.workCopy.key };
@@ -5549,7 +6415,7 @@ export class IllustratorOperationsCore {
             let closed;
             try {
                 hostCalls += 1;
-                const result = await this.bridge.execute({
+                const result = await this.executeHost({
                     kind: 'read',
                     script: EXPORT_CLOSE_WORK_COPY_SCRIPT,
                     params: {
@@ -5567,6 +6433,8 @@ export class IllustratorOperationsCore {
                             if (result.documentCount !== opened.documentCountBefore) {
                                 throw new Error('Illustrator reported an unexpected document inventory after closing the work copy.');
                             }
+                            if ((await matchingDocumentPaths(result, sessionPaths)).length !== 0)
+                                throw new Error('A session document remains open; the export lease is kept.');
                             await this.releaseExportLeaseOnEvidence(lease, 0);
                             sessionId = null;
                         },
@@ -5644,7 +6512,7 @@ export class IllustratorOperationsCore {
                 await verifyOutputUnchanged(output.path, publishedVerification);
                 const value = await spec.finish({
                     exportId, sourcePath: sourceFile.path, sourceFileRevision, verification, published,
-                    workCopyPath, workCopyRemoved, stagingDirectory: staging.directory, outputPath: output.path,
+                    workCopyPath, workCopyRemoved, stagingDirectory: staging.directory, outputPath: output.path, save: saved,
                 });
                 return done({ kind: 'published', value });
             }
@@ -5662,8 +6530,10 @@ export class IllustratorOperationsCore {
         let stage = 'read_source';
         let sessionId = null;
         let chosenSave = null;
+        let evidenceDirectory;
         const indeterminate = (message, commandId = null) => ({ outcome: 'indeterminate', stage, message, commandId, files, sessionId, save: chosenSave });
-        const failed = (reason, message, details = []) => ({ outcome: 'failed', reason, stage, message, details, files, save: chosenSave });
+        const failed = (reason, message, details = []) => ({ outcome: 'failed', reason, stage, message, details, files, save: chosenSave,
+            ...(evidenceDirectory === undefined ? {} : { evidenceDirectory }) });
         const rejected = (reason, message, document = null, details = []) => ({ outcome: 'rejected', reason, message, document, details });
         const asIndeterminate = (error) => {
             if (error instanceof IndeterminateExecutionError)
@@ -5681,13 +6551,9 @@ export class IllustratorOperationsCore {
             }
         };
         const channel = this.bridge.applicationTarget?.()?.channel ?? 'unknown';
-        if (input.acceptUnmeasuredHostVersion !== undefined &&
-            (!HOST_VERSION_PATTERN.test(input.acceptUnmeasuredHostVersion) || channel !== 'stable')) {
-            return rejected('host_version_unmeasured', 'Consent requires the exact major.minor.patch host version and a stable application target.');
-        }
         let source;
         try {
-            const result = await timed('read', async () => await this.bridge.execute({
+            const result = await timed('read', async () => await this.executeHost({
                 kind: 'read',
                 script: IMAGE_OPTIMIZE_READ_SOURCE_SCRIPT,
                 params: { expectedDocumentKey: input.expectedDocumentKey, maxScannedImages: IMAGE_OPTIMIZE_MAX_SCANNED_IMAGES },
@@ -5718,9 +6584,9 @@ export class IllustratorOperationsCore {
             return rejected('document_not_admitted', document.mutationBlockedReason ?? EXPORT_REQUIRES_SAVED_FILE_MESSAGE, document);
         }
         const hostVersion = evaluateHostVersion('optimize_images', document.appVersion);
-        const consent = { ...(input.acceptUnmeasuredHostVersion === undefined ? {} : { acceptUnmeasuredHostVersion: input.acceptUnmeasuredHostVersion }), hostVersionChannel: channel };
-        if (!hostVersionAdmitted('optimize_images', document.appVersion, consent) || (hostVersion.status === 'patch_unmeasured' && channel !== 'stable')) {
-            return rejected('host_version_unmeasured', `Image optimization is not admitted on ${document.appVersion} (${hostVersion.status}, ${channel}). Ask the user before passing the exact version in accept_unmeasured_host_version; blocked, unreadable and non-stable versions cannot be accepted.`, document);
+        if (!hostVersionAdmitted('optimize_images', document.appVersion) || (hostVersion.status !== 'measured' && channel !== 'stable')) {
+            return rejected('host_version_unmeasured', `Image optimization is not admitted on ${document.appVersion} (${hostVersion.status}, ${channel}). `
+                + 'Blocked and unreadable versions, and versions that are not measured on a non-stable channel, cannot be used.', document);
         }
         if (document.colorSpace !== 'RGB') {
             return rejected('document_color_space_unsupported', 'Only RGB documents are measured: DEFAULTCOLORMODEL rasterizes to the document colour model.', document);
@@ -5855,10 +6721,10 @@ export class IllustratorOperationsCore {
             let session = null;
             let opened;
             try {
-                const result = await timed('open', async () => await this.bridge.execute({
+                const result = await timed('open', async () => await this.executeHost({
                     kind: 'read',
                     script: IMAGE_OPTIMIZE_VERSION_GUARD + EXPORT_OPEN_WORK_COPY_SCRIPT,
-                    params: { ...consent, expectedDocumentKey: admittedKey, workCopyPath, stagedPath, outputPath: output.path, sessionPaths },
+                    params: { expectedDocumentKey: admittedKey, workCopyPath, stagedPath, outputPath: output.path, sessionPaths },
                     timeoutMs: EXPORT_HOST_TIMEOUT_MS,
                     hostGate: {
                         beforeHost: async ({ commandId }) => {
@@ -5933,7 +6799,7 @@ export class IllustratorOperationsCore {
             if (session === null)
                 return indeterminate('The open command completed without publishing its lease.');
             const lease = session;
-            if (opened.source.key !== admittedKey || opened.opened.path !== workCopyPath ||
+            if (opened.source.key !== admittedKey || (opened.opened.path === null || !sameFilePath(opened.opened.path, workCopyPath)) ||
                 opened.opened.key === admittedKey || opened.documentCountAfter !== opened.documentCountBefore + 1) {
                 return indeterminate('Illustrator reported an unexpected document inventory after opening the work copy.');
             }
@@ -5943,10 +6809,10 @@ export class IllustratorOperationsCore {
             stage = 'baseline';
             let baseline = null;
             try {
-                const result = await timed('baseline', async () => await this.bridge.execute({
+                const result = await timed('baseline', async () => await this.executeHost({
                     kind: 'read',
                     script: IMAGE_OPTIMIZE_BASELINE_SCRIPT,
-                    params: { ...consent, workCopyPaths, workIdentity, maxScannedImages: IMAGE_OPTIMIZE_MAX_SCANNED_IMAGES, renderBeforeBase, renderScalePercent: render.scalePercent },
+                    params: { workCopyPaths, workIdentity, maxScannedImages: IMAGE_OPTIMIZE_MAX_SCANNED_IMAGES, renderBeforeBase, renderScalePercent: render.scalePercent },
                     timeoutMs: IMAGE_OPTIMIZE_HOST_TIMEOUT_MS,
                     hostGate: { beforeHost: async () => { await rootScope.assertStable(); } },
                 }));
@@ -5973,6 +6839,8 @@ export class IllustratorOperationsCore {
             let rasterized = null;
             const verified = [];
             let comparison = null;
+            let renderDiff = null;
+            let renderComparisonFailed = false;
             if (gateFailure === null && baseline !== null) {
                 stage = 'rasterize';
                 const workTargets = targets.map((target) => {
@@ -5980,10 +6848,10 @@ export class IllustratorOperationsCore {
                     return { uuid: facts.uuid, name: facts.name, layer: facts.layer, bounds: facts.bounds };
                 });
                 try {
-                    const result = await timed('rasterize', async () => await this.bridge.execute({
+                    const result = await timed('rasterize', async () => await this.executeHost({
                         kind: 'read',
                         script: IMAGE_OPTIMIZE_RASTERIZE_SCRIPT,
-                        params: { ...consent, workCopyPaths, workIdentity, targets: workTargets, geometryTolerance: IMAGE_OPTIMIZE_GEOMETRY_TOLERANCE_PT, capPpi: input.capPpi, renderAfterBase, renderScalePercent: render.scalePercent },
+                        params: { workCopyPaths, workIdentity, targets: workTargets, geometryTolerance: IMAGE_OPTIMIZE_GEOMETRY_TOLERANCE_PT, capPpi: input.capPpi, renderAfterBase, renderScalePercent: render.scalePercent },
                         timeoutMs: IMAGE_OPTIMIZE_HOST_TIMEOUT_MS,
                         hostGate: { beforeHost: async () => { await rootScope.assertStable(); } },
                     }));
@@ -6022,14 +6890,22 @@ export class IllustratorOperationsCore {
                     }
                     else {
                         try {
-                            comparison = (await comparePngImages({
+                            renderDiff = await comparePngImages({
                                 beforePath: `${renderBeforeBase}.png`, afterPath: `${renderAfterBase}.png`, threshold: IMAGE_OPTIMIZE_QUALITY_CONTRACT.channelThreshold,
-                            })).result.comparison;
+                                origin: 'private_state',
+                            });
+                            comparison = renderDiff.result.comparison;
                             const quality = renderQualityProblem(comparison);
-                            if (quality !== null)
+                            if (quality !== null) {
+                                renderComparisonFailed = true;
                                 gateFailure = { reason: 'render_quality_exceeded', stage: 'verify_result', message: quality, details: [] };
+                            }
+                            else {
+                                renderDiff = null;
+                            }
                         }
                         catch (error) {
+                            renderComparisonFailed = true;
                             gateFailure = { reason: 'verification_failed', stage: 'verify_result', message: `The renders could not be compared: ${error instanceof Error ? error.message : String(error)}`, details: [] };
                         }
                     }
@@ -6039,10 +6915,10 @@ export class IllustratorOperationsCore {
             if (gateFailure === null) {
                 stage = 'save_output';
                 try {
-                    const result = await timed('save', async () => await this.bridge.execute({
+                    const result = await timed('save', async () => await this.executeHost({
                         kind: 'read',
                         script: IMAGE_OPTIMIZE_SAVE_SCRIPT,
-                        params: { ...consent, workCopyPaths, workIdentity, stagedPath, outputPath: output.path, saveOptions },
+                        params: { workCopyPaths, workIdentity, stagedPath, outputPath: output.path, saveOptions },
                         timeoutMs: IMAGE_OPTIMIZE_HOST_TIMEOUT_MS,
                         hostGate: {
                             beforeHost: async () => {
@@ -6080,7 +6956,7 @@ export class IllustratorOperationsCore {
                 }
                 if (saved !== null) {
                     files.stagedPath = stagedPath;
-                    if (saved.pathAfter !== stagedPath)
+                    if (!sameFilePath(saved.pathAfter, stagedPath))
                         return indeterminate(`Illustrator reported an unexpected document path after saving (${saved.pathAfter}).`);
                 }
             }
@@ -6106,7 +6982,7 @@ export class IllustratorOperationsCore {
             stage = 'close_work_copy';
             let closed;
             try {
-                const result = await timed('close', async () => await this.bridge.execute({
+                const result = await timed('close', async () => await this.executeHost({
                     kind: 'read',
                     script: IMAGE_OPTIMIZE_CLOSE_WORK_COPY_SCRIPT,
                     params: { workCopyPaths, workIdentity, sessionPaths, sourcePath, expectedDocumentKey: admittedKey, sourceFileRevision },
@@ -6117,6 +6993,8 @@ export class IllustratorOperationsCore {
                             if (result.documentCount !== opened.documentCountBefore) {
                                 throw new Error('Illustrator reported an unexpected document inventory after closing the work copy.');
                             }
+                            if ((await matchingDocumentPaths(result, sessionPaths)).length !== 0)
+                                throw new Error('A session document remains open; the export lease is kept.');
                             await this.releaseExportLeaseOnEvidence(lease, 0);
                             sessionId = null;
                         },
@@ -6144,6 +7022,25 @@ export class IllustratorOperationsCore {
             if (sourceAfter.path !== sourceFile.path || !await sameFileOrSameBytes(sourceFile.path, sourceAfter.identity, sourceFile.identity, copied.sha256)) {
                 await removeRenders();
                 return failed('source_changed', 'The source file changed during the optimization.');
+            }
+            if (renderComparisonFailed && gateFailure !== null) {
+                try {
+                    const images = renderDiff?.images ?? {
+                        before: (await readStableImage(`${renderBeforeBase}.png`, 'before')).bytes,
+                        after: (await readStableImage(`${renderAfterBase}.png`, 'after')).bytes,
+                    };
+                    evidenceDirectory = await retainImageOptimizeEvidence(this.exportStore.stateRootPath, {
+                        ...images,
+                        summary: { exportId, capturedAt: new Date().toISOString(), reason: gateFailure.reason,
+                            message: gateFailure.message, qualityContract: IMAGE_OPTIMIZE_QUALITY_CONTRACT,
+                            comparison: renderDiff?.result ?? null },
+                    });
+                }
+                catch (error) {
+                    if (error instanceof ImageOptimizeEvidenceError && error.directory !== null)
+                        evidenceDirectory = error.directory;
+                    gateFailure.details.push(`Render evidence could not be fully retained: ${error instanceof Error ? error.message : String(error)}`);
+                }
             }
             const renderFilesRemoved = await removeRenders();
             if (gateFailure !== null) {
@@ -6208,7 +7105,7 @@ export class IllustratorOperationsCore {
         let released = false;
         let inventory;
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: EXPORT_INVENTORY_SCRIPT,
                 params: { sessionPaths: exportSessionPaths(session) },
@@ -6219,7 +7116,7 @@ export class IllustratorOperationsCore {
                     },
                     afterHost: async ({ data }) => {
                         const result = data;
-                        if (result.documents.length !== 0)
+                        if ((await matchingDocumentPaths(result, exportSessionPaths(session))).length !== 0)
                             return;
                         await this.releaseExportLeaseOnEvidence(session, 0);
                         released = true;
@@ -6235,12 +7132,15 @@ export class IllustratorOperationsCore {
         }
         if (released)
             return 'released';
-        return inventory.documents.length === 0 ? 'release_refused' : 'work_copy_open';
+        return (await matchingDocumentPaths(inventory, exportSessionPaths(session))).length === 0 ? 'release_refused' : 'work_copy_open';
     }
     async reconcileExport(input) {
         const saveAsLease = await this.#saveAs.store.read(input.exportId, 'session');
         if (saveAsLease.state === 'valid' || (saveAsLease.state === 'invalid' && await this.#saveAs.store.isSaveAsLease(input.exportId))) {
             throw new Error(`${input.exportId} is an illustrator_save_document_as session; run illustrator_reconcile_save_as with save_as_id=${input.exportId}.`);
+        }
+        if (await isBatchExportId(this.exportStore, input.exportId)) {
+            return await new RasterBatchExportReconciler({ bridge: this.bridge, exportStore: this.exportStore }).reconcile(input);
         }
         if (await this.isRasterExport(input.exportId)) {
             return await this.reconcileRasterExport({ exportId: input.exportId, action: input.action,
@@ -6258,7 +7158,7 @@ export class IllustratorOperationsCore {
         let released = false;
         let inventory;
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: EXPORT_INVENTORY_SCRIPT,
                 params: { sessionPaths },
@@ -6269,7 +7169,7 @@ export class IllustratorOperationsCore {
                     },
                     afterHost: async ({ data }) => {
                         const result = data;
-                        if (result.documents.length !== 0)
+                        if ((await matchingDocumentPaths(result, exportSessionPaths(session))).length !== 0)
                             return;
                         await this.releaseExportLeaseOnEvidence(session, 0);
                         released = true;
@@ -6283,9 +7183,10 @@ export class IllustratorOperationsCore {
                 return { status: 'no_session', exportId: input.exportId };
             throw error;
         }
+        const matchedDocuments = await matchingDocumentPaths(inventory, sessionPaths);
         const open = {
             status: 'work_copy_open', exportId: session.exportId, workCopyPath: session.workCopyPath, outputPath: session.outputPath,
-            documents: inventory.documents, documentCount: inventory.documentCount,
+            documents: matchedDocuments, documentCount: inventory.documentCount,
         };
         if (released) {
             return {
@@ -6293,13 +7194,13 @@ export class IllustratorOperationsCore {
                 outputPath: session.outputPath, documentCount: inventory.documentCount, closedDocument: null,
             };
         }
-        if (input.action === 'inspect' || inventory.documents.length !== 1)
+        if (input.action === 'inspect' || matchedDocuments.length !== 1)
             return open;
         const refused = (reason) => ({ ...open, status: 'close_refused', reason });
         const hostRecord = await this.exportStore.readHostRecord(session.exportId);
         if (hostRecord === null)
             return refused('host_record_unavailable');
-        const target = inventory.documents[0];
+        const target = matchedDocuments[0];
         const provenance = {
             workCopyPath: session.workCopyPath,
             stagedPath: session.stagedPath,
@@ -6312,7 +7213,7 @@ export class IllustratorOperationsCore {
             return refused(refusal);
         let closed;
         try {
-            const result = await this.bridge.execute({
+            const result = await this.executeHost({
                 kind: 'read',
                 script: EXPORT_RECONCILE_CLOSE_SCRIPT,
                 params: { sessionPaths, expected: target, provenance },
@@ -6324,7 +7225,7 @@ export class IllustratorOperationsCore {
                     },
                     afterHost: async ({ data }) => {
                         const result = data;
-                        if (result.documents.length !== 0)
+                        if ((await matchingDocumentPaths(result, exportSessionPaths(session))).length !== 0)
                             return;
                         await this.releaseExportLeaseOnEvidence(session, 0);
                         released = true;
@@ -6344,7 +7245,7 @@ export class IllustratorOperationsCore {
         if (!released) {
             return {
                 status: 'work_copy_open', exportId: session.exportId, workCopyPath: session.workCopyPath, outputPath: session.outputPath,
-                documents: closed.documents, documentCount: closed.documentCount,
+                documents: await matchingDocumentPaths(closed, sessionPaths), documentCount: closed.documentCount,
             };
         }
         return {
@@ -6358,10 +7259,11 @@ export class IllustratorOperationsCore {
             : await this.hostProfileProbe.observe();
         return observation.profile === 'foreground' ? 'foreground_unlocked' : observation.profile;
     }
-    reportingReadGate() {
-        return this.editSessionHostGate(false);
+    reportingReadGate(source = 'document') {
+        return this.editSessionHostGate(false, false, undefined, false, { source });
     }
-    editSessionHostGate(mutation, foregroundGuarded = false, adapterBeforeHost) {
+    editSessionHostGate(mutation, foregroundGuarded = false, adapterBeforeHost, dirtyFile = false, clean = { source: 'document' }) {
+        const barriers = this.bridge.releaseBarrierStore?.() ?? null;
         let observed = null;
         const hostProfile = () => !mutation
             ? Promise.resolve('unknown')
@@ -6378,108 +7280,176 @@ export class IllustratorOperationsCore {
                     await adapterBeforeHost();
                 await early;
                 const admission = await this.#editSessions.admissionInput(hostProfile, { strict: mutation });
-                return admission === undefined ? undefined : { editSessionAdmission: admission };
+                const dirty = barriers !== null ? await buildDirtyFileAdmission(barriers, this.#editSessions.store, dirtyFile) : undefined;
+                if (admission === undefined && dirty === undefined)
+                    return undefined;
+                return { ...(admission === undefined ? {} : { editSessionAdmission: admission }), ...(dirty === undefined ? {} : { dirtyFileAdmission: dirty }) };
             },
+            ...(!mutation && barriers !== null ? { afterHost: async ({ data }) => {
+                    if (clean.validate !== undefined && !clean.validate(data))
+                        return;
+                    await barriers.observeClean(data, clean.source);
+                } } : {}),
         };
     }
     async getEditSessions() {
         return listEditSessionsResult(await this.#editSessions.store.list());
     }
     async openEditSession(input) {
-        const rejected = (reason, message) => ({ outcome: 'rejected', reason, message });
-        let backup;
-        try {
-            backup = await this.backupStore.readRecord(input.backupId);
-        }
-        catch (error) {
-            if (error instanceof BackupRecordError)
-                return rejected('backup_invalid', error.message);
-            throw error;
-        }
-        if (backup === null)
-            return rejected('backup_not_found', `No backup record exists for backup_id ${input.backupId}; run illustrator_create_backup first.`);
-        const verifiedBackup = backup;
-        const hostProfile = this.observeEditSessionHostProfile();
+        let scan = null;
+        const rejected = (reason, message) => ({ outcome: 'rejected', reason, message: message +
+                (reason === 'unmeasured_host_state' ? ' ' + EDIT_SESSION_FOREGROUND_HINT : '') +
+                (reason === 'not_saved_file' ? ' ' + NOT_SAVED_FILE_SESSION_HINT : '') +
+                (reason === 'document_too_large' ? ' ' + editSessionTooLargeNote(scan?.total ?? null) : '') +
+                (['scan_too_slow', 'scan_time_limit', 'scan_call_limit', 'scan_no_progress'].includes(reason) ? ' ' + EDIT_SESSION_RESTART_HINT : '') });
+        const toolStarted = this.#openScans.now();
         let outcome = null;
         try {
-            await this.bridge.execute({
-                kind: 'read',
-                script: EDIT_SESSION_OPEN_SCRIPT,
-                params: { expectedDocumentKey: input.expectedDocumentKey },
-                timeoutMs: 120_000,
-                hostGate: {
-                    beforeHost: async () => { await this.#leaseGuard.assertNoUnresolvedSession(); },
-                    afterHost: async ({ data }) => {
-                        const snapshot = editSessionSnapshotSchema.parse(JSON.parse(String(data)));
-                        const path = snapshot.context.path;
-                        if (path === null) {
-                            outcome = rejected('not_saved_file', 'The document has no file path.');
-                            return;
-                        }
-                        let real;
-                        let facts;
-                        try {
-                            real = await realpath(path);
-                            facts = await readFileFacts(path);
-                        }
-                        catch (error) {
-                            outcome = rejected('source_file_unavailable', `The document file could not be read: ${error instanceof Error ? error.message : String(error)}`);
-                            return;
-                        }
-                        if (real !== path) {
-                            outcome = rejected('path_not_canonical', `The document path ${path} is not canonical (${real}); open the file by its real path.`);
-                            return;
-                        }
-                        const opened = await this.#editSessions.store.open({
-                            backupId: verifiedBackup.backupId,
-                            openingDocumentKey: snapshot.context.key,
-                            backup: verifiedBackup,
-                            observed: {
-                                sourcePath: path,
-                                sourceInode: { dev: facts.identity.dev.toString(), ino: facts.identity.ino.toString() },
-                                sourceSha256: facts.sha256,
-                                documentKey: snapshot.context.key,
-                                mutationProfile: snapshot.context.mutationProfile,
-                                saved: snapshot.context.saved,
-                                sourceFileRevision: snapshot.context.fileRevision,
-                                structure: snapshot.structure,
-                                structureStable: snapshot.structureStable,
-                                scan: snapshot.scan,
-                                hostProfile: await hostProfile,
-                            },
-                        });
-                        if (opened.outcome === 'refuse') {
-                            outcome = rejected(opened.reason, `The edit session was not opened: ${opened.reason}. Nothing was written.` +
-                                (opened.reason === 'unmeasured_host_state' ? ` ${EDIT_SESSION_FOREGROUND_HINT}` : ''));
-                            return;
-                        }
-                        outcome = {
-                            outcome: 'opened',
-                            session: summarizeEditSession(opened.record),
-                            document: snapshot.context,
-                            scan: { items: snapshot.scan.visited, scanMs: snapshot.structure.durationMs + snapshot.scan.durationMs },
-                        };
+            const activeScan = this.#openScans.start(input);
+            scan = activeScan;
+            const refuse = (reason, message) => {
+                throw new EditSessionOpenRejectedError(rejected(reason, message));
+            };
+            const preconditions = async (fullHash) => {
+                await this.#leaseGuard.assertNoUnresolvedSession();
+                let backup;
+                try {
+                    backup = await this.backupStore.readRecord(input.backupId);
+                }
+                catch (error) {
+                    if (error instanceof BackupRecordError)
+                        return refuse('backup_invalid', error.message);
+                    throw error;
+                }
+                if (backup === null)
+                    return refuse('backup_not_found', 'Run illustrator_create_backup first.');
+                if (activeScan.backup !== null && !isDeepStrictEqual(backup, activeScan.backup))
+                    return refuse('backup_mismatch', 'The backup record changed during the scan.');
+                activeScan.backup = backup;
+                const entries = await this.#editSessions.store.list();
+                if (entries.some((entry) => entry.read.state === 'invalid'))
+                    return refuse('session_record_invalid', 'An edit session record is unreadable.');
+                const active = entries.find((entry) => entry.read.state === 'valid' && entry.read.record.state !== 'closed' && sameFilePath(entry.read.record.sourcePath, backup.sourcePath));
+                if (active !== undefined && active.read.state === 'valid') {
+                    return refuse('active_session_exists', `The file already has an edit session that is ${active.read.record.state} (${active.read.record.sessionId}). ${USER_SAVED_SESSION_HINT}`);
+                }
+                let facts = null;
+                let sourceIdentity;
+                let real;
+                try {
+                    real = await realpath(backup.sourcePath);
+                    if (!sameFilePath(real, backup.sourcePath))
+                        return refuse('path_not_canonical', 'Open the file by its canonical path.');
+                    await assertSameFilePathIdentity(backup.sourcePath, real);
+                    if (fullHash)
+                        facts = await readFileFacts(real);
+                    sourceIdentity = facts?.identity ?? await readEditSessionScanIdentity(real);
+                }
+                catch (error) {
+                    if (error instanceof EditSessionOpenRejectedError)
+                        throw error;
+                    return refuse('source_file_unavailable', error instanceof Error ? error.message : String(error));
+                }
+                const inode = { dev: sourceIdentity.dev.toString(), ino: sourceIdentity.ino.toString() };
+                if ((facts !== null && (facts.sha256 !== backup.sha256 || facts.bytes !== backup.bytes)) ||
+                    (activeScan.sourceIdentity !== null && !isDeepStrictEqual(sourceIdentity, activeScan.sourceIdentity))) {
+                    return refuse('backup_mismatch', 'The source bytes or identity changed; no session was created.');
+                }
+                activeScan.sourceIdentity = sourceIdentity;
+                let backupFacts = null;
+                let backupIdentity;
+                try {
+                    if (fullHash)
+                        backupFacts = await readFileFacts(backup.backupPath);
+                    backupIdentity = backupFacts?.identity ?? await readEditSessionScanIdentity(backup.backupPath);
+                }
+                catch (error) {
+                    return refuse('backup_invalid', error instanceof Error ? error.message : String(error));
+                }
+                if ((backupFacts !== null && (backupFacts.sha256 !== backup.sha256 || backupFacts.bytes !== backup.bytes)) ||
+                    (activeScan.backupIdentity !== null && !isDeepStrictEqual(backupIdentity, activeScan.backupIdentity))) {
+                    return refuse('backup_invalid', 'The backup bytes or identity no longer match the initial verified record.');
+                }
+                activeScan.backupIdentity = backupIdentity;
+                if (await this.observeEditSessionHostProfile() !== 'foreground_unlocked')
+                    return refuse('unmeasured_host_state', 'Edit sessions require the measured foreground and unlocked host state.');
+                return { backup, facts, inode, real };
+            };
+            for (;;) {
+                this.#openScans.checkLimits(activeScan);
+                if (this.#openScans.now() - toolStarted + this.#scanTiming.deadlineMs + EDIT_SESSION_SCAN_MARGIN_MS > this.#scanTiming.toolWallMs) {
+                    return { outcome: 'scan_in_progress', scan_continuation: this.#openScans.continue(activeScan),
+                        progress: { items: activeScan.partial.visited, total: activeScan.total, calls: activeScan.calls,
+                            elapsedMs: this.#openScans.now() - activeScan.startedAt, estimatedRemainingMs: activeScan.estimatedRemainingMs } };
+                }
+                await this.executeHost({
+                    kind: 'read', script: EDIT_SESSION_OPEN_SCRIPT, timeoutMs: EDIT_SESSION_CHUNK_TIMEOUT_MS,
+                    params: { expectedDocumentKey: input.expectedDocumentKey, cursor: activeScan.cursor,
+                        scanOptions: { budgetMs: this.#scanTiming.budgetMs, deadlineMs: this.#scanTiming.deadlineMs,
+                            maxItems: EDIT_SESSION_CHUNKED_MAX_ITEMS, maxRows: EDIT_SESSION_CHUNKED_MAX_ITEMS,
+                            loMaxRows: EDIT_SESSION_CHUNKED_MAX_ITEMS, expectStructure: activeScan.structure?.digest ?? null } },
+                    hostGate: {
+                        beforeHost: async () => { await preconditions(activeScan.calls === 0); this.#openScans.checkLimits(activeScan); },
+                        afterHost: async ({ data }) => {
+                            const chunk = editSessionChunkSchema.parse(JSON.parse(String(data)));
+                            this.#openScans.accept(activeScan, chunk);
+                            for (const context of [chunk.contextStart, chunk.contextEnd]) {
+                                try {
+                                    await assertSameFilePathIdentity(context.path, activeScan.backup.sourcePath);
+                                }
+                                catch {
+                                    return refuse('backup_mismatch', 'The reported path and backup do not identify the same source file entry.');
+                                }
+                            }
+                            if (!chunk.done)
+                                return;
+                            const { backup, inode, facts, real } = await preconditions(true);
+                            const context = chunk.contextEnd;
+                            const opened = await this.#editSessions.store.open({
+                                backupId: backup.backupId, openingDocumentKey: context.key, backup,
+                                observed: {
+                                    sourcePath: real, sourceInode: inode, sourceSha256: facts.sha256,
+                                    documentKey: context.key, mutationProfile: context.mutationProfile, saved: context.saved,
+                                    sourceFileRevision: context.fileRevision, structure: activeScan.structure, structureStable: true,
+                                    scan: { aggregate: chunkedAggregateText(activeScan), total: activeScan.total, visited: activeScan.partial.visited,
+                                        missingUuid: activeScan.partial.missingUuid, unmeasured: activeScan.partial.unmeasured, truncated: false,
+                                        overLimit: false, layerRows: activeScan.partial.n - activeScan.partial.visited, durationMs: activeScan.partial.durationMs },
+                                    hostProfile: 'foreground_unlocked',
+                                },
+                            });
+                            if (opened.outcome === 'refuse') {
+                                outcome = rejected(opened.reason, 'The edit session was not opened: ' + opened.reason + '. Nothing was written.');
+                                return;
+                            }
+                            outcome = { outcome: 'opened', session: summarizeEditSession(opened.record), document: context,
+                                scan: { items: activeScan.partial.visited, scanMs: activeScan.partial.durationMs } };
+                            if (context.path !== null)
+                                await this.bridge.releaseBarrierStore?.()?.observeCleanScan(context.path);
+                        },
                     },
-                },
-            });
+                });
+                if (outcome !== null)
+                    return outcome;
+            }
         }
         catch (error) {
+            if (error instanceof EditSessionOpenRejectedError)
+                return error.result;
+            if (error instanceof EditSessionScanError || error instanceof EditSessionNotSavedFileError)
+                return rejected(error.reason, error.message);
             const detail = parseMcpError(error);
             if (detail?.code === 'DOCUMENT_MISMATCH' || detail?.code === 'DOCUMENT_KEY_AMBIGUOUS') {
-                return rejected('document_key_mismatch', lifecycleMismatchMessage(detail));
+                return rejected(scan !== null && scan.calls > 0 ? 'document_changed_during_scan' : 'document_key_mismatch', lifecycleMismatchMessage(detail));
             }
             throw error;
         }
-        if (outcome === null)
-            throw new Error('The edit session snapshot returned no decision.');
-        return outcome;
     }
     async closeEditSession(input) {
         if (input.confirmSessionId !== input.sessionId) {
             return { outcome: 'rejected', reason: 'confirmation_mismatch', message: 'confirm_session_id must exactly match session_id.' };
         }
         let outcome = null;
-        await this.bridge.execute({
+        await this.executeHost({
             kind: 'read',
             script: 'var result = { locked: true };',
             hostGate: {
@@ -6518,7 +7488,7 @@ export class IllustratorOperationsCore {
         return outcome;
     }
     async listSelection() {
-        const result = await this.bridge.execute({
+        const result = await this.executeHost({
             kind: 'read',
             script: LIST_SELECTION_SCRIPT, hostGate: this.reportingReadGate(),
         });
@@ -6528,47 +7498,53 @@ export class IllustratorOperationsCore {
         return (await this.executeAdapterWithHostVersion(operation, input)).response;
     }
     async executeAdapterWithHostVersion(operation, input) {
+        const { hostFilePathForms: _forms, hostFilePathComponents: _components, hostDocumentPathBindings: _bindings, ...rawInput } = input;
+        input = rawInput;
         let selectedAdapter = null;
         try {
             const registered = this.mutationAdapters.resolveOperation(operation);
+            const target = this.bridge.applicationTarget?.() ?? null;
+            const inventoryGuards = [];
             const services = { imageFileInspector: this.imageFileInspector, backupStore: this.backupStore,
-                fontVerifier: this.fontVerifier, applicationBundleId: this.bridge.applicationTarget?.()?.bundleId ?? null };
+                fontVerifier: { verify: async (names, bundleId) => {
+                        const verification = await this.fontInventory.verify(await this.fontVerifier.verify(names, bundleId), target);
+                        const guard = this.fontInventory.guard(verification, target);
+                        if (guard !== null)
+                            inventoryGuards.push(guard);
+                        return verification;
+                    } }, applicationBundleId: target?.bundleId ?? null };
             const policyOperation = registered.hostVersionOperation?.({ plan: { resource: input.resource } }) ?? null;
             if (policyOperation !== null) {
-                const channel = this.bridge.applicationTarget?.()?.channel ?? 'unknown';
-                const { hostVersionChannel: _channel, hostVersionBackup: _backup, ...request } = input;
-                input = request;
-                if (input.acceptUnmeasuredHostVersion !== undefined) {
-                    if (typeof input.acceptUnmeasuredHostVersion !== 'string' || !HOST_VERSION_PATTERN.test(input.acceptUnmeasuredHostVersion))
-                        throw new Error('HOST_VERSION_CONSENT_INVALID: Use the exact major.minor.patch host version.');
-                    if (channel !== 'stable')
-                        throw new Error('HOST_VERSION_CHANNEL_REFUSED: Consent is allowed only on the stable channel.');
-                    input = { ...input, hostVersionChannel: channel };
-                }
-                if (input.apply === true && input.acceptUnmeasuredHostVersion !== undefined && typeof input.backupId === 'string') {
-                    const record = await this.backupStore.readRecord(input.backupId);
-                    if (record === null)
-                        throw new Error('HOST_VERSION_BACKUP_REQUIRED: No verified backup record exists for backup_id.');
-                    const { backupId, sourcePath, sourceFileRevision, bytes, sha256 } = record;
-                    input = { ...input, hostVersionBackup: { backupId, sourcePath, sourceFileRevision, bytes, sha256 } };
-                }
+                const { hostVersionBackup: _backup, hostVersionChannel: _channel, ...request } = input;
+                input = request.apply === true ? { ...request, hostVersionChannel: this.bridge.applicationTarget?.()?.channel ?? 'unknown' } : request;
             }
             if (typeof registered.admit === 'function')
                 input = await registered.admit(input, services);
+            if (policyOperation !== null && input.apply === true && typeof input.backupId === 'string') {
+                const bound = input.backup;
+                const record = bound === undefined ? await this.backupStore.readRecord(input.backupId) : null;
+                const facts = bound ?? (record === null ? undefined : record);
+                if (facts !== undefined) {
+                    const { backupId, sourcePath, sourceFileRevision, bytes, sha256 } = facts;
+                    input = { ...input, hostVersionBackup: { backupId, sourcePath, sourceFileRevision, bytes, sha256 } };
+                }
+            }
             const prepared = this.mutationAdapters.prepare(operation, input);
             const { adapter, canonicalRequestDigest } = prepared;
             const admitted = input;
-            const command = { ...prepared.command, hostGate: this.editSessionHostGate(prepared.command.kind === 'mutation', prepared.command.kind === 'mutation' && prepared.command.mutationHostApplicationMode === 'foreground', prepared.command.kind === 'mutation'
-                    ? async () => {
-                        if (admitted.hostVersionBackup !== undefined) {
-                            const backup = await verifyDeleteBackup(this.backupStore, String(admitted.backupId));
-                            if (canonicalSha256(backup) !== canonicalSha256(admitted.hostVersionBackup))
-                                throw new Error('HOST_VERSION_BACKUP_STALE: Backup changed before dispatch.');
-                        }
-                        if (typeof adapter.beforeHost === 'function')
-                            await adapter.beforeHost(admitted, services);
+            const command = { ...prepared.command, hostGate: this.editSessionHostGate(prepared.command.kind === 'mutation', prepared.command.kind === 'mutation' && prepared.command.mutationHostApplicationMode === 'foreground', async () => {
+                    for (const guard of inventoryGuards)
+                        await guard();
+                    if (prepared.command.kind !== 'mutation')
+                        return;
+                    if (admitted.hostVersionBackup !== undefined && admitted.backup === undefined) {
+                        const backup = await verifyDeleteBackup(this.backupStore, String(admitted.backupId));
+                        if (canonicalSha256(backup) !== canonicalSha256(admitted.hostVersionBackup))
+                            throw new Error('HOST_VERSION_BACKUP_STALE: Backup changed before dispatch.');
                     }
-                    : undefined) };
+                    if (typeof adapter.beforeHost === 'function')
+                        await adapter.beforeHost(admitted, services);
+                }, DIRTY_FILE_ADMISSION_OPERATIONS.has(adapter.operation), { source: 'document', validate: (data) => adapter.resultSchema.safeParse(data).success }) };
             selectedAdapter = adapter;
             const applying = command.kind === 'mutation';
             if (applying) {
@@ -6581,8 +7557,13 @@ export class IllustratorOperationsCore {
                     registrationIdentity: adapter.safetyRegistrationIdentity,
                 });
             }
-            const result = await this.bridge.execute(command);
-            const response = adapter.tool.outputSchema.parse({ outcome: result.data, delivery: result.delivery });
+            const result = await this.executeHost(command);
+            const checkedResponse = adapter.tool.outputSchema.safeParse({ outcome: result.data, delivery: result.delivery });
+            if (!checkedResponse.success) {
+                throw new Error(`The result Illustrator returned for ${adapter.tool.name} failed the server's own consistency checks: ${summarizeValidationFailure(checkedResponse.error)}. ` +
+                    (applying ? 'The change may already be in the document; inspect it before retrying.' : 'Nothing was changed.'));
+            }
+            const response = checkedResponse.data;
             const resolver = applying
                 ? { resolve: this.bridge.resolveTerminalAttestation.bind(this.bridge) }
                 : null;
@@ -6604,11 +7585,6 @@ export class IllustratorOperationsCore {
                 })
                 : null;
             try {
-                if (applying && policyOperation !== null && admitted.acceptUnmeasuredHostVersion !== undefined) {
-                    const appVersion = outcome.document?.appVersion;
-                    if (!hostVersionAdmitted(policyOperation, appVersion, admitted))
-                        throw new Error('Host version evidence does not match the canonical consent.');
-                }
                 await adapter.assertSafetyConformance(outcome, canonicalRequestDigest, attestation, resolver);
             }
             catch (error) {
@@ -6616,7 +7592,7 @@ export class IllustratorOperationsCore {
                     throw error;
                 throw new PostHostConformanceError(result.commandId, terminalState, error);
             }
-            return { response, hostVersion: applying ? null : this.planHostVersion(adapter, outcome, admitted) };
+            return { response, hostVersion: this.planHostVersion(adapter, outcome, applying) };
         }
         catch (error) {
             if (error instanceof PostHostConformanceError || error instanceof HostVersionChannelRefusedError)
@@ -6635,12 +7611,12 @@ export class IllustratorOperationsCore {
             throw error;
         }
     }
-    planHostVersion(adapter, outcome, input) {
+    planHostVersion(adapter, outcome, applying) {
         const policyOperation = adapter.hostVersionOperation?.(outcome) ?? null;
         if (policyOperation === null)
             return null;
         const document = outcome.document;
-        return admitHostVersionPlan(policyOperation, document?.appVersion, this.bridge.applicationTarget?.()?.channel, input);
+        return admitHostVersionPlan(policyOperation, document?.appVersion, this.bridge.applicationTarget?.()?.channel, { ...(document?.path === undefined ? {} : { documentPath: document.path }), refuse: !applying });
     }
     async saveRecipe(input) {
         return await saveRecipe(input, { store: this.recipeStore });
@@ -6672,16 +7648,24 @@ export class IllustratorOperationsCore {
         return this.bridge.reconcile(options);
     }
     async rasterExport(input) {
-        return await new RasterExportOperation({
+        const dependencies = {
             bridge: this.bridge,
+            executeHost: this.executeHost.bind(this),
+            hostProfileProbe: this.hostProfileProbe,
             exportStore: this.exportStore,
             assertNoUnresolvedLease: async () => { await this.#leaseGuard.assertNoUnresolvedSession(); },
             editSessionForPath: async (path) => await this.#editSessions.store.findActiveForPath(path),
-        }).run(input);
+        };
+        const checked = (isBatchInput(input) ? rasterBatchInputSchema : rasterExportInputSchema).safeParse(input, { error: toolArgumentIssueMessage });
+        if (!checked.success)
+            throw new Error(formatToolArgumentError('illustrator_export', checked.error.issues));
+        if (isBatchInput(input))
+            return await new RasterBatchExportOperation(dependencies).run(input);
+        return await new RasterExportOperation(dependencies).run(input);
     }
     async isRasterExport(exportId) {
         const entry = await this.exportStore.readSessionEntry(exportId);
-        if (entry?.format === 'v2')
+        if (entry?.format === 'v2' || entry?.format === 'v3')
             return true;
         if (entry?.format === 'v1')
             return false;

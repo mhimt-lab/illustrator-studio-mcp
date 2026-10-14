@@ -9,6 +9,7 @@ import { documentContextSchema, layerPathSchema, mutationAuditSchema } from '../
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { ANCESTOR_STATE_SCRIPT } from './ancestor-state-host-script.js';
 import { admitSourceWithColorSpace, placeImageAdmissionSchema } from './place-image-adapter.js';
+import { inspectEmbedSourceStructure } from '../embed-source-structure.js';
 import { describeHostVersionScope } from '../host-version-admission.js';
 import { HOST_VERSION_POLICY_JSX } from '../host-version-policy.js';
 export const EMBED_IMAGE_OPERATION = 'embed_image';
@@ -18,6 +19,15 @@ export const EMBED_IMAGE_TOLERANCE_PT = 0.01;
 export const EMBED_IMAGE_PRECISION_DIGITS = 6;
 export const EMBED_IMAGE_MEASURED_FORMATS = ['jpeg', 'png'];
 export const EMBED_IMAGE_MEASURED_COLOR_SPACES = ['RGB'];
+export const EMBED_IMAGE_CMYK_PROFILE = 'cmyk_flat_raster_v1';
+export const EMBED_IMAGE_CMYK_MEASURED_SOURCES = {
+    psd: { RGB: { channels: 3, layers: 1 }, CMYK: { channels: 4, layers: 1 } },
+    tiff: { CMYK: { channels: 4, layers: 0 } },
+};
+export const EMBED_IMAGE_CMYK_UNIFORM_SCALE_TOLERANCE = 1e-4;
+export const EMBED_IMAGE_CMYK_EXPECTED = { imageColorSpace: 'ImageColorSpace.CMYK', bitsPerChannel: 8, channels: 4 };
+export const EMBED_IMAGE_CMYK_MATRIX_TOLERANCE = 1e-6;
+export const EMBED_IMAGE_PPI_RELATIVE_TOLERANCE = 1e-4;
 const CANONICAL_VERSION = 2;
 const RESULT_SCHEMA_VERSION = 2;
 const CLASSIFIER_VERSION = 1;
@@ -75,6 +85,10 @@ const rasterEvidenceSchema = z.strictObject({
     rasterCountBefore: z.number().int().nonnegative(),
     rasterCountAfter: z.number().int().nonnegative(),
     saved: z.boolean(),
+    profile: z.literal(EMBED_IMAGE_CMYK_PROFILE).optional(),
+    wrapperDisposition: z.enum(['direct_raster', 'unwrap_single_raster_group']).optional(),
+    effectivePpiBefore: z.tuple([z.number().finite(), z.number().finite()]).optional(),
+    effectivePpiAfter: z.tuple([z.number().finite(), z.number().finite()]).optional(),
 });
 export function embedStateOf(snapshot) {
     const { uuid: _uuid, ...state } = snapshot;
@@ -108,6 +122,36 @@ const colorSpaceAdmissionSchema = z.strictObject({
     value: z.enum(['RGB', 'CMYK', 'Gray', 'Lab', 'Indexed', 'unknown']).nullable(),
     message: z.string().max(500).nullable(),
 });
+export const embedSourceProfileSchema = z.strictObject({
+    profile: z.literal(EMBED_IMAGE_CMYK_PROFILE),
+    icc: z.enum(['present', 'absent', 'unavailable']),
+    structure: z.strictObject({
+        status: z.enum(['flat', 'layered', 'multi_page', 'unsupported', 'unavailable']),
+        bitsPerChannel: z.number().int().nonnegative().nullable(),
+        channels: z.number().int().nonnegative().nullable(),
+        layers: z.number().int().nonnegative().nullable(),
+    }),
+});
+export function cmykProfileBlockers(plan) {
+    const blockers = [];
+    const format = plan.sourceAdmission.status === 'admitted' ? plan.sourceAdmission.format : undefined;
+    const byColor = format === 'psd' || format === 'tiff' ? EMBED_IMAGE_CMYK_MEASURED_SOURCES[format] : {};
+    const color = plan.sourceColorSpace.status === 'available' ? plan.sourceColorSpace.value ?? '' : '';
+    const measured = Object.prototype.hasOwnProperty.call(byColor, color) ? byColor[color] : null;
+    if (measured === null)
+        blockers.push('source_color_space_unmeasured');
+    if (plan.sourceProfile.icc !== 'present')
+        blockers.push('source_icc_unmeasured');
+    const structure = plan.sourceProfile.structure;
+    if (measured !== null && (structure.status !== 'flat' || structure.bitsPerChannel !== 8 || structure.channels !== measured.channels || structure.layers !== measured.layers)) {
+        blockers.push('source_structure_unmeasured');
+    }
+    const [a, b, c, d] = plan.before.matrix;
+    if (Math.abs(b) > EMBED_IMAGE_CMYK_MATRIX_TOLERANCE || Math.abs(c) > EMBED_IMAGE_CMYK_MATRIX_TOLERANCE || !(a > 0) || !(d < 0) ||
+        Math.abs(a - Math.abs(d)) > EMBED_IMAGE_CMYK_UNIFORM_SCALE_TOLERANCE * Math.abs(a))
+        blockers.push('target_transform_unmeasured');
+    return blockers;
+}
 const commonRequest = { ...hostVersionInternalFields,
     expectedDocumentKey: documentKeySchema,
     targetUuid: uuidSchema,
@@ -117,6 +161,7 @@ const commonRequest = { ...hostVersionInternalFields,
 const admissionFields = {
     sourceAdmission: placeImageAdmissionSchema.optional(),
     sourceColorSpace: colorSpaceAdmissionSchema.optional(),
+    sourceProfile: embedSourceProfileSchema.optional(),
     sourceModifiedAtMs: z.number().int().nonnegative().optional(),
     backup: deleteBackupFactsSchema.optional(),
 };
@@ -173,15 +218,24 @@ export async function admitEmbedImageRequest(input, services) {
     const backup = await verifyDeleteBackup(services.backupStore, request.backupId);
     const admitted = await admitSourceWithColorSpace(request.source, services.imageFileInspector);
     let sourceAdmission = admitted.admission;
-    if (sourceAdmission.status === 'admitted' && !EMBED_IMAGE_MEASURED_FORMATS.includes(sourceAdmission.format)) {
+    const cmykFormat = sourceAdmission.status === 'admitted' && (sourceAdmission.format === 'psd' || sourceAdmission.format === 'tiff') ? sourceAdmission.format : null;
+    if (sourceAdmission.status === 'admitted' && cmykFormat === null && !EMBED_IMAGE_MEASURED_FORMATS.includes(sourceAdmission.format)) {
         sourceAdmission = { status: 'blocked', resolvedPath: sourceAdmission.resolvedPath, reason: 'source_format_unmeasured',
-            message: `Embedding is measured for ${EMBED_IMAGE_MEASURED_FORMATS.join(', ')} sources only; ${sourceAdmission.format} is excluded.` };
+            message: `Embedding is measured for ${EMBED_IMAGE_MEASURED_FORMATS.join(', ')} and (CMYK documents) ${Object.keys(EMBED_IMAGE_CMYK_MEASURED_SOURCES).join(', ')} sources only; ${sourceAdmission.format} is excluded.` };
+    }
+    let sourceProfile;
+    if (cmykFormat !== null && sourceAdmission.status === 'admitted') {
+        const structure = await inspectEmbedSourceStructure(sourceAdmission.resolvedPath, cmykFormat);
+        sourceProfile = { profile: EMBED_IMAGE_CMYK_PROFILE,
+            icc: admitted.icc === null || admitted.icc.status !== 'available' ? 'unavailable' : admitted.icc.value.present ? 'present' : 'absent',
+            structure: { status: structure.status, bitsPerChannel: structure.bitsPerChannel, channels: structure.channels, layers: structure.layers } };
     }
     const sourceColorSpace = admitted.colorSpace === null ? { status: 'unavailable', value: null, message: 'The source was not admitted.' }
         : admitted.colorSpace.status === 'available' ? { status: 'available', value: admitted.colorSpace.value, message: null }
             : { status: 'unavailable', value: null, message: admitted.colorSpace.message.slice(0, 500) };
     const sourceModifiedAtMs = sourceAdmission.status === 'admitted' ? Date.parse(sourceAdmission.modifiedAt) : undefined;
-    return { ...request, backup, sourceAdmission, sourceColorSpace, ...(sourceModifiedAtMs === undefined ? {} : { sourceModifiedAtMs }) };
+    return { ...request, backup, sourceAdmission, sourceColorSpace, ...(sourceProfile === undefined ? {} : { sourceProfile }),
+        ...(sourceModifiedAtMs === undefined ? {} : { sourceModifiedAtMs }) };
 }
 async function beforeHost(input, services) {
     const request = internalInputSchema.parse(input);
@@ -198,6 +252,7 @@ export const EMBED_IMAGE_BLOCKERS = [
     'link_missing', 'link_path_mismatch',
     'source_file_missing', 'source_file_unavailable', 'source_hash_mismatch', 'source_format_unmeasured', 'source_file_changed',
     'source_color_space_unmeasured', 'source_pixels_unknown',
+    'source_icc_unmeasured', 'source_structure_unmeasured', 'target_transform_unmeasured',
 ];
 const blockerSchema = z.enum(EMBED_IMAGE_BLOCKERS);
 const planSchema = z.strictObject({
@@ -207,6 +262,7 @@ const planSchema = z.strictObject({
     source: sourceSchema,
     sourceAdmission: placeImageAdmissionSchema,
     sourceColorSpace: colorSpaceAdmissionSchema,
+    sourceProfile: embedSourceProfileSchema.optional(),
     before: embedImageBeforeSchema,
     after: embedImageAfterSchema.nullable(),
     applyBlockedReasonCodes: z.array(blockerSchema),
@@ -310,7 +366,11 @@ export const embedImageResultSchema = z.union([
             derived.add('link_path_mismatch');
         if (result.plan.sourceAdmission.pixels === null)
             derived.add('source_pixels_unknown');
-        if (result.plan.sourceColorSpace.status !== 'available' || !EMBED_IMAGE_MEASURED_COLOR_SPACES.includes(result.plan.sourceColorSpace.value ?? '')) {
+        if (result.plan.sourceProfile !== undefined) {
+            for (const blocker of cmykProfileBlockers({ ...result.plan, sourceProfile: result.plan.sourceProfile }))
+                derived.add(blocker);
+        }
+        else if (result.plan.sourceColorSpace.status !== 'available' || !EMBED_IMAGE_MEASURED_COLOR_SPACES.includes(result.plan.sourceColorSpace.value ?? '')) {
             derived.add('source_color_space_unmeasured');
         }
     }
@@ -333,6 +393,14 @@ export const embedImageResultSchema = z.union([
         if (result.transaction.state !== 'verified' || result.plan.after === null || raster.uuid === null || raster.uuid === result.plan.before.uuid ||
             !embedAfterWithinTolerance(raster, result.plan.after)) {
             context.addIssue({ code: 'custom', message: 'An applied embed requires a verified raster with a new UUID matching the planned after state.' });
+        }
+        if (result.plan.sourceProfile !== undefined) {
+            const evidence = result.postcondition.evidence;
+            if (evidence.profile !== EMBED_IMAGE_CMYK_PROFILE || evidence.wrapperDisposition === undefined || evidence.effectivePpiBefore === undefined || evidence.effectivePpiAfter === undefined ||
+                evidence.imageColorSpace !== EMBED_IMAGE_CMYK_EXPECTED.imageColorSpace || evidence.bitsPerChannel !== EMBED_IMAGE_CMYK_EXPECTED.bitsPerChannel || evidence.channels !== EMBED_IMAGE_CMYK_EXPECTED.channels ||
+                evidence.effectivePpiBefore.some((before, index) => Math.abs(before - evidence.effectivePpiAfter[index]) > EMBED_IMAGE_PPI_RELATIVE_TOLERANCE * Math.abs(before))) {
+                context.addIssue({ code: 'custom', message: 'An applied cmyk_flat_raster_v1 embed requires CMYK 8-bit 4-channel evidence, a wrapper disposition and an unchanged effective PPI.' });
+            }
         }
     }
     else if (result.transaction.state === 'verified')
@@ -422,6 +490,11 @@ var EMBED_IMAGE_TOLERANCE_PT = ${EMBED_IMAGE_TOLERANCE_PT};
 var EMBED_IMAGE_PRECISION_DIGITS = ${EMBED_IMAGE_PRECISION_DIGITS};
 ${HOST_VERSION_POLICY_JSX}
 var EMBED_IMAGE_MEASURED_COLOR_SPACES = ${JSON.stringify(EMBED_IMAGE_MEASURED_COLOR_SPACES)};
+var EMBED_IMAGE_CMYK_MEASURED_SOURCES = ${JSON.stringify(EMBED_IMAGE_CMYK_MEASURED_SOURCES)};
+var EMBED_IMAGE_CMYK_EXPECTED = ${JSON.stringify(EMBED_IMAGE_CMYK_EXPECTED)};
+var EMBED_IMAGE_CMYK_MATRIX_TOLERANCE = ${EMBED_IMAGE_CMYK_MATRIX_TOLERANCE};
+var EMBED_IMAGE_CMYK_UNIFORM_SCALE_TOLERANCE = ${EMBED_IMAGE_CMYK_UNIFORM_SCALE_TOLERANCE};
+var EMBED_IMAGE_PPI_RELATIVE_TOLERANCE = ${EMBED_IMAGE_PPI_RELATIVE_TOLERANCE};
 
 function embedRound(value) {
   var rounded = Number(mutationFiniteNumber(value, "geometry").toFixed(EMBED_IMAGE_PRECISION_DIGITS));
@@ -430,11 +503,10 @@ function embedRound(value) {
 function embedNear(a, b) { return Math.abs(a - b) <= EMBED_IMAGE_TOLERANCE_PT; }
 function embedContains(list, value) { for (var i = 0; i < list.length; i++) if (list[i] === value) return true; return false; }
 
-/** Images resolve through their typed collections, never getPageItemFromUuid (read path). */
-function embedScan(collection, uuid) {
-  if (!collection || typeof collection.length !== "number") throw mutationError("preflight_failed", "The document image collection is unavailable.");
-  for (var index = 0; index < collection.length; index++) if (String(collection[index].uuid) === uuid) return collection[index];
-  return null;
+/** Images resolve by direct native UUID reference, with the type taken from the item's own collection row; null when absent or of another type. */
+function embedScan(document, type, uuid) {
+  var resolved = resolvePageItem(document, uuid);
+  return resolved !== null && resolved.typename === type ? resolved.item : null;
 }
 
 function embedLayerPath(document, targetLayer) {
@@ -466,6 +538,32 @@ function embedValidateRequest() {
     throw mutationError("preflight_failed", "The backup was not admitted; call through the MCP server.");
   }
   if (typeof params.targetUuid !== "string" || params.targetUuid.length === 0) throw mutationError("preflight_failed", "A target UUID is required.");
+  if (params.sourceProfile && (params.sourceProfile.profile !== "cmyk_flat_raster_v1" || !params.sourceProfile.structure)) {
+    throw mutationError("preflight_failed", "Source profile facts are inconsistent with the request.");
+  }
+  // A PSD/TIFF source is only ever embedded under the cmyk profile; without its facts the request fails closed.
+  if (admission.status === "admitted" && (admission.format === "psd" || admission.format === "tiff") && !params.sourceProfile) {
+    throw mutationError("preflight_failed", "A PSD or TIFF source requires the Node-side source profile facts.");
+  }
+}
+
+function embedProfile() { return params.sourceProfile ? "cmyk_flat_raster_v1" : "rgb_direct_raster_v1"; }
+/** The measured facts of this format and source colour space, or null. */
+function embedCmykMeasuredSource(format, color) {
+  var colors = EMBED_IMAGE_CMYK_MEASURED_SOURCES[format];
+  return colors && Object.prototype.hasOwnProperty.call(colors, color) ? colors[color] : null;
+}
+function embedCmykStructureMeasured(measured, structure) {
+  return structure.status === "flat" && structure.bitsPerChannel === 8 && structure.channels === measured.channels && structure.layers === measured.layers;
+}
+/** The linear matrix of a measured placement: upright (no rotation or shear), uniformly scaled, y-down as the measured placement. */
+function embedMeasuredTransform(before) {
+  var m = before.matrix;
+  return Math.abs(m[1]) <= EMBED_IMAGE_CMYK_MATRIX_TOLERANCE && Math.abs(m[2]) <= EMBED_IMAGE_CMYK_MATRIX_TOLERANCE && m[0] > 0 && m[3] < 0 &&
+    Math.abs(m[0] - Math.abs(m[3])) <= EMBED_IMAGE_CMYK_UNIFORM_SCALE_TOLERANCE * Math.abs(m[0]);
+}
+function embedEffectivePpi(pixels, width, height) {
+  return [embedRound(pixels.width * 72 / Math.abs(width)), embedRound(pixels.height * 72 / Math.abs(height))];
 }
 
 /** Slot of an item among its layer's direct children plus every other sibling UUID, in order. */
@@ -584,9 +682,9 @@ function embedResolve(forApply) {
   var context = forApply ? requireDocument(params.expectedDocumentKey) : requireDocumentForRead(params.expectedDocumentKey);
   var document = app.activeDocument;
   embedValidateRequest();
-  var target = embedScan(document.placedItems, params.targetUuid);
+  var target = embedScan(document, "PlacedItem", params.targetUuid);
   if (target === null) {
-    var embedded = embedScan(document.rasterItems, params.targetUuid) !== null;
+    var embedded = embedScan(document, "RasterItem", params.targetUuid) !== null;
     throw new Error("MCP_ERROR:" + stringifyJson({ code: embedded ? "EMBED_TARGET_NOT_LINKED" : "OBJECT_NOT_FOUND", uuid: params.targetUuid }));
   }
   var before = embedBeforeSnapshot(document, target);
@@ -596,7 +694,8 @@ function embedResolve(forApply) {
   if (context.path !== params.backup.sourcePath) block("backup_mismatch");
   else if (context.fileRevision !== params.backup.sourceFileRevision) block("backup_stale");
   if (!hostVersionAdmitted("embed_image", String(app.version))) block("host_version_unmeasured");
-  if (context.colorSpace !== "RGB") block("document_color_space_unmeasured");
+  var profile = embedProfile();
+  if (context.colorSpace !== (profile === "cmyk_flat_raster_v1" ? "CMYK" : "RGB")) block("document_color_space_unmeasured");
   if (before.locked) block("target_locked");
   if (before.hidden) block("target_hidden");
   if (!before.layerVisible) block("layer_hidden");
@@ -611,7 +710,13 @@ function embedResolve(forApply) {
   else {
     if (admission.resolvedPath !== before.linkPath) block("link_path_mismatch");
     if (!admission.pixels) block("source_pixels_unknown");
-    if (params.sourceColorSpace.status !== "available" || !embedContains(EMBED_IMAGE_MEASURED_COLOR_SPACES, params.sourceColorSpace.value)) block("source_color_space_unmeasured");
+    if (profile === "cmyk_flat_raster_v1") {
+      var measuredSource = params.sourceColorSpace.status === "available" ? embedCmykMeasuredSource(admission.format, params.sourceColorSpace.value) : null;
+      if (measuredSource === null) block("source_color_space_unmeasured");
+      if (params.sourceProfile.icc !== "present") block("source_icc_unmeasured");
+      if (measuredSource !== null && !embedCmykStructureMeasured(measuredSource, params.sourceProfile.structure)) block("source_structure_unmeasured");
+      if (!embedMeasuredTransform(before)) block("target_transform_unmeasured");
+    } else if (params.sourceColorSpace.status !== "available" || !embedContains(EMBED_IMAGE_MEASURED_COLOR_SPACES, params.sourceColorSpace.value)) block("source_color_space_unmeasured");
     var changed = embedFileChanged(admission.resolvedPath, admission.bytes, params.sourceModifiedAtMs);
     if (changed === "missing") block("source_file_missing");
     else if (changed === "changed") block("source_file_changed");
@@ -632,13 +737,15 @@ function embedPreflight(forApply) {
 }
 
 function embedPlan(preflight) {
-  return {
+  var plan = {
     operation: "embed_image", documentKey: preflight.context.key, backup: params.backup,
     source: { path: params.source.path, sha256: params.source.sha256 }, sourceAdmission: params.sourceAdmission, sourceColorSpace: params.sourceColorSpace,
     before: preflight.before, after: preflight.after,
     applyBlockedReasonCodes: preflight.blockers, confirmationStatus: params.apply === true ? "confirmed" : "required",
     applyAllowed: params.apply === true && preflight.blockers.length === 0
   };
+  if (params.sourceProfile) plan.sourceProfile = params.sourceProfile;
+  return plan;
 }
 
 function embedRevalidate(preflight, plan) {
@@ -649,6 +756,42 @@ function embedRevalidate(preflight, plan) {
       !embedBeforeMatches(current.before, plan.before) || !embedAfterMatches(current.after, plan.after)) {
     throw mutationBeforeSideEffectError("Embed target or link state changed before apply.");
   }
+}
+
+/**
+ * Measured wrapper: embed() of a PSD/TIFF in a CMYK document leaves a GroupItem holding exactly one CMYK
+ * RasterItem in the slot. Only that exact form is normalised, with the measured primitive; anything else throws and,
+ * because embed() already returned, stays indeterminate.
+ */
+function embedUnwrap(layer, group, plan, state) {
+  var admission = params.sourceAdmission;
+  var tags = group.tags;
+  var tagsMeasured = tags.length === 0 || (tags.length === 1 && String(tags[0].name) === "BBAccumRotation" && Number(tags[0].value) === 0);
+  var visibilityVariable;
+  try { visibilityVariable = group.visibilityVariable; } catch (readError) { visibilityVariable = undefined; }
+  if (group.parent !== layer || group.clipped || group.locked || group.hidden || Number(group.opacity) !== 100 || String(group.blendingMode) !== "BlendModes.NORMAL" ||
+      String(group.note) !== "" || String(group.uRL) !== "" || group.isIsolated || group.sliced || group.wrapped || !tagsMeasured || visibilityVariable !== null) {
+    throw mutationError("apply_failed", "The embedded item's wrapper group is not the measured plain wrapper.");
+  }
+  if (group.pageItems.length !== 1 || String(group.pageItems[0].typename) !== "RasterItem" || group.pageItems[0].parent !== group) {
+    throw mutationError("apply_failed", "The embedded item's wrapper group does not hold exactly one RasterItem.");
+  }
+  var child = group.pageItems[0];
+  var groupBounds = group.geometricBounds, childBounds = child.geometricBounds;
+  for (var b = 0; b < 4; b++) if (!embedNear(Number(groupBounds[b]), Number(childBounds[b]))) throw mutationError("apply_failed", "The wrapper group and its raster have different bounds.");
+  var box = child.boundingBox;
+  if (child.embedded !== true || String(child.imageColorSpace) !== EMBED_IMAGE_CMYK_EXPECTED.imageColorSpace || Number(child.bitsPerChannel) !== EMBED_IMAGE_CMYK_EXPECTED.bitsPerChannel ||
+      Number(child.channels) !== EMBED_IMAGE_CMYK_EXPECTED.channels || Math.round(Math.abs(Number(box[2]) - Number(box[0]))) !== admission.pixels.width ||
+      Math.round(Math.abs(Number(box[1]) - Number(box[3]))) !== admission.pixels.height) {
+    throw mutationError("apply_failed", "The wrapped raster is not the CMYK 8-bit 4-channel raster of the admitted pixels.");
+  }
+  child.move(group, ElementPlacement.PLACEBEFORE);
+  if (child.parent !== layer || group.pageItems.length !== 0) throw mutationError("apply_failed", "The raster did not move out of its wrapper group.");
+  group.remove();
+  var slot = layer.pageItems.length > plan.before.layerIndex ? layer.pageItems[plan.before.layerIndex] : null;
+  if (slot !== child) throw mutationError("apply_failed", "The raster did not take the wrapper group's slot.");
+  state.operationState.wrapperDisposition = "unwrap_single_raster_group";
+  return child;
 }
 
 function embedApply(preflight, plan, state) {
@@ -664,6 +807,8 @@ function embedApply(preflight, plan, state) {
     state.operationState.embedReturned = true;
     // The raster takes the placed item's slot among the layer's direct children.
     var slot = layer.pageItems.length > plan.before.layerIndex ? layer.pageItems[plan.before.layerIndex] : null;
+    state.operationState.wrapperDisposition = "direct_raster";
+    if (embedProfile() === "cmyk_flat_raster_v1" && slot !== null && String(slot.typename) === "GroupItem") slot = embedUnwrap(layer, slot, plan, state);
     if (slot === null || String(slot.typename) !== "RasterItem") throw mutationError("apply_failed", "No RasterItem took the embedded item's place in its layer.");
     var uuid = slot.uuid;
     if (typeof uuid !== "string" || uuid.length === 0) throw mutationError("apply_failed", "The embedded raster has no native UUID.");
@@ -682,25 +827,34 @@ function embedVerify(preflight, plan, state) {
   if (app.documents.length === 0 || app.activeDocument !== document) throw mutationError("verify_mismatch", "Active document changed during embed verification.");
   var afterUuid = state.operationState.afterUuid;
   if (typeof afterUuid !== "string" || afterUuid === plan.before.uuid) throw mutationError("verify_mismatch", "Embedding did not produce a new native UUID.");
-  var raster = embedScan(document.rasterItems, afterUuid);
+  var raster = embedScan(document, "RasterItem", afterUuid);
   if (raster === null || raster !== state.applyValue) throw mutationError("verify_mismatch", "The new native UUID does not resolve to the embedded raster.");
-  if (embedScan(document.placedItems, plan.before.uuid) !== null) throw mutationError("verify_mismatch", "The linked item still resolves after embedding.");
+  if (embedScan(document, "PlacedItem", plan.before.uuid) !== null) throw mutationError("verify_mismatch", "The linked item still resolves after embedding.");
   var counts = state.operationState.counts;
   if (document.placedItems.length !== counts.placed - 1 || document.rasterItems.length !== counts.raster + 1) throw mutationError("verify_mismatch", "The placed and raster counts did not change by exactly one.");
   var actual = embedRasterSnapshot(document, raster);
   if (!embedAfterMatches(actual, plan.after)) throw mutationError("verify_mismatch", "The embedded raster does not match the planned after state.");
   var matrix = raster.matrix, box = raster.boundingBox;
-  return {
-    raster: actual,
-    evidence: {
+  var profileEvidence = {};
+  if (embedProfile() === "cmyk_flat_raster_v1") {
+    if (String(raster.imageColorSpace) !== EMBED_IMAGE_CMYK_EXPECTED.imageColorSpace || Number(raster.bitsPerChannel) !== EMBED_IMAGE_CMYK_EXPECTED.bitsPerChannel || Number(raster.channels) !== EMBED_IMAGE_CMYK_EXPECTED.channels) {
+      throw mutationError("verify_mismatch", "The embedded raster is not CMYK 8-bit 4-channel.");
+    }
+    var ppiBefore = embedEffectivePpi(plan.after.pixels, plan.before.width, plan.before.height);
+    var ppiAfter = embedEffectivePpi(actual.pixels, raster.width, raster.height);
+    for (var q = 0; q < 2; q++) if (Math.abs(ppiBefore[q] - ppiAfter[q]) > EMBED_IMAGE_PPI_RELATIVE_TOLERANCE * ppiBefore[q]) throw mutationError("verify_mismatch", "The effective PPI changed by embedding.");
+    profileEvidence = { profile: "cmyk_flat_raster_v1", wrapperDisposition: state.operationState.wrapperDisposition, effectivePpiBefore: ppiBefore, effectivePpiAfter: ppiAfter };
+  }
+  var evidence = {
       matrix: [embedRound(matrix.mValueA), embedRound(matrix.mValueB), embedRound(matrix.mValueC), embedRound(matrix.mValueD), embedRound(matrix.mValueTX), embedRound(matrix.mValueTY)],
       boundingBox: [embedRound(box[0]), embedRound(box[1]), embedRound(box[2]), embedRound(box[3])],
       imageColorSpace: String(raster.imageColorSpace), bitsPerChannel: Number(raster.bitsPerChannel), channels: Number(raster.channels),
       nameRestored: state.operationState.nameRestored === true,
       placedCountBefore: counts.placed, placedCountAfter: document.placedItems.length, rasterCountBefore: counts.raster, rasterCountAfter: document.rasterItems.length,
       saved: document.saved === true
-    }
   };
+  for (var key in profileEvidence) if (Object.prototype.hasOwnProperty.call(profileEvidence, key)) evidence[key] = profileEvidence[key];
+  return { raster: actual, evidence: evidence };
 }
 
 var EMBED_RECOVERY_MESSAGE = "An embedded image cannot be un-embedded in the same call. The command keeps the Illustrator lock until illustrator_reconcile action=release_unverified releases it; the document file is unchanged and equals the backup, so the before state is restored by closing the document without saving and reopening its file.";
@@ -710,7 +864,7 @@ function embedRollback(state) {
   var preflight = state.preflight;
   if (state.operationState.embedReturned === true) return { status: "indeterminate", message: EMBED_RECOVERY_MESSAGE };
   if (!preflight || app.documents.length === 0 || app.activeDocument !== preflight.document) return { status: "indeterminate", message: "Rollback document identity is indeterminate. " + EMBED_RECOVERY_MESSAGE };
-  var target = embedScan(preflight.document.placedItems, preflight.before.uuid);
+  var target = embedScan(preflight.document, "PlacedItem", preflight.before.uuid);
   if (target === null || target !== preflight.target) return { status: "indeterminate", message: "The linked item no longer resolves under its UUID. " + EMBED_RECOVERY_MESSAGE };
   var current;
   try { current = embedBeforeSnapshot(preflight.document, target); } catch (error) { return { status: "indeterminate", message: "Rollback target state is indeterminate. " + EMBED_RECOVERY_MESSAGE }; }
@@ -750,14 +904,14 @@ export const EMBED_IMAGE_ADAPTER_IDENTITY = mutationAdapterIdentity({
 });
 function normalizedRequest(input) {
     const request = internalInputSchema.parse(input);
-    const { commandId: _commandId, sourceAdmission: _s, sourceColorSpace: _c, sourceModifiedAtMs: _m, backup: _b, ...digestRequest } = request;
+    const { commandId: _commandId, sourceAdmission: _s, sourceColorSpace: _c, sourceProfile: _p, sourceModifiedAtMs: _m, backup: _b, ...digestRequest } = request;
     const digest = canonicalSha256({ operation: EMBED_IMAGE_OPERATION, validator: EMBED_IMAGE_VALIDATOR, request: digestRequest });
     return { intent: request.apply ? 'apply' : 'plan', request, commandId: 'commandId' in request ? request.commandId : null, documentKey: request.expectedDocumentKey, digest };
 }
 export const embedImageToolContract = {
     name: 'illustrator_embed_image',
     title: 'Plan or Embed Linked Image',
-    description: `Plan or embed one linked, layer-direct PlacedItem (bound by document key and native UUID) into the document, so illustrator_optimize_images can process it. Irreversible in the document: requires a verified backup (illustrator_create_backup) of the clean saved file and the linked file's absolute path and SHA-256. Measured scope only (Illustrator ${describeHostVersionScope('embed_image')}, foreground, unlocked, RGB document, ${EMBED_IMAGE_MEASURED_FORMATS.join('/').toUpperCase()} RGB sources). The plan returns before (the linked item) and after (a RasterItem in the same slot, name and frame, with the source's pixels); apply echoes both as expected_before and confirmed_after, re-checks them and the link immediately before embedding, and verifies the raster (new UUID, which the result reports). Refused: missing or changed links, other files, locked or hidden items or layers, items in groups, dirty or unsaved documents, backup mismatch or staleness. The document is then unsaved; save it with illustrator_save_document and the same backup_id. There is no in-call undo: a failure after embedding is indeterminate and keeps the Illustrator lock (release with illustrator_reconcile action=release_unverified); the unchanged file equals the backup, so closing without saving and reopening restores the before state.`,
+    description: `Plan or embed one linked, layer-direct PlacedItem (bound by document key and native UUID) into the document, so illustrator_optimize_images can process it. Irreversible in the document: requires a verified backup (illustrator_create_backup) of the clean saved file and the linked file's absolute path and SHA-256. Measured scope only (Illustrator ${describeHostVersionScope('embed_image')}, foreground, unlocked): RGB document with ${EMBED_IMAGE_MEASURED_FORMATS.join('/').toUpperCase()} RGB sources, or CMYK document with flat 8-bit PSD (RGB/CMYK) or TIFF (CMYK) sources that carry an ICC profile (profile cmyk_flat_raster_v1; Illustrator's one-RasterItem wrapper group is normalised, the result is a layer-direct CMYK RasterItem). The plan returns before (the linked item) and after (a RasterItem in the same slot, name and frame, with the source's pixels); apply echoes both as expected_before and confirmed_after, re-checks them and the link immediately before embedding, and verifies the raster (new UUID, which the result reports). Refused: missing or changed links, other files, locked or hidden items or layers, items in groups, dirty or unsaved documents, backup mismatch or staleness. The document is then unsaved; save it with illustrator_save_document and the same backup_id. There is no in-call undo: a failure after embedding is indeterminate and keeps the Illustrator lock (release with illustrator_reconcile action=release_unverified); the unchanged file equals the backup, so closing without saving and reopening restores the before state.`,
     inputSchema,
     publicInputSchema: embedImagePublicInputSchema,
     outputSchema: embedImageResponseSchema,

@@ -1,5 +1,6 @@
+import { scanContinuationSchema } from './edit-session-chunked-scan.js';
 import { SvgTextPlanBlockedError } from './adapters/import-vector-artwork-adapter.js';
-import { HOST_VERSION_CONSENT_DESCRIPTION, hostVersionPublicFields } from './host-version-consent.js';
+import { HOST_VERSION_SCOPE_NOTE, hostVersionPublicFields } from './host-version-consent.js';
 import { McpServer } from '@modelcontextprotocol/server';
 import { createRequire } from 'node:module';
 import { z } from 'zod';
@@ -8,23 +9,28 @@ export { documentContextSchema } from './mutation-result-schema-core.js';
 export { rectangleResponseSchema, rectangleResultSchema } from './rectangle-result-schema.js';
 export { operationSafetyPlanSchema, operationSafetyPolicySchema, operationSafetyResultSchema, } from './operation-safety-policy-core.js';
 import { textStyleListSchema } from './text-style-resources.js';
-import { FONT_LOOKUP_MAX_NAMES, fontLookupResultSchema, fontPostScriptNameSchema } from './font-lookup.js';
+import { FIND_FONTS_QUERY_MAX_LENGTH, FONT_LOOKUP_MAX_NAMES, fontCursorSchema, fontLookupResultSchema, fontPostScriptNameSchema, fontQuerySchema, fontSearchResultSchema } from './font-lookup.js';
 import { getPathPointsResultSchema, PATH_EDIT_MAX_POINTS } from './path-points.js';
 import { getAreaTextOptionsResultSchema } from './area-text-options.js';
-import { JP_AUDIT_LIMITS, jpAuditProtectedTermSchema, jpAuditResultSchema, LINE_START_RELAXATIONS } from './jp-typography-audit.js';
+import { DISPLAY_SPACING_LIMITS, displaySpacingResultSchema } from './display-spacing.js';
+import { JP_AUDIT_LIMITS, JP_AUDIT_POLICIES, jpAuditJustifyBodySchema, jpAuditParagraphShapeSchema, jpAuditProtectedTermSchema, jpAuditResultSchema, LINE_START_RELAXATIONS } from './jp-typography-audit.js';
 import { canonicalCommandIdSchema } from './command-id.js';
+import { installToolValidationErrors } from './tool-validation-errors.js';
 import { createBackupResultSchema, reconcileBackupResultSchema } from './document-backup.js';
 import { normalizeReconcileDeletePublicInput, reconcileDeletePublicInputSchema, reconcileDeleteResultSchema } from './delete-recovery.js';
 import { createDocumentPublicInputSchema, createDocumentResultSchema, normalizeCreateDocumentPublicInput } from './document-create.js';
 import { closeDocumentPublicInputSchema, closeDocumentResultSchema, normalizeCloseDocumentPublicInput, normalizeOpenDocumentPublicInput, normalizeSaveDocumentAsPublicInput, normalizeSaveDocumentPublicInput, openDocumentPublicInputSchema, openDocumentResultSchema, saveDocumentAsPublicInputSchema, saveDocumentAsResultSchema, saveDocumentPublicInputSchema, saveDocumentResultSchema, } from './document-lifecycle.js';
 import { exportOutlinedResultSchema, reconcileExportResultSchema } from './document-export.js';
-import { pdfExportResultSchema } from './pdf-export.js';
+import { pdfExportResultSchema, pdfExportBleedInputSchema } from './pdf-export.js';
 import { closeEditSessionResultSchema, EDIT_SESSION_SUPPORT_PROFILE, getEditSessionsResultSchema, openEditSessionResultSchema, sessionIdSchema, } from './edit-session-tools.js';
 import { IMAGE_OPTIMIZE_MAX_PPI, IMAGE_OPTIMIZE_MAX_TARGETS, IMAGE_OPTIMIZE_MIN_PPI, IMAGE_OPTIMIZE_RENDER_MAX_PIXELS, imageOptimizeResultSchema, } from './image-optimize.js';
 import { m6P0RecipeToolContract } from './m6-p0-recipe.js';
 import { recipeToolContracts } from './recipe.js';
 import { installPublishedToolList, installSharedToolSchemas } from './published-tool-schema.js';
+import { installWindowsReadOnlyRegistration, windowsServerInstructions } from './windows/read-tools.js';
+import { WindowsReadOnlyError } from './windows/com-transport.js';
 import { imagePreflightPageSchema } from './image-preflight-schema.js';
+import { PREFLIGHT_DESCRIPTION_SENTENCE } from './preflight-scope-note.js';
 import { printPreflightConditionsSchema, printPreflightResultSchema } from './print-preflight-schema.js';
 import { contrastRequestSchema, contrastResultSchema, designTokensResultSchema, textConsistencyResultSchema, } from './design-analysis-schema.js';
 import { colorMatchSchema, colorReplacementPlanSchema, colorUsagePageSchema, replacementColorSchema, } from './color-replacement.js';
@@ -33,10 +39,17 @@ import { structureDiffIdSchema, structureDiffPageSchema, structureSnapshotIdSche
 import { STRUCTURE_DIFF_DEFAULT_TOLERANCE_PT, STRUCTURE_DIFF_MAX_TOLERANCE_PT, STRUCTURE_SNAPSHOT_LIMITS, } from './structure-diff.js';
 import { comparePngImages, visualDiffResultSchema } from './visual-diff.js';
 import { PREVIEW_MAX_SIDE_PT, previewBoundsSchema, previewResultSchema } from './document-preview.js';
-import { rasterExportInputSchema, rasterExportResultSchema, rasterReconcileResultSchema } from './raster-export.js';
+import { RENDER_LIMITS, renderResultSchema } from './artboard-render.js';
+import { TEXT_EXTRACT_LIMITS, textExtractResultSchema } from './text-extract.js';
+import { rasterExportResultSchema, rasterReconcileResultSchema } from './raster-export.js';
+import { rasterExportToolInputShape } from './raster-batch-export.js';
 import { buildBackupNextSteps, buildBlockedNextSteps, nextStepsSchema } from './blocked-guidance.js';
+import { DIRTY_FILE_ADMISSION_OPERATIONS, documentAdmissionNote, documentAdmissionNoteSchema } from './dirty-file-admission.js';
 import { admitHostVersionPlan, describeHostVersionScope, hostVersionNoteSchema } from './host-version-admission.js';
 import { saveAsReconcileActionSchema, saveAsReconcileResultSchema } from './save-as-reconcile.js';
+import { rasterToolStep } from './raster-steps.js';
+import { SnapshotRefCache } from './snapshot-ref-cache.js';
+import { expandMutateBatchSnapshotRefs, mutateBatchNextCallWithRefs, mutateBatchView, mutateBatchViewSchema } from './adapters/mutate-batch-view.js';
 import { NEXT_CALL_BUILDERS, buildNextCall, formatToolArgumentError, nextCallSchema, toolArgumentIssueMessage } from './tool-arguments.js';
 export { imagePreflightItemSchema, imagePreflightPageSchema } from './image-preflight-schema.js';
 export { printPreflightFindingSchema, printPreflightResultSchema } from './print-preflight-schema.js';
@@ -47,13 +60,18 @@ export { contrastResultSchema, designTokensResultSchema, textConsistencyResultSc
 export { backupRecordSchema, backupSessionSchema, createBackupResultSchema, reconcileBackupResultSchema } from './document-backup.js';
 export { exportOutlinedResultSchema, exportRecordSchema, exportSessionSchema, reconcileExportResultSchema } from './document-export.js';
 export { closeDocumentResultSchema, openDocumentResultSchema, saveDocumentAsResultSchema, saveDocumentResultSchema } from './document-lifecycle.js';
+const RESPONSE_VIEWS = {
+    illustrator_mutate_batch: { outputSchema: mutateBatchViewSchema, render: mutateBatchView,
+        nextCall: mutateBatchNextCallWithRefs, expand: expandMutateBatchSnapshotRefs },
+};
+const SNAPSHOT_REFS = new SnapshotRefCache();
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const RECONCILE = { readOnlyHint: false };
 const BACKUP = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const DESTRUCTIVE_WITH_BACKUP = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
 function text(value) {
     return {
-        content: [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify(value) }],
         structuredContent: { result: value },
     };
 }
@@ -92,7 +110,7 @@ const scannedCollectionSchema = (itemSchema, maxItems) => z.union([
     z.strictObject({
         status: z.literal('truncated'),
         items: z.array(itemSchema).max(maxItems),
-        reason: z.enum(['scan_limit', 'run_limit']),
+        reason: z.enum(['scan_limit', 'run_limit', 'read_failed']),
         total: z.null(),
     }),
 ]).superRefine((collection, context) => {
@@ -119,18 +137,22 @@ const colorStyleAvailabilitySchema = requiredAvailabilitySchema(colorSummarySche
 const textStyleRunSchema = z.strictObject({
     start: z.number().int().nonnegative(),
     length: z.number().int().positive(),
+    mergedCount: z.number().int().positive().optional(),
     font: fontAvailabilitySchema,
     size: characterStyleAvailabilitySchema,
     tracking: characterStyleAvailabilitySchema,
     fill: colorStyleAvailabilitySchema,
     stroke: colorStyleAvailabilitySchema,
+    alignment: requiredAvailabilitySchema(z.enum(['center', 'roman_baseline']), z.literal('character_style_unavailable')),
 });
+const paragraphUnavailableReasonSchema = z.enum(['paragraph_style_unavailable', 'trailing_empty_paragraph']);
 const paragraphSchema = z.strictObject({
     index: z.number().int().nonnegative(),
     characterCount: z.number().int().nonnegative(),
     preview: z.string().max(200),
     previewTruncated: z.boolean(),
-    justification: requiredAvailabilitySchema(z.string(), z.literal('paragraph_style_unavailable')),
+    justification: requiredAvailabilitySchema(z.string(), paragraphUnavailableReasonSchema),
+    leadingType: requiredAvailabilitySchema(z.enum(['top_to_top', 'bottom_to_bottom']), paragraphUnavailableReasonSchema),
 }).superRefine((paragraph, context) => {
     if (!paragraph.previewTruncated && paragraph.preview.length !== paragraph.characterCount) {
         context.addIssue({
@@ -167,6 +189,8 @@ function validateStyleRunPrefix(collection, totalCharacters, context) {
         }
         return;
     }
+    if (items.length === 0 && collection.status === 'truncated' && collection.reason === 'read_failed')
+        return;
     if (items.length === 0) {
         context.addIssue({
             code: 'custom',
@@ -178,6 +202,10 @@ function validateStyleRunPrefix(collection, totalCharacters, context) {
     let previousEnd = 0;
     for (let index = 0; index < items.length; index++) {
         const range = items[index];
+        if (range.mergedCount !== undefined && range.mergedCount > range.length) {
+            context.addIssue({ code: 'custom', message: 'Native run count cannot exceed run length.',
+                path: ['styleRuns', 'items', index, 'mergedCount'] });
+        }
         const end = range.start + range.length;
         if (end > totalCharacters) {
             context.addIssue({
@@ -475,6 +503,14 @@ const textContentSchema = z.discriminatedUnion('status', [
         });
     }
 });
+const unreadableTextReadSchema = z.strictObject({
+    scope: z.enum(['paragraph', 'style_runs']),
+    attribute: z.string().min(1).max(64),
+    index: z.number().int().nonnegative().nullable(),
+    reason: z.enum(['host_no_such_element', 'host_illegal_argument', 'host_error']),
+    hostErrorNumber: z.number().int().nullable(),
+    guidance: z.string().min(1).max(400),
+});
 const textFrameDetailsSchema = z.strictObject({
     kind: z.literal('text_frame'),
     illustratorType: z.literal('TextFrame'),
@@ -483,18 +519,24 @@ const textFrameDetailsSchema = z.strictObject({
     styleRuns: scannedCollectionSchema(textStyleRunSchema, TEXT_DETAIL_LIMITS.styleRuns),
     fonts: scannedCollectionSchema(fontUsageSchema, TEXT_DETAIL_LIMITS.fonts),
     missingFonts: scannedCollectionSchema(missingFontSchema, TEXT_DETAIL_LIMITS.missingFonts),
+    unreadable: z.array(unreadableTextReadSchema).max(TEXT_DETAIL_LIMITS.unreadable),
 }).superRefine((details, context) => {
     const totalCharacters = details.content.status === 'complete'
         ? details.content.text.length
         : details.content.totalCharacters;
+    const unreadableParagraphs = new Set(details.unreadable.filter((read) => read.scope === 'paragraph' && read.index !== null).map((read) => read.index));
+    let expectedIndex = 0;
     for (let index = 0; index < details.paragraphs.items.length; index++) {
-        if (details.paragraphs.items[index].index !== index) {
+        while (unreadableParagraphs.has(expectedIndex))
+            expectedIndex++;
+        if (details.paragraphs.items[index].index !== expectedIndex) {
             context.addIssue({
                 code: 'custom',
-                message: 'Paragraph indices must be contiguous and zero-based.',
+                message: 'Paragraph indices must be zero-based and in order, with gaps only for listed unreadable paragraphs.',
                 path: ['paragraphs', 'items', index, 'index'],
             });
         }
+        expectedIndex++;
     }
     validateStyleRunPrefix(details.styleRuns, totalCharacters, context);
     validateMissingRanges(details.missingFonts.items, totalCharacters, details.styleRuns.items, context);
@@ -528,7 +570,7 @@ const textFrameDetailsSchema = z.strictObject({
         validateVisibleMissingPrefix(details.missingFonts, deriveMissingRanges(details.styleRuns.items), details.styleRuns.items, details.styleRuns, totalCharacters, context);
     }
     if (details.styleRuns.status === 'truncated' &&
-        (details.styleRuns.reason === 'scan_limit' || details.styleRuns.reason === 'run_limit')) {
+        (details.styleRuns.reason === 'scan_limit' || details.styleRuns.reason === 'run_limit' || details.styleRuns.reason === 'read_failed')) {
         for (const [path, collection] of [
             ['fonts', details.fonts],
             ['missingFonts', details.missingFonts],
@@ -550,7 +592,7 @@ const textFrameDetailsSchema = z.strictObject({
             if (collection.status === 'truncated' && collection.reason !== 'item_limit') {
                 context.addIssue({
                     code: 'custom',
-                    message: 'An item-limited complete scan cannot produce scan_limit or run_limit dependents.',
+                    message: 'An item-limited complete scan cannot produce scan_limit, run_limit or read_failed dependents.',
                     path: [path],
                 });
             }
@@ -817,6 +859,15 @@ const commandExecutionIdentityShape = {
     executionNonce: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
     executionState: z.literal('prepared'),
 };
+const windowsCommandExecutionIdentityShape = {
+    executionIdentity: z.strictObject({
+        kind: z.literal('windows_process'),
+        pid: z.number().int().safe().positive(),
+        creationTime: z.string().regex(/^[1-9][0-9]*$/u),
+    }),
+    executionNonce: commandExecutionIdentityShape.executionNonce,
+    executionState: commandExecutionIdentityShape.executionState,
+};
 const indeterminateTransactionStatusSchema = z.discriminatedUnion('phase', [
     z.strictObject({
         state: z.literal('indeterminate'),
@@ -887,71 +938,118 @@ const indeterminateTransactionStatusSchema = z.discriminatedUnion('phase', [
 });
 const terminalCommandStateSchema = z.enum(['completed', 'failed']);
 const nonterminalCommandStateSchema = z.enum(['running', 'unknown']);
-export const commandStatusSchema = z.union([
-    z.strictObject({
-        ...commandStatusBaseShape,
-        ...commandExecutionIdentityShape,
-        state: terminalCommandStateSchema,
-        executionStatus: z.literal('inactive'),
-        canAbandon: z.literal(false),
-    }),
-    z.strictObject({
-        ...commandStatusBaseShape,
-        state: terminalCommandStateSchema,
-        executionStatus: z.literal('inactive'),
-        canAbandon: z.literal(false),
-        executionRecord: z.literal('compacted'),
-    }),
-    z.strictObject({
-        ...commandStatusBaseShape,
-        state: nonterminalCommandStateSchema,
-        executionStatus: z.literal('unknown'),
-        canAbandon: z.literal(false),
-        transaction: indeterminateTransactionStatusSchema.optional(),
-    }),
-    z.strictObject({
-        ...commandStatusBaseShape,
-        ...commandExecutionIdentityShape,
-        state: nonterminalCommandStateSchema,
-        executionStatus: z.enum(['active', 'unknown']),
-        canAbandon: z.literal(false),
-        transaction: indeterminateTransactionStatusSchema.optional(),
-    }),
-    z.strictObject({
-        ...commandStatusBaseShape,
-        ...commandExecutionIdentityShape,
-        state: nonterminalCommandStateSchema,
-        executionStatus: z.literal('inactive'),
-        canAbandon: z.boolean(),
-        canReleaseUnverified: z.boolean().optional(),
-        transaction: indeterminateTransactionStatusSchema.optional(),
-    }),
-    z.strictObject({
-        ...commandStatusBaseShape,
-        state: z.literal('unknown'),
-        executionStatus: z.literal('inactive'),
-        canAbandon: z.literal(false),
-        executionRecord: z.literal('released_unverified'),
-        documentState: z.literal('unverified'),
-        releasedAt: z.string().min(1),
-        reasonCode: z.enum(['adapter_unresolved', 'result_missing', 'host_indeterminate', 'host_failed_unproven', 'result_unverifiable']),
-    }),
-]);
+function buildCommandStatusSchema(windowsRelease) {
+    return z.union([
+        z.strictObject({
+            ...commandStatusBaseShape, ...windowsCommandExecutionIdentityShape,
+            state: terminalCommandStateSchema, executionStatus: z.literal('inactive'), canAbandon: z.literal(false),
+        }),
+        z.strictObject({
+            ...commandStatusBaseShape, ...windowsCommandExecutionIdentityShape,
+            state: nonterminalCommandStateSchema, executionStatus: z.enum(['active', 'unknown']), canAbandon: z.literal(false),
+            transaction: indeterminateTransactionStatusSchema.optional(),
+        }),
+        z.strictObject({
+            ...commandStatusBaseShape, ...windowsCommandExecutionIdentityShape,
+            state: nonterminalCommandStateSchema, executionStatus: z.literal('inactive'), canAbandon: z.boolean(),
+            ...(windowsRelease ? { canReleaseUnverified: z.boolean().optional() } : {}),
+            transaction: indeterminateTransactionStatusSchema.optional(),
+        }),
+        z.strictObject({
+            ...commandStatusBaseShape, state: nonterminalCommandStateSchema,
+            executionRecord: z.literal('missing'), executionStatus: z.literal('inactive'), canAbandon: z.boolean(),
+        }),
+        z.strictObject({
+            ...commandStatusBaseShape, state: z.literal('failed'),
+            executionRecord: z.literal('missing'), executionStatus: z.literal('inactive'), canAbandon: z.literal(false),
+        }),
+        z.strictObject({
+            ...commandStatusBaseShape,
+            ...commandExecutionIdentityShape,
+            state: terminalCommandStateSchema,
+            executionStatus: z.literal('inactive'),
+            canAbandon: z.literal(false),
+        }),
+        z.strictObject({
+            ...commandStatusBaseShape,
+            state: terminalCommandStateSchema,
+            executionStatus: z.literal('inactive'),
+            canAbandon: z.literal(false),
+            executionRecord: z.literal('compacted'),
+        }),
+        z.strictObject({
+            ...commandStatusBaseShape,
+            state: nonterminalCommandStateSchema,
+            executionStatus: z.literal('unknown'),
+            canAbandon: z.literal(false),
+            transaction: indeterminateTransactionStatusSchema.optional(),
+        }),
+        z.strictObject({
+            ...commandStatusBaseShape,
+            ...commandExecutionIdentityShape,
+            state: nonterminalCommandStateSchema,
+            executionStatus: z.enum(['active', 'unknown']),
+            canAbandon: z.literal(false),
+            transaction: indeterminateTransactionStatusSchema.optional(),
+        }),
+        z.strictObject({
+            ...commandStatusBaseShape,
+            ...commandExecutionIdentityShape,
+            state: nonterminalCommandStateSchema,
+            executionStatus: z.literal('inactive'),
+            canAbandon: z.boolean(),
+            canReleaseUnverified: z.boolean().optional(),
+            transaction: indeterminateTransactionStatusSchema.optional(),
+        }),
+        z.strictObject({
+            ...commandStatusBaseShape,
+            state: z.literal('unknown'),
+            executionStatus: z.literal('inactive'),
+            canAbandon: z.literal(false),
+            executionRecord: z.literal('released_unverified'),
+            documentState: z.literal('unverified'),
+            releasedAt: z.string().min(1),
+            reasonCode: z.enum(['adapter_unresolved', 'result_missing', 'host_indeterminate', 'host_failed_unproven', 'result_unverifiable']),
+        }),
+    ]);
+}
+export const commandStatusSchema = buildCommandStatusSchema(true);
+const windowsDefaultCommandStatusSchema = buildCommandStatusSchema(false);
 export const SERVER_INSTRUCTIONS = [
-    'Unmeasured versions: ask the user before passing accept_unmeasured_host_version; never decide consent for them. ' +
-        'Mutations are two-step: call the tool with apply:false to get a plan, then apply with the plan\'s next_call arguments when present (otherwise apply:true, the before/after values the plan returned, and a new lowercase UUID v4 command_id); resend the same command_id only to retry that same apply.',
+    'Mutations are two-step: call the tool with apply:false to get a plan, then apply with the plan\'s next_call arguments when present (otherwise apply:true, the before/after values the plan returned, and a new lowercase UUID v4 command_id); resend the same command_id only to retry that same apply.',
     'Bind every mutation to the full document key from illustrator_get_context or illustrator_list_documents, and read it again after any save, since keys change.',
-    'Call tools one at a time: Illustrator handles a single command at once, so parallel calls are refused.',
+    'Call tools one at a time; parallel calls are refused.',
     'A timeout or indeterminate result blocks later mutations; resolve it with illustrator_reconcile (or the matching reconcile tool) before continuing.',
-    'Overwriting a saved file requires a verified backup from illustrator_create_backup.',
-    'When a call is refused, blocked, unsupported, or indeterminate, tell the user the reason and the next steps (narrow the scope, unlock, install the font, reconcile) and let them decide; never make the same change through GUI automation or your own ExtendScript.',
+    'Overwriting a saved file requires a verified backup from illustrator_create_backup. For several unsaved changes, open illustrator_open_edit_session with it before the first change; a few tools also continue unsaved files without one (dirty_file).',
+    'When a call is refused, tell the user the reason and the next steps. A refusal because the feature is missing, unmeasured or outside the measured scope (next_steps action custom_script) may be done by your own script outside this server, without asking first: say what you will change, create_backup first for a saved file, check the result with the read tools, report what changed outside this server, and read the document key again. Never use a script or GUI automation after a timeout or indeterminate result, an unresolved lock, a stale or mismatched target, or an environment state (screen lock, Illustrator not frontmost, modal): reconcile, re-read, or fix the state and retry here.',
 ].join('\n');
-export function createServer(operations, mutationAdapters = operations.getMutationAdapterRegistry()) {
+const windowsToolCacheKeys = new WeakMap();
+const WINDOWS_RELEASE_SENTENCE = ' With the Windows mutation candidate opt-in, action=release_unverified is the last resort for a stopped candidate mutation whose outcome cannot be verified (inspect reports canReleaseUnverified): check the document in Illustrator first, then it records the command as released without verification and frees the lock; the document state stays unknown and the command is never replayed or reapplied. It requires command_id and an identical confirm_command_id.';
+const windowsReleaseToolCacheKeys = new WeakMap();
+export function createServer(operations, mutationAdapters = operations.getMutationAdapterRegistry(), options = {}) {
     if (mutationAdapters !== operations.getMutationAdapterRegistry()) {
         throw new Error('MCP server and Illustrator operations must share the exact sealed mutation adapter registry.');
     }
-    const server = new McpServer({ name: 'illustrator-studio-mcp', version: packageVersion }, { instructions: SERVER_INSTRUCTIONS });
-    installSharedToolSchemas(server, mutationAdapters);
+    const windowsReadOnly = options.windowsReadOnly === true;
+    const windowsMutationTools = options.windowsMutationTools ?? new Set();
+    if (!windowsReadOnly && windowsMutationTools.size > 0)
+        throw new Error('windowsMutationTools requires the Windows registration.');
+    let cacheKey = mutationAdapters;
+    const windowsRelease = windowsReadOnly && windowsMutationTools.size > 0;
+    if (windowsReadOnly) {
+        const keys = windowsRelease ? windowsReleaseToolCacheKeys : windowsToolCacheKeys;
+        let key = keys.get(mutationAdapters);
+        if (key === undefined) {
+            key = {};
+            keys.set(mutationAdapters, key);
+        }
+        cacheKey = key;
+    }
+    const server = new McpServer({ name: 'illustrator-studio-mcp', version: packageVersion }, { instructions: windowsReadOnly ? windowsServerInstructions(windowsMutationTools) : SERVER_INSTRUCTIONS });
+    installSharedToolSchemas(server, cacheKey);
+    installToolValidationErrors(server);
+    if (windowsReadOnly)
+        installWindowsReadOnlyRegistration(server, windowsMutationTools);
     server.registerTool('illustrator_get_context', {
         title: 'Get Illustrator Context',
         description: 'Read the active Illustrator document context without modifying it. Includes keyShort (accepted as expected_document_key), mutationProfile, and the application {bundleId, version, channel} that answered.',
@@ -986,7 +1084,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_list_objects', {
         title: 'List Illustrator Objects',
-        description: 'List native PageItem UUIDs in stable collection order. Follow nextCursor until hasMore=false before concluding an object is absent.',
+        description: 'List native PageItem UUIDs in layer-tree order (a group\'s children follow it). Follow nextCursor until hasMore=false before concluding an object is absent.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             limit: z.number().int().min(1).max(200).default(50),
@@ -1009,7 +1107,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_get_object', {
         title: 'Get Illustrator Object',
-        description: 'Get one PageItem by native UUID with bounded type-specific text, font, link, and appearance details in an explicitly bound document.',
+        description: 'Get one PageItem by native UUID with bounded type-specific text, font, link, and appearance details in an explicitly bound document. Text style runs merge equal reported attributes; at most 32 runs.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             uuid: z.string().min(1).max(255),
@@ -1035,7 +1133,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     });
     server.registerTool('illustrator_preflight_images', {
         title: 'Preflight Illustrator Images',
-        description: 'Read linked and embedded image file identity, SHA-256, source/current color facts, native and effective PPI, and structured warnings without modifying Illustrator. Follow nextCursor until hasMore=false before concluding an image is absent.',
+        description: 'Read linked and embedded image file identity, SHA-256, source/current color facts, native and effective PPI, and structured warnings without modifying Illustrator. Follow nextCursor until hasMore=false before concluding an image is absent. ' + PREFLIGHT_DESCRIPTION_SENTENCE,
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             minimum_effective_ppi: z.number().finite().positive().max(100_000),
@@ -1092,7 +1190,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     });
     server.registerTool('illustrator_preflight_print', {
         title: 'Preflight Illustrator Print Document',
-        description: 'Read a bounded complete print-preflight snapshot across document color, used inks, overprint, transparency, raster effects, bleed availability, artboard geometry, strokes, fonts, and images. Unavailable or truncated required checks can never produce pass.',
+        description: 'Read a bounded complete print-preflight snapshot across document color, used inks, overprint, transparency, raster effects, bleed availability, artboard geometry, strokes, fonts, and images. Unavailable or truncated required checks can never produce pass. ' + PREFLIGHT_DESCRIPTION_SENTENCE,
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             conditions: printConditionsInputSchema,
@@ -1168,7 +1266,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_check_text_consistency', {
         title: 'Check Illustrator Text Consistency',
-        description: 'Read-only scan of every TextFrame for placeholder text (fixed catalogue), trailing and consecutive whitespace, consecutively repeated Latin words, and case / full-width vs half-width spelling variants of the same token across the document. Rules are fixed and documented; nothing is inferred beyond them.',
+        description: 'Read-only scan of every TextFrame for placeholder text (fixed catalogue), trailing and consecutive whitespace, consecutively repeated Latin words, and case / full-width vs half-width spelling variants of the same token across the document. Rules are fixed and documented; nothing is inferred beyond them. ' + PREFLIGHT_DESCRIPTION_SENTENCE,
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
         },
@@ -1216,7 +1314,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         });
         return {
             content: [
-                { type: 'text', text: JSON.stringify(output.result, null, 2) },
+                { type: 'text', text: JSON.stringify(output.result) },
                 { type: 'text', text: 'before' },
                 { type: 'image', data: output.images.before.toString('base64'), mimeType: 'image/png' },
                 { type: 'text', text: 'after' },
@@ -1229,26 +1327,70 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     });
     server.registerTool('illustrator_capture_preview', {
         title: 'Capture Illustrator Preview',
-        description: `Render one explicit rectangle of the bound document to a PNG and return it as MCP image content, without changing the document. bounds is [left, top, right, bottom] in document points (the coordinates of artboard and object bounds), integer edges, at most ${PREVIEW_MAX_SIDE_PT} pt per side, entirely inside one artboard; the image is 72 ppi (1 px per pt) and anti-aliased, with a transparent background: RGBA when the range has any uncovered pixel, RGB (image.pixelFormat rgb8_opaque) when artwork covers every pixel. Only a document with saved=false (unsaved changes, or new and never saved) is captured: Illustrator's capture marks a saved document as changed, so a saved document is refused before anything is written. Requires Illustrator frontmost with the screen unlocked; unmeasured versions and channels need no consent. The saved state, document key, item and layer counts, and artboards are re-read after the capture; any change is an error and no image is returned. The temporary PNG is written to a private directory and removed.`,
+        description: `Render one explicit rectangle of the bound document to a PNG and return it as MCP image content, without changing the document. bounds is [left, top, right, bottom] in document points (the coordinates of artboard and object bounds), integer edges, at most ${PREVIEW_MAX_SIDE_PT} pt per side, entirely inside one artboard; the image is 72 ppi (1 px per pt) and anti-aliased, with a transparent background: RGBA when the range has any uncovered pixel, RGB (image.pixelFormat rgb8_opaque) when artwork covers every pixel. Only a document with saved=false (unsaved changes, or new and never saved) is captured: Illustrator's capture marks a saved document as changed, so a saved document is refused before anything is written. Requires the screen unlocked and Illustrator frontmost, or activate_if_needed=true to bring the configured Illustrator to the front (app focus only: no document is selected or saved, focus is not restored); unmeasured versions and channels need no consent. The saved state, document key, item and layer counts, and artboards are re-read after the capture; any change is an error and no image is returned. The temporary PNG is written to a private directory and removed.`,
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             bounds: previewBoundsSchema,
+            activate_if_needed: z.boolean().default(false),
         },
         outputSchema: { result: previewResultSchema },
-        annotations: READ_ONLY,
+        annotations: { ...READ_ONLY, readOnlyHint: false },
     }, async (params) => {
         const output = await operations.capturePreview({
             expectedDocumentKey: params.expected_document_key,
             bounds: params.bounds,
+            activateIfNeeded: params.activate_if_needed,
         });
         return {
             content: [
-                { type: 'text', text: JSON.stringify(output.result, null, 2) },
+                { type: 'text', text: JSON.stringify(output.result) },
                 { type: 'image', data: output.png.toString('base64'), mimeType: 'image/png' },
             ],
             structuredContent: { result: output.result },
         };
     });
+    server.registerTool('illustrator_render_artboards', {
+        title: 'Render Artboards',
+        description: `PNG of each artboard via imageCapture, document unchanged; compare_to a render set gives changed pixels, box and diff PNG per artboard. source current: open document, saved=false only; file: its saved file via a private copy (baseline). Illustrator frontmost, screen unlocked. Max ${RENDER_LIMITS.artboards} artboards, ${RENDER_LIMITS.pixels / 1_000_000} Mpx per call. Sets last while the server runs.`,
+        inputSchema: {
+            expected_document_key: z.string().min(1).max(16_384),
+            source: z.enum(['current', 'file']).default('current'),
+            artboards: z.array(z.number().int().min(0).max(9999)).min(1).max(RENDER_LIMITS.artboards).optional(),
+            resolution_ppi: z.number().int().min(72).max(144).multipleOf(72).default(72),
+            compare_to: z.string().min(1).max(128).optional(),
+            threshold: z.number().int().min(0).max(255).default(0),
+        },
+        outputSchema: { result: renderResultSchema },
+        annotations: READ_ONLY,
+    }, async (params) => {
+        const output = await operations.renderArtboards({
+            expectedDocumentKey: params.expected_document_key, source: params.source, ...(params.artboards === undefined ? {} : { artboards: params.artboards }),
+            resolution: params.resolution_ppi, ...(params.compare_to === undefined ? {} : { compareTo: params.compare_to }),
+            threshold: params.threshold, maxInlineImages: RENDER_LIMITS.inlineImages,
+        });
+        return {
+            content: [
+                { type: 'text', text: JSON.stringify(output.result) },
+                ...output.images.flatMap((image) => [{ type: 'text', text: image.label }, { type: 'image', data: image.png.toString('base64'), mimeType: 'image/png' }]),
+            ],
+            structuredContent: { result: output.result },
+        };
+    });
+    server.registerTool('illustrator_extract_text', {
+        title: 'Extract All Text',
+        description: `Read every text frame's text by artboard, document unchanged: paragraphs split at CR, lines at U+0003 (forced break), with trailing-break flags. Illustrator frontmost, screen unlocked, or activate_if_needed=true to bring the configured Illustrator to the front (app focus only: no document is selected or saved). Max ${TEXT_EXTRACT_LIMITS.frames} frames, ${TEXT_EXTRACT_LIMITS.characters} chars per call; continue at truncated.nextStartIndex.`,
+        inputSchema: {
+            expected_document_key: z.string().min(1).max(16_384),
+            start_index: z.number().int().min(0).max(99999).default(0),
+            activate_if_needed: z.boolean().default(false),
+        },
+        outputSchema: { result: textExtractResultSchema },
+        annotations: { ...READ_ONLY, readOnlyHint: false },
+    }, async (params) => text(await operations.extractText({
+        expectedDocumentKey: params.expected_document_key,
+        startIndex: params.start_index,
+        activateIfNeeded: params.activate_if_needed,
+    })));
     server.registerTool('illustrator_list_selection', {
         title: 'List Illustrator Selection',
         description: 'Read selected objects using Illustrator native UUIDs. This tool never writes metadata.',
@@ -1339,14 +1481,26 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         ...(params.target === undefined ? {} : { target: params.target }),
     })));
     server.registerTool('illustrator_find_fonts', {
-        title: 'Find Installed Illustrator Fonts by PostScript Name',
-        description: 'Read-only. Looks up up to ' + FONT_LOOKUP_MAX_NAMES + ' PostScript names exactly among the fonts installed for Illustrator and returns, per name in request order, either `installed` with the font\'s PostScript name, family and style, `unverified`, or `not_installed`. There is no fuzzy match and no fallback: a name that is not installed, or that the host would answer with a different font, is `not_installed`. `unverified`: Illustrator resolves the name but neither the OS nor Illustrator\'s own font lists show it; a font missing on this machine resolves this way while a document that uses it is open, and fonts that Creative Cloud activates only for Adobe applications cannot be confirmed yet. Font writes refuse an unverified name. Needs no open document and touches none. Use the returned PostScript name with illustrator_set_text_style or illustrator_replace_font. Composite fonts are not supported for font writes.',
+        title: 'Find Installed Illustrator Fonts',
+        description: 'Read-only. Give either `post_script_names` (up to ' + FONT_LOOKUP_MAX_NAMES + ' PostScript names, exact, per name in request order: `installed`, `unverified` or `not_installed`, no fuzzy match) or `query` (1–' + FIND_FONTS_QUERY_MAX_LENGTH + ' characters; case-insensitive partial match on PostScript name, family or style, ASCII letters only; 50 per page sorted by PostScript name; `matched` is the total; pass `next_cursor` as `cursor` for the next page). `unverified`: Illustrator resolves the name but neither the OS nor Illustrator\'s own font lists show it (a font missing on this machine while a document uses it, or an Adobe Fonts face not yet confirmed); font writes refuse it. Needs no open document and touches none. Use the PostScript name with illustrator_set_text_style or illustrator_replace_font. Composite fonts are not supported for font writes.',
         inputSchema: {
-            post_script_names: z.array(fontPostScriptNameSchema).min(1).max(FONT_LOOKUP_MAX_NAMES),
+            post_script_names: z.array(fontPostScriptNameSchema).min(1).max(FONT_LOOKUP_MAX_NAMES).optional(),
+            query: fontQuerySchema.optional(),
+            cursor: fontCursorSchema.optional(),
         },
-        outputSchema: { result: fontLookupResultSchema },
+        outputSchema: { result: z.union([fontLookupResultSchema, fontSearchResultSchema]) },
         annotations: READ_ONLY,
-    }, async (params) => text(await operations.findFonts({ postScriptNames: params.post_script_names })));
+    }, async (params) => {
+        if ((params.post_script_names === undefined) === (params.query === undefined)) {
+            throw new Error('illustrator_find_fonts: give exactly one of post_script_names or query.');
+        }
+        if (params.post_script_names !== undefined) {
+            if (params.cursor !== undefined)
+                throw new Error('illustrator_find_fonts: cursor is only used with query.');
+            return text(await operations.findFonts({ postScriptNames: params.post_script_names }));
+        }
+        return text(await operations.searchFonts({ query: params.query, ...(params.cursor === undefined ? {} : { cursor: params.cursor }) }));
+    });
     server.registerTool('illustrator_get_path_points', {
         title: 'Get Illustrator Path Points',
         description: 'Read-only. Returns the closed flag and every path point (anchor, leftDirection, rightDirection as [x, y] in points in Illustrator document coordinates, and pointType corner/smooth) of one PathItem directly on a layer, bound by document key and native UUID, with its layer path, lock and visibility state, and the reasons illustrator_edit_path_points would refuse to edit it. Pass `target.path` unchanged as expected_path to illustrator_edit_path_points. Group members, CompoundPathItem members, clipping paths, guides, and paths with more than ' + PATH_EDIT_MAX_POINTS + ' points are refused.',
@@ -1375,15 +1529,20 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_audit_typography', {
         title: 'Audit Typography',
-        description: 'Read-only typography audit. policy ["jp_line_break_v1"] (the only policy in v1) audits the line breaks Illustrator composed in Japanese text, bound by document key (all text frames, or target_uuids). One host read of each story, its exact line ranges, and paragraph kinsoku / mojikumi; rules are judged in Node and nothing in the document changes. '
+        description: 'Read-only typography audit, bound by document key (all text frames, or target_uuids). One host read of each story, its exact line ranges, and paragraph values; rules are judged in Node and nothing in the document changes. policy (default ["jp_line_break_v1"]) lists jp_line_break_v1, jp_justify_body_v1 and/or jp_paragraph_shape_v1. '
+            + 'jp_line_break_v1 audits the line breaks Illustrator composed in Japanese text. '
             + 'Rules: JP_LINE_START_PROHIBITED (JLReq 3.1.7: cl-02..07, 09, 10, 11 at a line start; line_start_relaxations only as the 3.1.7 notes name), JP_LINE_END_PROHIBITED (3.1.8: cl-01 at a line end), JP_UNBREAKABLE_SPLIT (3.1.10: doubled em dash, ellipsis or two-dot leader; European numerals with , . between digits; cl-12 + digit; digit + cl-13), JP_PROTECTED_TERM_SPLIT (a protected_terms entry split across lines), JP_HALFWIDTH_PUNCTUATION (half-width punctuation between Japanese characters), JP_OVERSET (area text with hidden text). '
-            + 'Full-width forms are classified as the character they are the full-width form of (JLReq Appendix A note). Line-break rules apply to soft wraps in the visible text only: forced breaks and hidden overset text are not judged. Not judged: justification, spacing, ideographic numerals, ruby, warichu, Latin word breaks, style overrides. '
+            + 'Full-width forms are classified as the character they are the full-width form of (JLReq Appendix A note). Line-break rules apply to soft wraps in the visible text only: forced breaks and hidden overset text are not judged. Not judged: ideographic numerals, ruby, warichu, Latin word breaks, style overrides. '
+            + 'jp_justify_body_v1 reads each paragraph\'s justification and its word / letter spacing and glyph scaling (minimum, desired, maximum; 4 decimals) and runs only the rules whose justify_body input is given (no threshold is assumed): JP_JUSTIFY_LAST_LINE (a justified paragraph whose last-line treatment differs from last_line; FULLJUSTIFY = justify), JP_SPACING_RANGE (a value outside spacing_ranges), JP_SHORT_LAST_LINE (heuristic: the last visible line of a justified paragraph of 2+ lines has at most short_last_line_max_characters characters). justify_body.observed (distribution over the audited paragraphs) and host_new_document_default are evidence, not targets. '
+            + 'jp_paragraph_shape_v1 runs only the rules whose paragraph_shape input is given: JP_SHORT_LINE_HEAD (heuristic: a line after a soft wrap starts with 1..max_characters characters and then a character of punctuation_classes, JLReq classes), JP_SHORT_LAST_LINE (as above, for any paragraph). Loose lines are not judged (unmeasured). '
             + 'Horizontal point text and horizontal / vertical area text only; path text, threaded, locked or hidden, vertical point, and empty frames are skipped with a reason and make status partial. '
             + 'On the measured host, the line-start / line-end rules returned 0 findings on documents with kinsoku Hard; the detection rules themselves are verified by unit tests.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             target_uuids: z.array(z.string().min(1).max(255)).min(1).max(JP_AUDIT_LIMITS.targets).optional(),
-            policy: z.array(z.literal('jp_line_break_v1')).min(1).max(1).default(['jp_line_break_v1']),
+            policy: z.array(z.enum(JP_AUDIT_POLICIES)).min(1).max(JP_AUDIT_POLICIES.length).default(['jp_line_break_v1']),
+            justify_body: jpAuditJustifyBodySchema.optional(),
+            paragraph_shape: jpAuditParagraphShapeSchema.optional(),
             line_start_relaxations: z.array(z.enum(LINE_START_RELAXATIONS)).max(LINE_START_RELAXATIONS.length).default([]),
             halfwidth_punctuation: z.enum(['report', 'ignore']).default('report'),
             protected_terms: z.array(jpAuditProtectedTermSchema).max(JP_AUDIT_LIMITS.terms).default([]),
@@ -1398,17 +1557,60 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         halfwidthPunctuation: params.halfwidth_punctuation,
         protectedTerms: params.protected_terms.map((term) => term.text),
         maxFindings: params.max_findings,
+        policies: params.policy,
+        ...(params.justify_body === undefined ? {} : { justifyBody: params.justify_body }),
+        ...(params.paragraph_shape === undefined ? {} : { paragraphShape: params.paragraph_shape }),
     })));
+    server.registerTool('illustrator_analyze_display_spacing', {
+        title: 'Analyze Display Spacing',
+        description: `Read-only letter-spacing analysis of one headline or logotype frame: horizontal point or area text, one line, at most ${DISPLAY_SPACING_LIMITS.characters} UTF-16 units, one font size, Latin or Japanese. `
+            + 'measure "outline" (default) duplicates the frame into a scratch unsaved document, outlines the copy there and returns, for each pair of adjacent inked characters, the box gap, the minimum ink gap on a shared scanline, the white between them with a depth cap (em), collisions, and a heuristic kerning_change (1/1000 em) toward the frame median white or target_white_em. '
+            + 'For about half a second the scratch document is the active document; it is closed without saving. It needs Illustrator frontmost and the screen unlocked. '
+            + '"state_only" only reads the per-character kerning method, manual kerning, proportional metrics, Tsume, aki and tracking, and opens nothing. '
+            + 'include_preview adds a 288 ppi PNG of the outlined copy. The document key, saved flag, counts, selection, active document and view are compared before and after; any change is an error. '
+            + 'Candidates are heuristic: judge at the final size and medium. Path, vertical, threaded, locked, hidden, transformed or multi-line frames are refused. '
+            + 'A timeout is indeterminate: run illustrator_reconcile; a scratch document left open is then reported with its key for illustrator_close_document.',
+        inputSchema: {
+            expected_document_key: z.string().min(1).max(16_384),
+            target_uuid: z.string().min(1).max(255),
+            measure: z.enum(['outline', 'state_only']).default('outline'),
+            target_white_em: z.number().min(0).max(2).optional(),
+            depth_cap_em: z.number().min(0.05).max(1).default(0.25),
+            include_preview: z.boolean().default(false),
+        },
+        outputSchema: { result: displaySpacingResultSchema },
+        annotations: READ_ONLY,
+    }, async (params) => {
+        const output = await operations.analyzeDisplaySpacing({
+            expectedDocumentKey: params.expected_document_key,
+            targetUuid: params.target_uuid,
+            measure: params.measure,
+            ...(params.target_white_em === undefined ? {} : { targetWhiteEm: params.target_white_em }),
+            depthCapEm: params.depth_cap_em,
+            includePreview: params.include_preview,
+        });
+        if (output.png === null)
+            return text(output.result);
+        return {
+            content: [
+                { type: 'text', text: JSON.stringify(output.result) },
+                { type: 'image', data: output.png.toString('base64'), mimeType: 'image/png' },
+            ],
+            structuredContent: { result: output.result },
+        };
+    });
     for (const adapter of mutationAdapters.list()) {
         server.registerTool(adapter.tool.name, {
             title: adapter.tool.title,
-            description: adapter.tool.description + (adapter.hostVersionOperation === undefined ? '' : ' ' + HOST_VERSION_CONSENT_DESCRIPTION),
+            description: adapter.tool.description + (adapter.hostVersionOperation === undefined ? '' : ' ' + HOST_VERSION_SCOPE_NOTE),
             inputSchema: adapter.tool.inputSchema,
             outputSchema: z.object({
-                result: adapter.tool.outputSchema,
+                result: RESPONSE_VIEWS[adapter.tool.name]?.outputSchema ?? adapter.tool.outputSchema,
                 ...(NEXT_CALL_BUILDERS[adapter.tool.name] === undefined ? {} : { next_call: nextCallSchema.optional() }),
                 next_steps: nextStepsSchema.optional(),
+                ...(rasterToolStep(adapter.operation) === undefined ? {} : { decode: rasterToolStep(adapter.operation).decodeSchema.optional() }),
                 ...(adapter.hostVersionOperation === undefined ? {} : { host_version: hostVersionNoteSchema.optional() }),
+                ...(DIRTY_FILE_ADMISSION_OPERATIONS.has(adapter.operation) ? { document_admission: documentAdmissionNoteSchema.optional() } : {}),
             }),
             annotations: adapter.tool.annotations,
         }, async (params) => {
@@ -1416,8 +1618,12 @@ export function createServer(operations, mutationAdapters = operations.getMutati
             if (!checked.success)
                 throw new Error(formatToolArgumentError(adapter.tool.name, checked.error.issues));
             let executed;
+            const view = RESPONSE_VIEWS[adapter.tool.name];
+            const normalizedInput = adapter.tool.normalizePublicInput(view === undefined ? params : view.expand(params, SNAPSHOT_REFS));
+            const rasterStep = rasterToolStep(adapter.operation);
+            const rasterPre = rasterStep === undefined ? null : await rasterStep.pre(normalizedInput);
             try {
-                executed = await operations.executeAdapterWithHostVersion(adapter.operation, adapter.tool.normalizePublicInput(params));
+                executed = await operations.executeAdapterWithHostVersion(adapter.operation, normalizedInput);
             }
             catch (error) {
                 if (!(error instanceof SvgTextPlanBlockedError))
@@ -1426,18 +1632,27 @@ export function createServer(operations, mutationAdapters = operations.getMutati
                 return { isError: true, content: [{ type: 'text', text: JSON.stringify(refusal) }] };
             }
             const { response, hostVersion } = executed;
-            const nextCall = buildNextCall(adapter.tool, params, response);
-            const guidance = nextCall === undefined ? buildBlockedNextSteps(response) : undefined;
-            if (guidance !== undefined && hostVersion?.status === 'unmeasured') {
-                guidance.note += ` This host version (${hostVersion.app}) is unmeasured. Ask the user; only after their consent repeat this plan with accept_unmeasured_host_version equal to the exact version string. Never supply consent on the user's behalf. File-backed changes require a verified backup_id on apply.`;
+            let rasterDecode;
+            if (rasterStep !== undefined && rasterPre !== null) {
+                const post = await rasterStep.post(operations, rasterPre, response);
+                if (post.mismatch !== null)
+                    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ ...post.mismatch, result: response }) }] };
+                rasterDecode = { decode: post.decode };
             }
+            const builtNextCall = buildNextCall(adapter.tool, params, response);
+            const nextCall = builtNextCall === undefined || view === undefined ? builtNextCall : view.nextCall(builtNextCall, SNAPSHOT_REFS);
+            const guidance = nextCall === undefined ? buildBlockedNextSteps(response) : undefined;
             const guided = nextCall !== undefined ? { next_call: nextCall } : guidance !== undefined ? { next_steps: guidance } : undefined;
-            const extra = hostVersion === null ? guided : { ...guided, host_version: hostVersion };
+            const withDecode = rasterDecode === undefined ? guided : { ...guided, ...rasterDecode };
+            const withVersion = hostVersion === null ? withDecode : { ...withDecode, host_version: hostVersion };
+            const admission = DIRTY_FILE_ADMISSION_OPERATIONS.has(adapter.operation) ? documentAdmissionNote(response) : null;
+            const extra = admission === null ? withVersion : { ...withVersion, document_admission: admission };
+            const shown = view === undefined ? response : view.render(response);
             if (extra === undefined)
-                return text(response);
-            const result = text(response);
+                return text(shown);
+            const result = text(shown);
             return {
-                content: [...result.content, { type: 'text', text: JSON.stringify(extra, null, 2) }],
+                content: [...result.content, { type: 'text', text: JSON.stringify(extra) }],
                 structuredContent: { ...result.structuredContent, ...extra },
             };
         });
@@ -1493,7 +1708,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     }, async (params) => text(await operations.saveDocumentAs(normalizeSaveDocumentAsPublicInput(params))));
     server.registerTool('illustrator_save_document', {
         title: 'Save Illustrator Document In Place (Overwrite With Backup)',
-        description: 'Overwrite the file of the bound, file-backed active Illustrator document with its pending changes. This is a destructive operation: backup_id must name a verified illustrator_create_backup record whose sourcePath and sourceFileRevision match the document and whose SHA-256 equals both the file currently on disk and the backup file itself; otherwise the call is rejected (backup_not_found, backup_mismatch, backup_stale, backup_file_unavailable) before Illustrator is touched. The document path must be canonical (a symbolic link is refused). The digest is re-verified under the active-command lock immediately before the host call, and Illustrator re-checks the file length and modification time right before save(); a change there writes nothing and is reported as indeterminate. A clean document is rejected with nothing_to_save; an unsaved document has no file to overwrite (use illustrator_save_document_as). Measured on Illustrator 30.8.1: save() rewrites the file with a new inode and a new file revision, so the document key changes; re-read it from the result. Refused while a backup or export session is unresolved. A timeout is indeterminate. Locked-screen behaviour is unmeasured. when the file belongs to an open edit session, backup_id must be that session\'s backup and the same host call scans the whole document first; it writes only when the structure digest and item aggregate still equal the session head (then the session closes), otherwise nothing is written and the session is suspended (edit_session_mismatch). A suspended session refuses the save (edit_session_suspended) until it is closed.',
+        description: 'Overwrite the file of the bound, file-backed active Illustrator document with its pending changes. This is a destructive operation: backup_id must name a verified illustrator_create_backup record whose sourcePath and sourceFileRevision match the document and whose SHA-256 equals both the file currently on disk and the backup file itself; otherwise the call is rejected (backup_not_found, backup_mismatch, backup_stale, backup_file_unavailable) before Illustrator is touched. The document path must be canonical (a symbolic link is refused). The digest is re-verified under the active-command lock immediately before the host call, and Illustrator re-checks the file length and modification time right before save(); a change there writes nothing and is reported as indeterminate. A clean document is rejected with nothing_to_save; an unsaved document has no file to overwrite (use illustrator_save_document_as). Measured on Illustrator 30.8.1: save() rewrites the file with a new inode and a new file revision, so the document key changes; re-read it from the result. Refused while a backup or export session is unresolved. A timeout is indeterminate. Locked-screen behaviour is unmeasured. When the file belongs to an open edit session, backup_id must be that session\'s backup and, at up to 3,000 items, the same host call scans the whole document first; it writes only when the structure digest and item aggregate still equal the session head (then the session closes), otherwise nothing is written and the session is suspended (edit_session_mismatch). A scan that cannot finish (60 s deadline, e.g. a slow Illustrator; or too many items) writes nothing and leaves the session open (edit_session_scan_incomplete): run it again, and do not restart Illustrator before the changes are saved. A suspended session refuses the save (edit_session_suspended) until it is closed. Session cap: 20,779 items; production-copy P0 5/5 (30.8.2). Above 3,000 items, ask before accept_chunked_scan_window=true: attribute edits after their chunk scan but before save can be missed. Resume scan_in_progress with its single-use scan_continuation and the same key, backup_id and consent. verification.mode=chunked reports the window and scan/save/verify timing in ms. The 40 s budget decides whether another chunk may start; the final synchronous save can take longer depending on document size (host timeout 300 s). On timeout or a lost response, keep the command lock and use illustrator_reconcile with the same command_id plus document inspection; do not automatically resend the save. Save result data is not replayed.',
         inputSchema: saveDocumentPublicInputSchema.shape,
         outputSchema: { result: saveDocumentResultSchema },
         annotations: DESTRUCTIVE_WITH_BACKUP,
@@ -1502,16 +1717,18 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         title: 'Open Edit Session',
         description: 'Declare occupancy of one saved, clean Illustrator file so that verified changes can continue while the document is dirty. ' +
             'backup_id must name a verified illustrator_create_backup record of the exact bytes on disk (same path, revision and SHA-256); it is the session\'s only restore point. ' +
-            'One host call binds the key, reads the structure digest and scans every item (at most 2,000 including nested ones, foreground and unlocked, canonical path; paths, text, groups, clip groups, compound paths and linked placed images under top-level layers; no sublayers, embedded images or other item types); anything else is rejected without writing. ' +
+            'Read-only chunks: cap 20,779 items, foreground/unlocked; production-copy P0 5/5 (30.8.2). Each chunk checks key, saved file revision and structure before/after reading. Within a 40 s work budget, scan_in_progress requests another call with the same key and backup_id plus scan_continuation. Single-use tokens expire after 10 idle minutes or server restart; aggregates stay server-side. No session is created on change, incomplete reads, no progress, excessive time estimates, 20 total minutes or 200 chunks. Changes that do not flip saved or change the structure remain outside detection during the scan window. ' +
             'While the session is open, only operations that declare the items they change run on the file (the others are refused with EDIT_SESSION_OPERATION_UNSUPPORTED before any change); ' +
             'illustrator_save_document with the same backup_id scans the document again and writes only if it still matches, which closes the session. ' + EDIT_SESSION_SUPPORT_PROFILE,
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             backup_id: z.uuid(),
+            scan_continuation: scanContinuationSchema.optional(),
         },
         outputSchema: { result: openEditSessionResultSchema },
         annotations: BACKUP,
-    }, async (params) => text(await operations.openEditSession({ expectedDocumentKey: params.expected_document_key, backupId: params.backup_id })));
+    }, async (params) => text(await operations.openEditSession({ expectedDocumentKey: params.expected_document_key, backupId: params.backup_id,
+        ...(params.scan_continuation === undefined ? {} : { scanContinuation: params.scan_continuation }) })));
     server.registerTool('illustrator_get_edit_session', {
         title: 'List Edit Sessions',
         description: 'List every edit session record (open, suspended with its reason, closed) and every unreadable record. Read-only; never touches Illustrator. ' +
@@ -1522,7 +1739,8 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     }, async () => text(await operations.getEditSessions()));
     server.registerTool('illustrator_close_edit_session', {
         title: 'Close or Quarantine Edit Session',
-        description: 'action=close ends an open or suspended edit session (the document keeps its changes and stays dirty; save it on your own judgement or restore the session backup). ' +
+        description: 'action=close ends an open or suspended edit session without saving: the document keeps its changes and stays unsaved. That is the usual end when the user checks the changes and saves the file (Cmd+S) themselves; until then this server refuses further changes to the document, and the save changes its key (read it again). ' +
+            'If the user saved while the session was open, the next context read or change suspends it (file_changed); close it then. The session backup stays the restore point. ' +
             'action=quarantine moves one unreadable session record, unchanged, out of the live state so mutations can continue; a readable record is refused. ' +
             'Both require session_id and an identical confirm_session_id, and run under the active-command lock (one trivial Illustrator call). There is no way to resume a suspended session.',
         inputSchema: {
@@ -1549,7 +1767,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     }, async (params) => text(await operations.closeDocument(normalizeCloseDocumentPublicInput(params))));
     server.registerTool('illustrator_create_backup', {
         title: 'Create Verified Illustrator Backup',
-        description: 'Copy the saved file of the bound Illustrator document to a new backup file, verify the copy by opening only the restore-test copy in Illustrator and comparing its structure with the source, close that copy without saving, and publish a private backup record. The source document and file are never written. Unsaved, dirty, or stale-key documents are rejected before any copy, and so is a document above 1,000 items (document_too_large; extrapolated from one live measurement so that no host call nears its timeout). backup_root must be a directory owned by the current user with mode 0700. An indeterminate result leaves a session that blocks mutations until illustrator_reconcile_backup releases it. Backups are never deleted automatically.',
+        description: 'Copy the saved file of the bound Illustrator document to a new backup file, verify the copy by opening only the restore-test copy in Illustrator and comparing its structure with the source, close that copy without saving, and publish a private backup record. The source document and file are never written. Unsaved, dirty, or stale-key documents are rejected before any copy. A document above 1,000 items is compared as a full record stream on macOS up to 20,778 items (the largest measured); a larger one is rejected as document_too_large with its item count. backup_root must be a directory owned by the current user with mode 0700. An indeterminate result leaves a session that blocks mutations until illustrator_reconcile_backup releases it. Backups are never deleted automatically.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             backup_root: z.string().min(1).max(4_096).optional(),
@@ -1566,7 +1784,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         if (guidance === undefined)
             return result;
         return {
-            content: [...result.content, { type: 'text', text: JSON.stringify({ next_steps: guidance }, null, 2) }],
+            content: [...result.content, { type: 'text', text: JSON.stringify({ next_steps: guidance }) }],
             structuredContent: { ...result.structuredContent, next_steps: guidance },
         };
     });
@@ -1607,12 +1825,15 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     server.registerTool('illustrator_export_pdf', {
         title: 'Export PDF with Page Selection, Marks and Bleed',
         description: 'Save chosen artboards of the bound, saved Illustrator document as one new PDF, with optional page marks and bleed, without touching the source document or file. ' +
-            'apply=false (default) is a read-only plan (one host call): the canonical artboard range, pages with their artboard sizes, marks, bleed and planDigest, plus nextCall; apply with nextCall unchanged. ' +
-            'artboards is "all" or numbers and spans such as "1,3" or "2-4", strictly ascending (Illustrator writes pages in ascending artboard order); numbers outside the document are refused. ' +
-            'Marks (trim, registration, color_bars, page_information; style roman or japanese) default off and bleed (points per side, 0-72) defaults to 0; both are always written explicitly. ' +
+            'apply=false (default) plans in one host read: artboard range/sizes, marks, bleed, planDigest and nextCall; apply nextCall unchanged. ' +
+            'artboards is "all" or "1,3"/"2-4", strictly ascending and in range (Illustrator writes ascending pages). ' +
+            'Marks (trim, registration, color_bars, page_information; roman/japanese) default off. Bleed defaults to 0; explicit sides accept whole points 0-72, refusing fractions such as 8.5 with nearest integers. Explicit bleed needs a preset with Use Document Bleed Settings OFF: ON uses document values; mismatches refuse publication. bleed={mode:"document",expected_mm:3} leaves bleed properties to the preset; document values are not read from the DOM. Publish only if every page has an explicit BleedBox with 3 mm per side (0.01 pt tolerance). Invalid bleed is refused before any host read. ' +
             'These marks exist only in the PDF; when the document already has editable trim marks (illustrator_create_trim_marks), leave trim off so the output does not carry two sets. ' +
-            'pdf_preset must equal an entry of Illustrator\'s PDF preset list; PDF/X presets are refused because scripting was measured not to produce PDF/X output, and the result never claims that a preset setting reached the file (preset.settingsVerified=false; the PDF version and output intents are reported as read from the file). ' +
-            'Apply copies the saved file into the private state root, opens only the copy, saves it once into a staging folder, verifies the file in Node (PDF header and trailer, page count, each TrimBox equal to its artboard, bleed on every side, SHA-256), closes the copy without saving, checks the source is unchanged, and publishes output_path with link(2), which never overwrites. ' +
+            'With trim/registration on, the plan scans up to 5000 paths in the same read and warns about Registration strokes or incomplete scans; warnings never block. ' +
+            'pdf_preset must uniquely match an entry of Illustrator\'s PDF preset list by NFC (the listed raw name is passed); PDF/X presets are refused (scripting did not produce PDF/X); preset.settingsVerified=false. PDF version and output intents are file facts. ' +
+            'pdfx sets the PDF/X standard: x3_2002, x3_2003 or x4 (x1a_* is refused: ignored silently); output_condition needs x4. A font not proven available is refused. The file must carry GTS_PDFXVersion (Info, XMP) and the OutputIntent; conformance is always "not_validated". ' +
+            'preserve_editability: omit to keep the preset; false for sharing and mail (measured: 16.4 MB to 387 KB for one page), true to reopen and edit in Illustrator; options.preserveEditability reports the read-back. ' +
+            'Apply opens a private copy, saves one staged PDF, checks trailer, page count, every TrimBox size and bleed, and SHA-256 in Node, closes the copy without saving, verifies source preservation, then publishes with link(2) (no overwrite). ' +
             'A stale plan (document, file revision, artboards or options changed) is refused. An indeterminate result leaves an export session that blocks mutations until illustrator_reconcile_export releases it.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
@@ -1626,11 +1847,15 @@ export function createServer(operations, mutationAdapters = operations.getMutati
                 page_information: z.boolean().optional(),
                 style: z.enum(['roman', 'japanese']).optional(),
             }).optional(),
-            bleed: z.strictObject({
-                left: z.number().min(0).max(72).optional(),
-                top: z.number().min(0).max(72).optional(),
-                right: z.number().min(0).max(72).optional(),
-                bottom: z.number().min(0).max(72).optional(),
+            bleed: pdfExportBleedInputSchema.optional(),
+            preserve_editability: z.boolean().optional(),
+            pdfx: z.strictObject({
+                standard: z.enum(['x1a_2001', 'x1a_2003', 'x3_2002', 'x3_2003', 'x4']),
+                output_condition: z.strictObject({
+                    identifier: z.string().min(1).max(256),
+                    condition: z.string().min(1).max(256).optional(),
+                    registry: z.string().min(1).max(256).optional(),
+                }).optional(),
             }).optional(),
             apply: z.boolean().default(false),
             expected_plan_digest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
@@ -1650,12 +1875,21 @@ export function createServer(operations, mutationAdapters = operations.getMutati
             ...(params.marks?.style === undefined ? {} : { style: params.marks.style }),
         },
         bleed: Object.fromEntries(Object.entries(params.bleed ?? {}).filter(([, value]) => value !== undefined)),
+        ...(params.preserve_editability === undefined ? {} : { preserveEditability: params.preserve_editability }),
+        ...(params.pdfx === undefined ? {} : { pdfx: {
+                standard: params.pdfx.standard,
+                ...(params.pdfx.output_condition === undefined ? {} : { outputCondition: {
+                        identifier: params.pdfx.output_condition.identifier,
+                        ...(params.pdfx.output_condition.condition === undefined ? {} : { condition: params.pdfx.output_condition.condition }),
+                        ...(params.pdfx.output_condition.registry === undefined ? {} : { registry: params.pdfx.output_condition.registry }),
+                    } }),
+            } }),
         apply: params.apply,
         ...(params.expected_plan_digest === undefined ? {} : { expectedPlanDigest: params.expected_plan_digest }),
     })));
     server.registerTool('illustrator_optimize_images', {
         title: 'Optimize Embedded Images to a PPI Cap',
-        description: `Downsample embedded RGB images whose effective PPI exceeds max_ppi, on a private work copy of the bound saved document, and save the result as one new .ai at output_path (which must not exist); the source document and file are never written. apply=false (default) is a read-only plan: the eligible targets with their pixels, effective PPI and expected pixels, every excluded image with its reason, the save options, and the render size. apply=true needs target_uuids from the plan (at most ${IMAGE_OPTIMIZE_MAX_TARGETS}) and output_path, and the foreground host: the saved file is copied into the private state root, only the copy is opened, rendered at max_ppi as the baseline (nothing is saved before the rasterize), each target is rasterized at max_ppi (Document.rasterize, anti-aliased, transparency kept) with its name restored, and every target is verified (pixels, effective PPI, bounds, position, colour space, bit depth, layer, stacking order) together with the artboard render at max_ppi before the one saveAs; the output is verified in Node and published without overwrite. Saves always use explicit IllustratorSaveOptions: pdfCompatible follows the source file (PDF image objects present or not), compressed on, linked files not embedded, and embedICCProfile=false: an ICC profile embedded in the source is NOT carried over to the output, which matters for colour-managed print (every plan and verified result repeats this in iccProfile and returns the chosen save options). Reported bytes are whole-document sizes (source file and output file); no reduction is promised and per-image bytes, codec and quality are not available. Version scope: Illustrator ${describeHostVersionScope('optimize_images')}, or an unmeasured stable version with explicit user consent. Other limits (RGB document, one artboard whose render at max_ppi fits ${IMAGE_OPTIMIZE_RENDER_MAX_PIXELS} px): linked, CMYK or grayscale, non-8-bit, rotated, flipped or non-uniformly scaled, grouped or clipped, locked or hidden, non-opaque or non-normal-blend images and images outside the artboard are excluded and left unchanged. Image dimensions must span integer pixels at max_ppi, and document/artboard ruler origins must be zero. Work-copy-only translation aligns the rasterization grid and is reversed before the unchanged geometry and render checks; gridTranslation records that offset. An indeterminate result leaves an export session that blocks mutations until illustrator_reconcile_export releases it. Ask the user before passing accept_unmeasured_host_version; never decide consent for them. Backup is not required because the source stays unchanged.`,
+        description: `Downsample embedded RGB images whose effective PPI exceeds max_ppi, on a private work copy of the bound saved document, and save the result as one new .ai at output_path (which must not exist); the source document and file are never written. apply=false (default) is a read-only plan: the eligible targets with their pixels, effective PPI and expected pixels, every excluded image with its reason, the save options, and the render size. apply=true needs target_uuids from the plan (at most ${IMAGE_OPTIMIZE_MAX_TARGETS}) and output_path, and the foreground host: the saved file is copied into the private state root, only the copy is opened, rendered at max_ppi as the baseline (nothing is saved before the rasterize), each target is rasterized at max_ppi (Document.rasterize, anti-aliased, transparency kept) with its name restored, and every target is verified (pixels, effective PPI, bounds, position, colour space, bit depth, layer, stacking order) together with the artboard render at max_ppi before the one saveAs; the output is verified in Node and published without overwrite. Saves use explicit IllustratorSaveOptions: pdfCompatible follows source PDF image objects, compressed=true, embedLinkedFiles=false, embedICCProfile=false. The source ICC profile is NOT carried over, affecting colour-managed print (plan/results repeat this in iccProfile and save). Bytes compare whole source and output files; no reduction or per-image codec/quality is promised. Render comparison failures retain bounded private PNG evidence at evidenceDirectory; see docs/tools.md for retention and removal. Version scope: Illustrator ${describeHostVersionScope('optimize_images')}, or another stable version, which is admitted and reported as unmeasured in host_version. Other limits (RGB document, one artboard whose render at max_ppi fits ${IMAGE_OPTIMIZE_RENDER_MAX_PIXELS} px): linked, CMYK or grayscale, non-8-bit, rotated, flipped or non-uniformly scaled, grouped or clipped, locked or hidden, non-opaque or non-normal-blend images and images outside the artboard are excluded and left unchanged. Image dimensions must span integer pixels at max_ppi, and document/artboard ruler origins must be zero. Work-copy-only translation aligns the rasterization grid and is reversed before the unchanged geometry and render checks; gridTranslation records that offset. An indeterminate result leaves an export session that blocks mutations until illustrator_reconcile_export releases it. Stable same-minor patches need no consent; ask only for other stable versions. Pass their accepted exact version in accept_unmeasured_host_version. No backup: the source stays unchanged.`,
         inputSchema: {
             accept_unmeasured_host_version: hostVersionPublicFields.accept_unmeasured_host_version,
             expected_document_key: z.string().min(1).max(16_384),
@@ -1668,7 +1902,6 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         annotations: BACKUP,
     }, async (params) => {
         const response = await operations.optimizeImages({
-            ...(params.accept_unmeasured_host_version === undefined ? {} : { acceptUnmeasuredHostVersion: params.accept_unmeasured_host_version }),
             expectedDocumentKey: params.expected_document_key,
             capPpi: params.max_ppi,
             apply: params.apply,
@@ -1676,30 +1909,33 @@ export function createServer(operations, mutationAdapters = operations.getMutati
             ...(params.output_path === undefined ? {} : { outputPath: params.output_path }),
         });
         const result = text(response);
-        const versionNote = response.outcome === 'planned'
-            ? admitHostVersionPlan('optimize_images', response.document.appVersion, 'stable', {
-                ...(params.accept_unmeasured_host_version === undefined ? {} : { acceptUnmeasuredHostVersion: params.accept_unmeasured_host_version }), hostVersionChannel: 'stable',
-            }) : null;
+        const versionNote = response.outcome === 'planned' || response.outcome === 'verified'
+            ? admitHostVersionPlan('optimize_images', response.document.appVersion, 'stable') : null;
         const extra = response.outcome === 'rejected' && response.reason === 'host_version_unmeasured'
-            ? { next_steps: { blocked_by: ['host_version_unmeasured'], actions: ['ask_user'], note: response.message } }
+            ? { next_steps: { blocked_by: ['host_version_unmeasured'], actions: ['unsupported'], note: response.message } }
             : versionNote !== null ? { host_version: versionNote } : {};
         return { ...result, content: [...result.content, { type: 'text', text: JSON.stringify(extra) }], structuredContent: { ...result.structuredContent, ...extra } };
     });
     server.registerTool('illustrator_export', {
-        title: 'Export One Artboard as PNG or JPEG',
+        title: 'Export Artboards as PNG or JPEG',
         description: 'Export one artboard of the bound, clean, saved RGB Illustrator document as one new PNG24 or JPEG file, ' +
             'without touching the source document or file. apply=false (default) is a read-only plan (one host call) that returns the ' +
             'expected pixel size and nextCall; apply with those arguments unchanged. The saved file is copied into the private state root, ' +
             'only the copy is opened, the target artboard is selected and exported once to a private staging folder, the file is fully ' +
-            'decoded and its pixel size must equal the plan, the copy is closed without saving, and the file is published at output_path ' +
-            'with link(2), which never overwrites (an existing path is refused). Supported: scale 1 or 2 (size = artboard pt x scale, ' +
-            'exact, and it must be whole pixels), artboard edges in whole points or with .5 pt (1x) or .25/.5 pt (2x) fractions, at most ' +
+            'decoded and its pixel size must equal the plan (a board whose size is not whole: fall inside the planned range), the copy is closed without saving, and the file is published at output_path ' +
+            'with link(2), which never overwrites (an existing path is refused). Legacy: scale 1 or 2 (size = artboard pt x scale, ' +
+            'exact), artboard edges in whole points or with .5 pt (1x) or .25/.5 pt (2x) fractions (another edge fraction is written with a warning and a size range), at most ' +
             '4000 px per side and 12,000,000 px in total, an artboard ruler origin in whole points; ' +
-            'an opaque PNG only at 1x. Anything else is refused in the plan. Unsaved changes, never-saved documents, open edit sessions, ' +
-            'CMYK and linked images are refused (save first). SVG is not supported yet. Exports run one at a time. The same command_id ' +
+            'legacy opaque PNG only at 1x. ' +
+            'Single artboard exact-px: width_px or height_px instead of scale, preserving aspect ratio; whole-point board dimensions and an integer derived side, exact decoded-size verification. ' +
+            'Configured stable 30.8.x (measured 30.8.2): JPEG and PNG transparent/opaque 25–400%; the plan echoes intent and renderScalePercent. Fresh exact-px plan/apply require foreground/unlocked (one check before the first Host call, no automatic activation). Batch exact-px is refused. ' +
+            'Anything else is refused in the plan. Unsaved changes, never-saved documents, open edit sessions, ' +
+            'CMYK and linked images are refused (save first). SVG is not supported yet. Exports run one at a time. ' +
+            'Several artboards: output_dir with artboard_indexes or all_artboards (at most 32) writes <artboard name>.<ext> files from one work copy in one plan and apply; ' +
+            'an unusable or repeated name or an existing file blocks the whole plan (items), and publication is all-or-nothing. The same command_id ' +
             'replays the stored result without calling Illustrator; a timeout leaves a session that blocks mutations until ' +
             'illustrator_reconcile_export resolves it.',
-        inputSchema: rasterExportInputSchema.shape,
+        inputSchema: rasterExportToolInputShape,
         outputSchema: { result: rasterExportResultSchema },
         annotations: BACKUP,
     }, async (params) => text(await operations.rasterExport(params)));
@@ -1735,7 +1971,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
             'release_quarantined with confirm_export_id equal to export_id (release a quarantined or unreadable export after you have checked its files). ' +
             'Nothing is exported, linked or deleted again, output files are never touched, and every change runs under the command lock. Mutations stay blocked until every session is released.',
         inputSchema: {
-            export_id: z.uuid(),
+            export_id: canonicalCommandIdSchema,
             action: z.enum(['inspect', 'close_work_copy', 'finalize', 'abandon', 'release_quarantined']).default('inspect'),
             confirm_export_id: z.uuid().optional(),
         },
@@ -1748,21 +1984,26 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_reconcile', {
         title: 'Reconcile Illustrator Command',
-        description: 'Check durable command and transaction-phase status after a timeout or other indeterminate result before another mutation is allowed. action=quarantine moves one command whose unsafe state is confined to it (reported by the state scan) out of the live state, unchanged, so other mutations can continue; that command is never replayed or reapplied. It requires command_id and an identical confirm_command_id. action=release_unverified is the last resort for a stopped command whose outcome cannot be verified (inspect reports canReleaseUnverified): check the document in Illustrator first, then it records the command as released without verification and frees the lock; the document state stays unknown and the command is never replayed or reapplied. It also requires command_id and an identical confirm_command_id.',
+        description: windowsReadOnly ? `Inspect an indeterminate read or abandon it with confirm_command_id when execution is proven inactive. No host mutation is performed.${windowsRelease ? WINDOWS_RELEASE_SENTENCE : ''}` : 'Check durable command and transaction-phase status after a timeout or other indeterminate result before another mutation is allowed. action=quarantine moves one command whose unsafe state is confined to it (reported by the state scan) out of the live state, unchanged, so other mutations can continue; that command is never replayed or reapplied. It requires command_id and an identical confirm_command_id. action=release_unverified is the last resort for a stopped command whose outcome cannot be verified (inspect reports canReleaseUnverified): check the document in Illustrator first, then it records the command as released without verification and frees the lock; the document state stays unknown and the command is never replayed or reapplied. It also requires command_id and an identical confirm_command_id.',
         inputSchema: {
             command_id: canonicalCommandIdSchema.optional(),
-            action: z.enum(['inspect', 'abandon', 'quarantine', 'release_unverified']).default('inspect'),
+            action: (windowsReadOnly ? (windowsRelease ? z.enum(['inspect', 'abandon', 'release_unverified']) : z.enum(['inspect', 'abandon'])) : z.enum(['inspect', 'abandon', 'quarantine', 'release_unverified'])).default('inspect'),
             confirm_command_id: canonicalCommandIdSchema.optional(),
         },
-        outputSchema: { result: commandStatusSchema.nullable() },
+        outputSchema: { result: (windowsReadOnly && !windowsRelease ? windowsDefaultCommandStatusSchema : commandStatusSchema).nullable() },
         annotations: RECONCILE,
-    }, async (params) => text(await operations.reconcile({
-        ...(params.command_id === undefined ? {} : { commandId: params.command_id }),
-        abandon: params.action === 'abandon',
-        quarantine: params.action === 'quarantine',
-        releaseUnverified: params.action === 'release_unverified',
-        ...(params.confirm_command_id === undefined ? {} : { confirmCommandId: params.confirm_command_id }),
-    })));
-    installPublishedToolList(server, mutationAdapters);
+    }, async (params) => {
+        const action = params.action;
+        if (windowsReadOnly && (action === 'quarantine' || (action === 'release_unverified' && !windowsRelease)))
+            throw new WindowsReadOnlyError();
+        return text(await operations.reconcile({
+            ...(params.command_id === undefined ? {} : { commandId: params.command_id }),
+            abandon: action === 'abandon',
+            quarantine: action === 'quarantine',
+            releaseUnverified: action === 'release_unverified',
+            ...(params.confirm_command_id === undefined ? {} : { confirmCommandId: params.confirm_command_id }),
+        }));
+    });
+    installPublishedToolList(server, cacheKey);
     return server;
 }

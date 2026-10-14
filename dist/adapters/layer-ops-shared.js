@@ -91,6 +91,25 @@ export function layerBlockers(mutationAllowed, target, options) {
         blockers.push('ancestor_locked');
     return blockers;
 }
+export const REFERENCE_SIBLING_BLOCKER = 'reference_sibling_locked_or_hidden';
+export const createLayerBlockerSchema = z.enum([...layerBlockerSchema.options, REFERENCE_SIBLING_BLOCKER]);
+export function referenceSiblingOf(order, position) {
+    return position > 0 && position < order.length ? order[position] : null;
+}
+export function referenceSiblingBlockers(order, position) {
+    const reference = referenceSiblingOf(order, position);
+    return reference !== null && (reference.locked || !reference.visible) ? [REFERENCE_SIBLING_BLOCKER] : [];
+}
+export function reorderReferenceSiblingOf(order, fromIndex, toIndex) {
+    if (fromIndex === toIndex)
+        return null;
+    const others = order.filter((_entry, index) => index !== fromIndex);
+    return toIndex < others.length ? others[toIndex] : null;
+}
+export function reorderReferenceSiblingBlockers(order, fromIndex, toIndex) {
+    const reference = reorderReferenceSiblingOf(order, fromIndex, toIndex);
+    return reference !== null && (reference.locked || !reference.visible) ? [REFERENCE_SIBLING_BLOCKER] : [];
+}
 const failureSchema = z.strictObject({ phase: z.enum(['apply', 'verify']), reasonCode: z.enum(['apply_failed', 'verify_mismatch']), message: z.string().min(1).max(500) })
     .superRefine((failure, context) => {
     if ((failure.phase === 'apply') !== (failure.reasonCode === 'apply_failed'))

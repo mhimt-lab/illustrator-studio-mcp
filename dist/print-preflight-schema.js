@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { documentContextSchema } from './mutation-result-schema-core.js';
+import { PREFLIGHT_SCOPE_NOTE } from './preflight-scope-note.js';
 import { PRINT_PREFLIGHT_LIMITS } from './print-preflight.js';
 const message = z.string().min(1).max(500);
 const colorSpace = z.enum(['RGB', 'CMYK']);
@@ -85,6 +86,7 @@ const facts = z.strictObject({
 const sectionStatus = z.enum(['pass', 'review', 'fail', 'indeterminate', 'not_requested']);
 export const printPreflightResultSchema = z.strictObject({
     document: documentContextSchema,
+    scopeNote: z.literal(PREFLIGHT_SCOPE_NOTE),
     conditions: printPreflightConditionsSchema,
     verdict: z.enum(['pass', 'review', 'fail', 'indeterminate']),
     complete: z.boolean(),

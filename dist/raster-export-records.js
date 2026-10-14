@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { fileIdentitySchema, hostDocumentIdentitySchema } from './document-backup.js';
+import { canonicalSerialize } from './mutation-canonical.js';
 export const RASTER_EXPORT_RECORD_VERSION = 2;
 export const RASTER_EXPORT_KIND = 'raster_vector_export';
+export const RASTER_BATCH_EXPORT_KIND = 'raster_batch_export';
 export const RASTER_EXPORT_SESSION_MAX_BYTES = 16_384;
 export const RASTER_EXPORT_RECORD_MAX_BYTES = 65_536;
 export const RASTER_EXPORT_RECORD_SUFFIXES = Object.freeze({
@@ -21,6 +23,21 @@ export const rasterExportOptionsSchema = z.discriminatedUnion('format', [
     z.strictObject({ format: z.literal('png'), scale: z.union([z.literal(1), z.literal(2)]), transparent: z.boolean() }),
     z.strictObject({ format: z.literal('jpeg'), scale: z.union([z.literal(1), z.literal(2)]), quality: z.number().int().min(0).max(100) }),
 ]);
+export const exactRasterSizeIntentSchema = z.union([
+    z.strictObject({ mode: z.literal('width_px'), widthPx: z.number().int().min(1).max(4000) }),
+    z.strictObject({ mode: z.literal('height_px'), heightPx: z.number().int().min(1).max(4000) }),
+]);
+const exactSizeFields = {
+    sizeIntent: exactRasterSizeIntentSchema,
+    renderScalePercent: z.number().positive().refine(value => Number(value.toFixed(12)) === value, 'The render scale must use the canonical 12-decimal representation.'),
+};
+export const exactRasterExportOptionsSchema = z.discriminatedUnion('format', [
+    z.strictObject({ format: z.literal('png'), ...exactSizeFields, transparent: z.boolean() }),
+    z.strictObject({ format: z.literal('jpeg'), ...exactSizeFields, quality: z.number().int().min(0).max(100) }),
+]);
+export const singleRasterExportOptionsSchema = z.union([rasterExportOptionsSchema, exactRasterExportOptionsSchema]);
+export const exactRasterExpectedSchema = z.strictObject({ width: z.number().int().min(1).max(4000), height: z.number().int().min(1).max(4000) })
+    .refine(size => size.width * size.height <= 12_000_000, 'Pixel ceiling exceeded.');
 export const rasterExportSessionSchema = z.strictObject({
     version: z.literal(RASTER_EXPORT_RECORD_VERSION),
     kind: z.literal(RASTER_EXPORT_KIND),
@@ -143,6 +160,23 @@ export const RASTER_EXPORT_RECORD_SCHEMAS = {
     cleanup: rasterExportCleanupSchema,
     quarantine: rasterExportQuarantineSchema,
 };
+export const RASTER_EXACT_PX_RECORD_VERSION = 3;
+const v3Version = { version: z.literal(RASTER_EXACT_PX_RECORD_VERSION) };
+const exactIntentMatches = (record) => record.options.sizeIntent.mode === 'width_px' ? record.expected.width === record.options.sizeIntent.widthPx : record.expected.height === record.options.sizeIntent.heightPx;
+export const rasterExactSessionSchema = rasterExportSessionSchema.extend({ ...v3Version, options: exactRasterExportOptionsSchema, expected: exactRasterExpectedSchema })
+    .refine(exactIntentMatches, 'The requested side must equal the expected dimension.');
+export const RASTER_EXACT_RECORD_SCHEMAS = {
+    prepare: rasterExportPrepareSchema.extend(v3Version),
+    session: rasterExactSessionSchema,
+    host_open: rasterExportHostOpenSchema.extend(v3Version),
+    artifact_binding: rasterExportBindingSchema.extend(v3Version),
+    host_terminal: rasterExportHostTerminalSchema.extend(v3Version),
+    published: rasterExportPublishedSchema.extend({ ...v3Version, options: exactRasterExportOptionsSchema, expected: exactRasterExpectedSchema })
+        .refine(exactIntentMatches, 'The requested side must equal the expected dimension.'),
+    failed: rasterExportFailedSchema.extend(v3Version),
+    cleanup: rasterExportCleanupSchema.extend(v3Version),
+    quarantine: rasterExportQuarantineSchema.extend(v3Version),
+};
 export class ExportSessionFormatError extends Error {
     exportId;
     reason;
@@ -151,7 +185,9 @@ export class ExportSessionFormatError extends Error {
             ? `Export session ${exportId} is a raster/vector export (version 2) lease that this operation does not handle; it stays unresolved.`
             : reason === 'save_as_session'
                 ? `${exportId} is an illustrator_save_document_as session; run illustrator_reconcile_save_as with save_as_id=${exportId}. No host call was made.`
-                : `Export session ${exportId} is not a readable export record (${reason}); it stays unresolved and no host call was made.`);
+                : reason === 'raster_batch_export'
+                    ? `${exportId} is a multi-artboard export record; run illustrator_reconcile_export with export_id=${exportId}. No host call was made.`
+                    : `Export session ${exportId} is not a readable export record (${reason}); it stays unresolved and no host call was made.`);
         this.exportId = exportId;
         this.reason = reason;
         this.name = 'ExportSessionFormatError';
@@ -170,6 +206,20 @@ export function classifyExportEntry(text, expected, schemas) {
     const entry = value;
     if (entry.version === 3 && entry.kind === 'save_as_session')
         return { format: 'invalid', reason: 'save_as_session' };
+    if (entry.version === RASTER_EXPORT_RECORD_VERSION && entry.kind === RASTER_BATCH_EXPORT_KIND)
+        return { format: 'invalid', reason: 'raster_batch_export' };
+    if (entry.version === RASTER_EXACT_PX_RECORD_VERSION) {
+        if (schemas.v3 === undefined)
+            return { format: 'invalid', reason: 'unsupported_version' };
+        if (entry.kind !== RASTER_EXPORT_KIND)
+            return { format: 'invalid', reason: 'unknown_kind' };
+        if (entry.recordType !== expected.recordType)
+            return { format: 'invalid', reason: 'record_type_mismatch' };
+        if (entry.exportId !== expected.exportId)
+            return { format: 'invalid', reason: 'export_id_mismatch' };
+        const parsed = schemas.v3.safeParse(entry);
+        return parsed.success ? { format: 'v3', record: parsed.data } : { format: 'invalid', reason: 'schema_invalid' };
+    }
     if (entry.version === RASTER_EXPORT_RECORD_VERSION) {
         if (entry.kind !== RASTER_EXPORT_KIND)
             return { format: 'invalid', reason: 'unknown_kind' };
@@ -206,6 +256,33 @@ export function assessRasterRecordSet(set, planDigest) {
     const has = (type) => set[type].state === 'v2';
     if (types.every((type) => !has(type)))
         return { state: 'none' };
+    const versions = new Set(types.flatMap(type => set[type].state === 'v2' && set[type].record.version !== undefined ? [set[type].record.version] : []));
+    if (versions.size > 1)
+        return { state: 'invalid', reason: 'mixed_record_versions' };
+    if (versions.has(3)) {
+        const exact = set;
+        const prepare = exact.prepare.state === 'v2' ? exact.prepare.record : null;
+        if (prepare === null)
+            return { state: 'invalid', reason: 'records without prepare' };
+        for (const type of types) {
+            const read = exact[type];
+            if (read.state === 'v2' && (read.record.version !== 3 || read.record.planDigest !== prepare.planDigest))
+                return { state: 'invalid', reason: 'exact_record_intent_mismatch' };
+        }
+        const session = exact.session.state === 'v2' && exact.session.record.version === 3 ? exact.session.record : null;
+        const binding = exact.artifact_binding.state === 'v2' ? exact.artifact_binding.record : null;
+        const published = exact.published.state === 'v2' && exact.published.record.version === 3 ? exact.published.record : null;
+        if (session !== null && binding !== null && (binding.sessionDigest !== exact.session.digest || binding.width !== session.expected.width || binding.height !== session.expected.height))
+            return { state: 'invalid', reason: 'exact_binding_mismatch' };
+        if (published !== null) {
+            if (published.artifact.width !== published.expected.width || published.artifact.height !== published.expected.height)
+                return { state: 'invalid', reason: 'exact_published_dimension_mismatch' };
+            if (exact.artifact_binding.state !== 'v2' || published.bindingDigest !== exact.artifact_binding.digest || exact.host_terminal.state !== 'v2' || published.hostTerminalDigest !== exact.host_terminal.digest)
+                return { state: 'invalid', reason: 'exact_published_binding_mismatch' };
+            if (session !== null && (canonicalSerialize(session.options) !== canonicalSerialize(published.options) || session.expected.width !== published.expected.width || session.expected.height !== published.expected.height))
+                return { state: 'invalid', reason: 'exact_published_intent_mismatch' };
+        }
+    }
     if (planDigest !== undefined) {
         for (const type of types) {
             const read = set[type];

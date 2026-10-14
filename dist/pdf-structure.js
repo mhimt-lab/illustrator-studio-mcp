@@ -738,6 +738,8 @@ export async function readPdfStructure(source, limits = PDF_STRUCTURE_LIMITS) {
             outputIntents.push({
                 subtype: nameOf(intent.get('S')),
                 outputConditionIdentifier: reader.encrypted ? null : stringOf(await reader.resolve(intent.get('OutputConditionIdentifier'))),
+                outputCondition: reader.encrypted ? null : stringOf(await reader.resolve(intent.get('OutputCondition'))),
+                registryName: reader.encrypted ? null : stringOf(await reader.resolve(intent.get('RegistryName'))),
             });
         }
     }
@@ -745,6 +747,7 @@ export async function readPdfStructure(source, limits = PDF_STRUCTURE_LIMITS) {
     const info = await reader.resolve(newest.get('Info'));
     if (isDict(info) && !reader.encrypted)
         pdfxVersion = stringOf(await reader.resolve(info.get('GTS_PDFXVersion')));
+    const xmp = await readXmpPdfx(reader, catalog.get('Metadata'));
     return {
         headerVersion: header[1],
         catalogVersion: nameOf(catalog.get('Version')),
@@ -757,7 +760,30 @@ export async function readPdfStructure(source, limits = PDF_STRUCTURE_LIMITS) {
         pages,
         outputIntents,
         pdfxVersion,
+        xmp,
     };
+}
+function xmpField(packet, name) {
+    const element = new RegExp(`<${name}>([^<]*)</${name}>`).exec(packet);
+    const attribute = new RegExp(`${name}="([^"]*)"`).exec(packet);
+    return element?.[1] ?? attribute?.[1] ?? null;
+}
+async function readXmpPdfx(reader, metadata) {
+    const unreadable = { readable: false, pdfxidVersion: null, pdfxVersion: null };
+    if (reader.encrypted || !isRef(metadata))
+        return unreadable;
+    try {
+        const object = await reader.indirect(metadata.ref[0], metadata.ref[1]);
+        if (!isDict(object.value) || object.stream === null)
+            return unreadable;
+        const packet = decodeStream(object.value, object.stream, reader.limits).toString('utf8');
+        return { readable: true, pdfxidVersion: xmpField(packet, 'pdfxid:GTS_PDFXVersion'), pdfxVersion: xmpField(packet, 'pdfx:GTS_PDFXVersion') };
+    }
+    catch (error) {
+        if (error instanceof PdfStructureError)
+            return unreadable;
+        throw error;
+    }
 }
 export async function readPdfFileStructure(path, limits = PDF_STRUCTURE_LIMITS) {
     const handle = await open(path, noFollowReadFlags());

@@ -16,12 +16,26 @@ const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 2;
 const canonicalNumberSchema = z.number().finite().transform((value) => Object.is(value, -0) ? 0 : value);
+export const CREATE_AREA_TEXT_LEADING_PROFILE = 'plain_area_text_explicit_leading_v1';
+const LEADING_SCALE = 100_000;
+const leadingSchema = z.number().finite().positive().superRefine((value, context) => {
+    if (!Number.isSafeInteger(Math.round(value * LEADING_SCALE)) || Math.round(value * LEADING_SCALE) / LEADING_SCALE !== value) {
+        context.addIssue({ code: 'custom', message: 'leading must be positive points representable at five decimals with a safe scaled integer.' });
+    }
+});
+export function createAreaTextLeadingMatches(actual, requested) {
+    return Number.isFinite(actual) && actual > 0 && Number.isSafeInteger(Math.round(actual * LEADING_SCALE)) &&
+        Math.round(actual * LEADING_SCALE) / LEADING_SCALE === requested;
+}
+const createProfileSchema = z.enum([AREA_TEXT_PROFILE_NAME, CREATE_AREA_TEXT_LEADING_PROFILE]);
+const createdSnapshotSchema = areaTextSnapshotSchema.extend({ profile: createProfileSchema });
 const requestedStyleSchema = z.strictObject({
     fontPostScriptName: z.string().min(1).max(255),
     size: z.number().finite().positive(),
     tracking: z.number().finite(),
     justification: z.enum(AREA_TEXT_JUSTIFICATIONS),
     fillColor: pointTextFillColorSchema,
+    leading: leadingSchema.optional(),
 });
 const requestedStyleRequestSchema = z.strictObject({
     fontPostScriptName: z.string().min(1).max(255),
@@ -29,6 +43,7 @@ const requestedStyleRequestSchema = z.strictObject({
     tracking: canonicalNumberSchema,
     justification: z.enum(AREA_TEXT_JUSTIFICATIONS),
     fillColor: pointTextFillColorRequestSchema,
+    leading: leadingSchema.optional(),
 });
 const publicStyleSchema = z.strictObject({
     font_post_script_name: z.string().min(1).max(255),
@@ -36,6 +51,7 @@ const publicStyleSchema = z.strictObject({
     tracking: z.number().finite(),
     justification: z.enum(AREA_TEXT_JUSTIFICATIONS).optional(),
     fill_color: pointTextPublicFillColorSchema,
+    leading: leadingSchema.optional().describe('Explicit line spacing in points, positive with at most five decimals. Omit for automatic leading. Currently one paragraph; unsupported plans provide a custom_script handoff.'),
 });
 const rectSchema = z.strictObject({
     x: z.number().finite(),
@@ -66,6 +82,7 @@ const blockerSchema = z.enum([
     'layer_hidden',
     'layer_locked',
     'layer_item_capacity_exceeded',
+    'unsupported',
 ]);
 const planSchema = z.strictObject({
     operation: z.literal(CREATE_AREA_TEXT_OPERATION),
@@ -74,11 +91,14 @@ const planSchema = z.strictObject({
     rect: rectSchema,
     contents: areaTextContentsSchema,
     requestedStyle: requestedStyleSchema,
-    profile: z.literal(AREA_TEXT_PROFILE_NAME),
+    profile: createProfileSchema,
     layer: createAreaTextLayerStateSchema,
     applyBlockedReasonCodes: z.array(blockerSchema),
     applyAllowed: z.boolean(),
 }).superRefine((plan, context) => {
+    if (plan.profile !== (plan.requestedStyle.leading === undefined ? AREA_TEXT_PROFILE_NAME : CREATE_AREA_TEXT_LEADING_PROFILE)) {
+        context.addIssue({ code: 'custom', message: 'The creation profile must match the presence of explicit leading.' });
+    }
     if (plan.applyAllowed !== (plan.applyBlockedReasonCodes.length === 0)) {
         context.addIssue({ code: 'custom', message: 'Area-text creation applyAllowed must require no blockers.' });
     }
@@ -186,7 +206,7 @@ export const createAreaTextResultSchema = z.union([
         document: documentContextSchema, plan: planSchema,
         created: z.strictObject({
             uuid: z.string().min(1).max(255),
-            snapshot: areaTextSnapshotSchema,
+            snapshot: createdSnapshotSchema,
             layerItemUuids: z.array(z.string().min(1).max(255)).min(1).max(CREATE_AREA_TEXT_MAX_DIRECT_ITEMS + 1),
         }),
         transaction: transactionSchema,
@@ -207,6 +227,8 @@ export const createAreaTextResultSchema = z.union([
         if (result.plan.layer.itemUuids.length >= CREATE_AREA_TEXT_MAX_DIRECT_ITEMS) {
             blockers.push('layer_item_capacity_exceeded');
         }
+        if (result.plan.requestedStyle.leading !== undefined && result.plan.contents.includes('\n'))
+            blockers.push('unsupported');
         if (canonicalSha256(result.plan.applyBlockedReasonCodes) !==
             canonicalSha256(blockers)) {
             context.addIssue({ code: 'custom', message: 'Planned area-text creation must expose exact blockers.' });
@@ -226,7 +248,7 @@ export const createAreaTextResultSchema = z.union([
             context.addIssue({ code: 'custom', message: 'A created area text must be the only new item, at the front, with the prior order intact.' });
         }
         if (result.created.snapshot.contents !== result.plan.contents ||
-            result.created.snapshot.profile !== AREA_TEXT_PROFILE_NAME ||
+            result.created.snapshot.profile !== result.plan.profile ||
             canonicalSha256(result.created.snapshot.layerPath) !==
                 canonicalSha256(result.plan.layer.path)) {
             context.addIssue({ code: 'custom', message: 'A created area text must match the planned contents, profile and layer.' });
@@ -234,6 +256,10 @@ export const createAreaTextResultSchema = z.union([
         if (canonicalSha256(result.created.snapshot.style.fillColor) !==
             canonicalSha256(result.plan.requestedStyle.fillColor)) {
             context.addIssue({ code: 'custom', message: 'A created area text must carry the requested fill.' });
+        }
+        if (result.plan.requestedStyle.leading !== undefined &&
+            (result.plan.contents.includes('\n') || !createAreaTextLeadingMatches(result.created.snapshot.style.leading, result.plan.requestedStyle.leading))) {
+            context.addIssue({ code: 'custom', message: 'Explicit leading must match its five-decimal request on one paragraph.' });
         }
         const requested = areaTextStripBreaks(result.plan.contents);
         if (result.created.snapshot.fit.requestedCharacterCount !== requested.length ||
@@ -294,6 +320,7 @@ function normalizePublicInput(input) {
             tracking: value.style.tracking,
             justification: value.style.justification ?? 'Justification.LEFT',
             fillColor: normalizePointTextPublicFillColor(value.style.fill_color),
+            ...(value.style.leading === undefined ? {} : { leading: value.style.leading }),
         },
     };
     return value.apply
@@ -526,6 +553,8 @@ function createAreaTextResolve(forApply) {
   if (ancestorHidden) blockers.push("layer_hidden");
   if (ancestorLocked) blockers.push("layer_locked");
   if (order.length >= CREATE_AREA_TEXT_MAX_DIRECT_ITEMS) blockers.push("layer_item_capacity_exceeded");
+  // CR Character attributes are not part of #708's measured setter. Leave legacy multi-paragraph creation alone.
+  if (params.style.leading !== undefined && String(params.contents).indexOf("\\n") !== -1) blockers.push("unsupported");
   if (forApply && blockers.length > 0) {
     throw mutationBeforeSideEffectError(stringifyJson({ code: "CREATE_AREA_TEXT_APPLY_BLOCKED",
       reasonCodes: blockers }));
@@ -542,7 +571,7 @@ function createAreaTextPlanState(preflight) {
     rect: { x: params.rect.x, y: params.rect.y, width: params.rect.width, height: params.rect.height },
     contents: params.contents,
     requestedStyle: params.style,
-    profile: AREA_TEXT_PROFILE,
+    profile: params.style.leading === undefined ? AREA_TEXT_PROFILE : ${JSON.stringify(CREATE_AREA_TEXT_LEADING_PROFILE)},
     layer: { path: params.expectedLayerPath, name: preflight.layer.name,
       visible: preflight.layer.visible, locked: preflight.layer.locked,
       itemUuids: preflight.order, ancestry: preflight.ancestry },
@@ -562,6 +591,92 @@ function createAreaTextRevalidate(preflight, plan) {
       stringifyJson(current.ancestry) !== stringifyJson(plan.layer.ancestry) ||
       stringifyJson(current.rect) !== stringifyJson(preflight.rect) || current.font !== preflight.font) {
     throw mutationBeforeSideEffectError("Area-text creation target or layer changed before apply.");
+  }
+}
+
+/** The state protected while adding explicit leading, including every held Character's attributes. */
+function createAreaTextLeadingState(target) {
+  var range = target.textRange;
+  var characters = range.characters;
+  var text = String(target.contents);
+  if (!characters || characters.length !== text.length || text !== areaTextHostContents(params.contents)) {
+    throw mutationError("verify_mismatch", "The created text or Character count changed.");
+  }
+  var rows = [];
+  for (var index = 0; index < characters.length; index++) {
+    var character = characters[index];
+    if (String(character.contents) !== text.charAt(index)) {
+      throw mutationError("verify_mismatch", "The created Character identity changed.");
+    }
+    areaTextParagraphState(character);
+    rows.push(areaTextStyle({ textRange: character }));
+  }
+  return { rows: rows, contents: text, uuid: String(target.uuid), frame: areaTextFrameState(target),
+    manualKerning: pointTextManualKerning(range), ancestry: pointTextAncestry(target),
+    name: pointTextCanonicalValue(target.name), selected: pointTextCanonicalValue(target.selected),
+    locked: target.locked, hidden: target.hidden, editable: target.editable };
+}
+
+/** Same five-decimal comparison as the public result validator, restricted to requested leading. */
+function createAreaTextLeadingMatches(actual, requested) {
+  var scaled = Math.round(actual * ${LEADING_SCALE});
+  return typeof actual === "number" && isFinite(actual) && actual > 0 &&
+    isFinite(scaled) && Math.abs(scaled) <= 9007199254740991 && scaled / ${LEADING_SCALE} === requested;
+}
+
+function createAreaTextApplyLeading(frame, state) {
+  if (params.style.leading === undefined) return;
+  state.operationState.leadingBefore = createAreaTextLeadingState(frame);
+  var range = frame.textRange;
+  var characters = range.characters;
+  for (var index = 0; index < characters.length; index++) {
+    // Keep the Character alive through both writes (F0-v1; avoids the temporary-handle Error 9503).
+    var character = characters[index];
+    var attributes = character.characterAttributes;
+    attributes.autoLeading = false;
+    attributes.leading = params.style.leading;
+  }
+}
+
+// Private snapshot serialization: key order cannot change the protected-state comparison.
+function createAreaTextLeadingJson(value) {
+  if (value === null || value === undefined) return "null";
+  if (typeof value !== "object") return stringifyJson(value);
+  var parts = [];
+  var index;
+  if (Object.prototype.toString.call(value) === "[object Array]") {
+    for (index = 0; index < value.length; index++) parts.push(createAreaTextLeadingJson(value[index]));
+    return "[" + parts.join(",") + "]";
+  }
+  var keys = [];
+  for (var key in value) if (value.hasOwnProperty(key) && value[key] !== undefined) keys.push(key);
+  keys.sort();
+  for (index = 0; index < keys.length; index++) {
+    parts.push(stringifyJson(keys[index]) + ":" + createAreaTextLeadingJson(value[keys[index]]));
+  }
+  return "{" + parts.join(",") + "}";
+}
+
+function createAreaTextVerifyLeading(target, state) {
+  if (params.style.leading === undefined) return;
+  // These are private tables in this create script. The shared legacy script and every other adapter stay unchanged.
+  // The canonical writer above still runs with autoLeading=true; only verification selects the explicit profile.
+  AREA_TEXT_PINNED.character.autoLeading = "false";
+  AREA_TEXT_PROFILE = ${JSON.stringify(CREATE_AREA_TEXT_LEADING_PROFILE)};
+  var before = state.operationState.leadingBefore;
+  var after = createAreaTextLeadingState(target);
+  if (!before || before.rows.length !== after.rows.length || after.rows.length === 0) {
+    throw mutationError("verify_mismatch", "The explicit-leading baseline is unavailable.");
+  }
+  var actual = after.rows[0].leading;
+  for (var index = 0; index < after.rows.length; index++) {
+    if (after.rows[index].leading !== actual || !createAreaTextLeadingMatches(after.rows[index].leading, params.style.leading)) {
+      throw mutationError("verify_mismatch", "Explicit leading did not read back uniformly at five-decimal precision.");
+    }
+    after.rows[index].leading = before.rows[index].leading;
+  }
+  if (createAreaTextLeadingJson(before) !== createAreaTextLeadingJson(after)) {
+    throw mutationError("verify_mismatch", "Explicit leading changed a protected creation attribute.");
   }
 }
 
@@ -639,6 +754,7 @@ function createAreaTextApply(preflight, plan, state) {
   state.operationState.createdUuid = String(frame.uuid);
   frame.contents = areaTextHostContents(params.contents);
   createAreaTextApplyProfile(frame);
+  createAreaTextApplyLeading(frame, state);
   return frame;
 }
 
@@ -659,11 +775,15 @@ function createAreaTextVerify(preflight, plan, state) {
       !mutationSameSequence(order.slice(1), plan.layer.itemUuids)) {
     throw mutationError("verify_mismatch", "The created area text is not the only new front item of its layer.");
   }
+  createAreaTextVerifyLeading(target, state);
   var snapshot = areaTextSnapshot(preflight.document, target, createdUuid, params.contents);
   if (snapshot.contents !== params.contents || snapshot.profile !== AREA_TEXT_PROFILE ||
       !mutationSameSequence(snapshot.layerPath, plan.layer.path) ||
       stringifyJson(snapshot.style.fillColor) !== stringifyJson(params.style.fillColor)) {
     throw mutationError("verify_mismatch", "The created area text does not match the planned state.");
+  }
+  if (params.style.leading !== undefined && !createAreaTextLeadingMatches(snapshot.style.leading, params.style.leading)) {
+    throw mutationError("verify_mismatch", "The snapshot leading does not match the request.");
   }
   return { uuid: createdUuid, snapshot: snapshot, layerItemUuids: order };
 }
@@ -803,8 +923,12 @@ export const createAreaTextToolContract = {
     description: 'Plan or create one AREATEXT frame from an artboard-relative rectangle on an explicit layer path, '
         + 'bound by explicit document key, and flow multi-paragraph body text into it with automatic wrapping. '
         + 'Paragraphs are separated by a newline. Every character, paragraph and frame property outside the requested '
-        + 'font, size, tracking, alignment and fill is written from the plain_area_text_v1 profile rather than '
-        + 'inherited, so line spacing follows that profile and is not caller-settable in this slice. Overset is never a '
+        + 'font, size, tracking, alignment, fill and optional leading is explicitly pinned rather than inherited. '
+        + 'Omitting style.leading preserves plain_area_text_v1 automatic leading. Explicit leading uses '
+        + 'plain_area_text_explicit_leading_v1: positive points with at most five decimals, autoLeading=false on every '
+        + 'character, readback compared at five decimals; the snapshot reports the actual native value. Explicit leading '
+        + 'currently supports one paragraph; a newline produces an unsupported plan and the existing custom_script handoff '
+        + '(backup a saved document first, verify with read tools, report the external change, re-read the document key). Overset is never a '
         + 'success: apply verifies that the concatenated visible lines equal the whole requested text and otherwise rolls '
         + 'the frame back and reports how many characters were visible. Columns, rows, threading and inset spacing are '
         + 'unsupported. fill_color follows the document color space: RGB in RGB documents, {model: "cmyk", …} in CMYK '

@@ -1,5 +1,4 @@
 import { EDIT_SESSION_JSX } from './edit-session-jsx.js';
-import { EDIT_SESSION_MAX_ITEMS } from './edit-session.js';
 export const MUTATION_TRANSACTION_SCRIPT = String.raw `
 var MUTATION_SIDE_EFFECT_ATTEMPTED = false;
 var MUTATION_FORCE_INDETERMINATE = false;
@@ -7,7 +6,6 @@ var MUTATION_RUNNER_DISPOSITION = "unknown";
 var MUTATION_EDIT_SESSION_DECLARED = false;
 var MUTATION_EDIT_SESSION = null;
 var MUTATION_EDIT_SESSION_EVIDENCE = null;
-var EDIT_SESSION_MAX_ITEMS = ${EDIT_SESSION_MAX_ITEMS};
 ` + EDIT_SESSION_JSX + String.raw `
 function mutationEditSessionRefuse(code, session) {
   throw new Error("MCP_ERROR:" + stringifyJson({ code: code, sessionId: session.sessionId }));
@@ -39,10 +37,14 @@ function mutationEditSessionAdmit(context, session) {
   var structure = esStructure(doc);
   if (structure.digest !== session.structureDigest) mutationEditSessionRefuse("EDIT_SESSION_STRUCTURE_CHANGED", session);
   if (EDIT_SESSION_ADMISSION_INPUT.hostProfile !== "foreground_unlocked") mutationEditSessionRefuse("EDIT_SESSION_UNMEASURED_HOST_STATE", session);
-  if (structure.itemCount === null || structure.itemCount > EDIT_SESSION_MAX_ITEMS) mutationEditSessionRefuse("EDIT_SESSION_DOCUMENT_TOO_LARGE", session);
+  var maxItems = EDIT_SESSION_ADMISSION_INPUT.maxItems;
+  if (typeof maxItems !== "number" || !isFinite(maxItems) || maxItems <= 0 || Math.floor(maxItems) !== maxItems) {
+    throw new Error("Edit session admission item limit is invalid.");
+  }
+  if (structure.itemCount === null || structure.itemCount > maxItems) mutationEditSessionRefuse("EDIT_SESSION_DOCUMENT_TOO_LARGE", session);
   if (structure.sublayerCount > 0) mutationEditSessionRefuse("EDIT_SESSION_UNMEASURED_CONTENT", session);
   // itemTotal counts the head's rows: every item, nested ones included, plus one stacking-order row per layer.
-  if (typeof session.itemTotal !== "number" || session.itemTotal - structure.layerCount > EDIT_SESSION_MAX_ITEMS) mutationEditSessionRefuse("EDIT_SESSION_DOCUMENT_TOO_LARGE", session);
+  if (typeof session.itemTotal !== "number" || session.itemTotal - structure.layerCount > maxItems) mutationEditSessionRefuse("EDIT_SESSION_DOCUMENT_TOO_LARGE", session);
   if (!MUTATION_EDIT_SESSION_DECLARED) mutationEditSessionRefuse("EDIT_SESSION_OPERATION_UNSUPPORTED", session);
   MUTATION_EDIT_SESSION = { sessionId: session.sessionId, sequence: session.sequence, doc: doc, fileRevision: context.fileRevision,
     beforeStructure: structure, admissionMs: esNow() - startedAt };
@@ -219,6 +221,79 @@ function mutationPublicMessage(error, fallback) {
     return mutationTruncateMessage(error.mutationPublicMessage);
   }
   return fallback;
+}
+
+// A native exception text can carry a file path, a document file name, or the user's home folder. Drop each of them
+// (the remainder of the line for a path, the quoted name or the clause for a bare file name) before the text is
+// published or written to the durable result.
+var MUTATION_NATIVE_PATH_PATTERN = /file:|~?\/|[A-Za-z]:[\\\/]|\\\\|(?:[A-Za-z0-9 _.-]+:){2}/;
+var MUTATION_NATIVE_FILE_PATTERN = /[^\s]\.(?:ai|ait|eps|pdf|svgz?|psd|indd|png|jpe?g|gif|tiff?|bmp|webp|txt|json|csv|otf|ttf|ttc)(?![A-Za-z0-9])/i;
+var MUTATION_NATIVE_QUOTES = ["\"", "'", "\u0060", "\u201C", "\u2018", "\u300C", "\u300E"];
+var MUTATION_NATIVE_CLOSERS = ["\"", "'", "\u0060", "\u201D", "\u2019", "\u300D", "\u300F"];
+
+function mutationNativeLastIndex(text, marks) {
+  var found = -1;
+  for (var markIndex = 0; markIndex < marks.length; markIndex++) {
+    var at = String(text).lastIndexOf(marks[markIndex]);
+    if (at > found) found = at;
+  }
+  return found;
+}
+
+function mutationNativeFirstIndex(text, from, marks) {
+  var found = -1;
+  for (var markIndex = 0; markIndex < marks.length; markIndex++) {
+    var at = String(text).indexOf(marks[markIndex], from);
+    if (at >= 0 && (found < 0 || at < found)) found = at;
+  }
+  return found;
+}
+
+function mutationRedactNativeLine(line) {
+  var pathAt = line.search(MUTATION_NATIVE_PATH_PATTERN);
+  if (pathAt >= 0) line = line.substring(0, pathAt) + "[path]";
+  for (var pass = 0; pass < 8; pass++) {
+    var fileAt = line.search(MUTATION_NATIVE_FILE_PATTERN);
+    if (fileAt < 0) break;
+    var head = line.substring(0, fileAt + 1);
+    var open = mutationNativeLastIndex(head, MUTATION_NATIVE_QUOTES);
+    if (open >= 0) {
+      var close = mutationNativeFirstIndex(line, fileAt + 2, MUTATION_NATIVE_CLOSERS);
+      line = line.substring(0, open) + "[file]" + (close >= 0 ? line.substring(close + 1) : "");
+    } else {
+      var clause = Math.max(String(head).lastIndexOf(": "), String(head).lastIndexOf("\uFF1A"));
+      line = line.substring(0, clause >= 0 ? clause + 1 : 0) + (clause >= 0 ? " " : "") + "[file]";
+      break;
+    }
+  }
+  return line;
+}
+
+function mutationRedactNativeText(value) {
+  var lines = String(value).split(/\r?\n/);
+  for (var lineIndex = 0; lineIndex < lines.length; lineIndex++) lines[lineIndex] = mutationRedactNativeLine(lines[lineIndex]);
+  return lines.join("\n");
+}
+
+function mutationNativeMessage(call, error) {
+  var text = "";
+  try {
+    if (typeof error === "string") text = error;
+    else if (error && typeof error.message === "string") text = error.message;
+  } catch (readError) {}
+  text = mutationRedactNativeText(text).replace(/^\s+|\s+$/g, "");
+  if (text.length === 0) return call.length > 0 ? call + " failed." : "Apply failed.";
+  return mutationTruncateMessage((call.length > 0 ? call : "Apply failed") + ": " + text);
+}
+
+function mutationNativeFailure(call, error) {
+  throw mutationError("apply_failed", mutationNativeMessage(call, error));
+}
+
+function mutationApplyFailureMessage(error) {
+  var own = mutationPublicMessage(error, null);
+  if (own !== null) return own;
+  return mutationNativeMessage(error && typeof error.mutationNativeCall === "string" ? error.mutationNativeCall : "", error);
 }
 
 function mutationError(reasonCode, publicMessage) {
@@ -409,7 +484,7 @@ function runMutationTransaction(definition) {
   try {
     state.applyValue = definition.applyMutation(preflight, plan, state);
   } catch (applyError) {
-    var applyMessage = mutationPublicMessage(applyError, "Apply failed.");
+    var applyMessage = mutationApplyFailureMessage(applyError);
     if (typeof definition.hasMutationEvidence !== "function" || definition.hasMutationEvidence(state) !== true) {
       var indeterminate = typeof definition.applyIndeterminate === "function"
         ? definition.applyIndeterminate(state)

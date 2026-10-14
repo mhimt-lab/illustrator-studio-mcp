@@ -18,8 +18,8 @@ export const CREATE_SHAPE_MAX_STAR_POINTS = 24;
 export const CREATE_SHAPE_TOLERANCE_PT = 0.01;
 export const CREATE_SHAPE_MAX_COORDINATE_PT = 16_383;
 export const CREATE_SHAPE_PRECISION_DIGITS = 6;
-const CANONICAL_VERSION = 2;
-const RESULT_SCHEMA_VERSION = 2;
+const CANONICAL_VERSION = 3;
+const RESULT_SCHEMA_VERSION = 3;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
@@ -317,11 +317,24 @@ export function geometryWithinTolerance(left, right) {
         left.anchors.every((point, index) => near(point, right.anchors[index])) &&
         left.geometricBounds.every((value, index) => Math.abs(value - right.geometricBounds[index]) <= CREATE_SHAPE_TOLERANCE_PT);
 }
+const placementSchema = z.strictObject({
+    position: z.enum(['above', 'below']), referenceUuid: z.string().min(1).max(255),
+});
+const publicPlacementSchema = z.strictObject({
+    position: z.enum(['above', 'below']), reference_uuid: z.string().min(1).max(255),
+});
+function plannedShapeOrder(before, placement) {
+    const order = [...before];
+    const index = placement === undefined ? 0 : before.indexOf(placement.referenceUuid) + (placement.position === 'below' ? 1 : 0);
+    order.splice(index, 0, null);
+    return order;
+}
 const commonInternal = {
     expectedDocumentKey: z.string().min(1).max(16_384),
     expectedLayerPath: layerPathSchema,
     artboardIndex: z.number().int().safe().nonnegative(),
     shape: createShapeShapeSchema,
+    placement: placementSchema.optional(),
     name: z.string().max(255).optional(),
     appearance: creationAppearanceSchema.optional(),
 };
@@ -334,6 +347,7 @@ const commonPublic = {
     expected_layer_path: layerPathSchema,
     artboard_index: z.number().int().safe().nonnegative(),
     shape: publicShapeSchema,
+    placement: publicPlacementSchema.optional(),
     name: z.string().max(255).optional(),
     appearance: creationAppearanceSchema.optional(),
 };
@@ -365,6 +379,7 @@ function normalizePublicInput(input) {
         expectedDocumentKey: value.expected_document_key, expectedLayerPath: value.expected_layer_path,
         artboardIndex: value.artboard_index, shape, ...(value.name === undefined ? {} : { name: value.name }),
         ...(value.appearance === undefined ? {} : { appearance: value.appearance }),
+        ...(value.placement === undefined ? {} : { placement: { position: value.placement.position, referenceUuid: value.placement.reference_uuid } }),
     };
     return value.apply ? { ...common, apply: true, commandId: value.command_id } : { ...common, apply: false };
 }
@@ -391,12 +406,18 @@ const planSchema = z.strictObject({
     geometry: geometrySchema,
     withinArtboard: z.boolean(),
     layer: layerStateSchema,
+    placement: placementSchema.extend({ expectedParentOrder: z.array(z.string().min(1).max(255).nullable()).min(2).max(CREATE_SHAPE_MAX_DIRECT_ITEMS + 1) }).optional(),
     applyBlockedReasonCodes: z.array(blockerSchema),
     appearance: creationAppearanceSchema.optional(),
     applyAllowed: z.boolean(),
 }).superRefine((plan, context) => {
     if (plan.applyAllowed !== (plan.applyBlockedReasonCodes.length === 0)) {
         context.addIssue({ code: 'custom', message: 'Shape creation applyAllowed must require no blockers.' });
+    }
+    if (plan.placement !== undefined && (!plan.layer.itemUuids.includes(plan.placement.referenceUuid) ||
+        new Set(plan.layer.itemUuids).size !== plan.layer.itemUuids.length ||
+        canonicalSha256(plan.placement.expectedParentOrder) !== canonicalSha256(plannedShapeOrder(plan.layer.itemUuids, plan.placement)))) {
+        context.addIssue({ code: 'custom', message: 'Relative placement must bind the reference and exact parent order.' });
     }
     const derived = deriveShapeGeometry(plan.artboardBounds, plan.shape);
     if (canonicalSha256(plan.geometry) !== canonicalSha256(derived)) {
@@ -510,10 +531,10 @@ export const createShapeResultSchema = z.union([
         if (result.transaction.state !== 'verified') {
             context.addIssue({ code: 'custom', message: 'A created shape must come from a verified transaction.' });
         }
-        if (result.created.layerItemUuids[0] !== result.created.uuid ||
-            result.created.layerItemUuids.length !== result.plan.layer.itemUuids.length + 1 ||
-            result.created.layerItemUuids.slice(1).some((uuid, index) => uuid !== result.plan.layer.itemUuids[index])) {
-            context.addIssue({ code: 'custom', message: 'A created shape must be the only new item, at the front, with the prior order intact.' });
+        const expectedOrder = plannedShapeOrder(result.plan.layer.itemUuids, result.plan.placement).map((uuid) => uuid ?? result.created.uuid);
+        if (result.plan.layer.itemUuids.includes(result.created.uuid) ||
+            canonicalSha256(result.created.layerItemUuids) !== canonicalSha256(expectedOrder)) {
+            context.addIssue({ code: 'custom', message: 'A created shape must be the only new item, at its planned position, with the prior order intact.' });
         }
         if (!geometryWithinTolerance(result.created.geometry, result.plan.geometry) ||
             (result.plan.name !== null && result.created.name !== result.plan.name)) {
@@ -1012,6 +1033,32 @@ function shapeResolve(forApply) {
   var layer = shapeResolveLayer(document, params.expectedLayerPath);
   var ancestry = shapeLayerAncestry(layer);
   var order = shapeLayerOrder(layer);
+  var reference = null;
+  if (params.placement !== undefined) {
+    var placement = params.placement;
+    if (!placement || (placement.position !== "above" && placement.position !== "below") ||
+        typeof placement.referenceUuid !== "string" || placement.referenceUuid.length === 0 || placement.referenceUuid.length > 255) {
+      throw mutationError("preflight_failed", "Relative placement requires above/below and a native reference UUID.");
+    }
+    reference = shapeFind(document, placement.referenceUuid);
+    if (reference === null || reference.uuid !== placement.referenceUuid || String(reference.typename) !== "PathItem" ||
+        reference.parent !== layer || reference.layer !== layer) {
+      throw mutationError("preflight_failed", "Relative reference must be a PathItem directly on the requested layer.");
+    }
+    if (typeof reference.locked !== "boolean" || typeof reference.hidden !== "boolean" || typeof reference.editable !== "boolean" ||
+        reference.locked || reference.hidden || !reference.editable) {
+      throw mutationError("preflight_failed", "Relative reference must be unlocked, visible, and editable.");
+    }
+    var seen = {};
+    var referenceCount = 0;
+    for (var o = 0; o < order.length; o++) {
+      var orderKey = "uuid:" + order[o];
+      if (seen[orderKey]) throw mutationError("preflight_failed", "Relative placement requires unique parent UUIDs.");
+      seen[orderKey] = true;
+      if (order[o] === placement.referenceUuid) referenceCount++;
+    }
+    if (referenceCount !== 1) throw mutationError("preflight_failed", "Relative reference is not uniquely present in the requested parent order.");
+  }
   var rect = shapeArtboardRect(document, params.artboardIndex);
   var geometry = shapeDerive(rect, params.shape);
   var defect = shapeDerivedDefect(params.shape.kind, geometry);
@@ -1029,7 +1076,18 @@ function shapeResolve(forApply) {
   if (forApply && blockers.length > 0) {
     throw new Error("MCP_ERROR:" + stringifyJson({ code: "CREATE_SHAPE_APPLY_BLOCKED", reasonCodes: blockers, layerPath: params.expectedLayerPath }));
   }
-  return { context: context, document: document, layer: layer, ancestry: ancestry, order: order, rect: rect, geometry: geometry, blockers: blockers };
+  return { context: context, document: document, layer: layer, ancestry: ancestry, order: order, rect: rect, geometry: geometry, blockers: blockers, reference: reference };
+}
+
+function shapeExpectedOrder(before, createdUuid) {
+  var order = before.slice(0);
+  var insertion = 0;
+  if (params.placement !== undefined) {
+    for (var i = 0; i < before.length; i++) if (before[i] === params.placement.referenceUuid) insertion = i;
+    if (params.placement.position === "below") insertion++;
+  }
+  order.splice(insertion, 0, createdUuid);
+  return order;
 }
 
 function shapePlan(preflight) {
@@ -1043,6 +1101,10 @@ function shapePlan(preflight) {
     applyBlockedReasonCodes: preflight.blockers, applyAllowed: preflight.blockers.length === 0
   };
   if (params.appearance !== undefined) plan.appearance = params.appearance;
+  if (params.placement !== undefined) plan.placement = {
+    position: params.placement.position, referenceUuid: params.placement.referenceUuid,
+    expectedParentOrder: shapeExpectedOrder(preflight.order, null)
+  };
   return plan;
 }
 
@@ -1095,6 +1157,14 @@ function shapeApply(preflight, plan, state) {
   if (params.appearance !== undefined) {
     state.operationState.appearanceState = creationAppearanceApply(preflight.document, item, params.appearance);
   }
+  if (params.placement !== undefined) {
+    for (var existing = 0; existing < preflight.order.length; existing++) {
+      if (preflight.order[existing] === state.operationState.createdUuid) throw mutationError("apply_failed", "Created UUID collides with a pre-existing sibling.");
+    }
+    // #499 measured both operations; PLACEAFTER is deliberately not used.
+    item.move(preflight.reference, ElementPlacement.PLACEBEFORE);
+    if (params.placement.position === "below") item.zOrder(ZOrderMethod.SENDBACKWARD);
+  }
   return item;
 }
 
@@ -1107,8 +1177,9 @@ function shapeVerifyCreated(preflight, plan, state, verifyOrder) {
   var createdUuid = state.operationState.createdUuid;
   if (typeof createdUuid !== "string" || createdUuid.length === 0) throw mutationError("verify_mismatch", "The created shape has no captured native UUID.");
   var item = shapeFind(preflight.document, createdUuid);
-  if (item === null || item !== state.operationState.createdObject) throw mutationError("verify_mismatch", "The created native UUID does not resolve to the created shape.");
-  if (String(item.typename) !== "PathItem" || item.layer !== preflight.layer) throw mutationError("verify_mismatch", "The created shape has an unexpected type or layer.");
+  if (item === null || item.uuid !== createdUuid ||
+      (params.placement === undefined && item !== state.operationState.createdObject)) throw mutationError("verify_mismatch", "The created native UUID does not resolve to the created shape.");
+  if (String(item.typename) !== "PathItem" || item.layer !== preflight.layer || (params.placement !== undefined && item.parent !== preflight.layer)) throw mutationError("verify_mismatch", "The created shape has an unexpected type or layer.");
   if (typeof item.locked !== "boolean" || typeof item.hidden !== "boolean" || typeof item.editable !== "boolean" || item.locked || item.hidden || !item.editable) {
     throw mutationError("verify_mismatch", "The created shape is not verifiably editable.");
   }
@@ -1125,8 +1196,9 @@ function shapeVerifyCreated(preflight, plan, state, verifyOrder) {
 function shapeVerify(preflight, plan, state) {
   return shapeVerifyCreated(preflight, plan, state, function (createdUuid) {
     var order = shapeLayerOrder(preflight.layer);
-    if (order.length !== plan.layer.itemUuids.length + 1 || order[0] !== createdUuid || !mutationSameSequence(order.slice(1), plan.layer.itemUuids)) {
-      throw mutationError("verify_mismatch", "The created shape is not the only new front item of its layer.");
+    var expected = shapeExpectedOrder(plan.layer.itemUuids, createdUuid);
+    if (!mutationSameSequence(order, expected)) {
+      throw mutationError("verify_mismatch", "The created shape does not match the complete planned parent order.");
     }
     return order;
   });
@@ -1156,7 +1228,16 @@ function shapeRollback(state) {
   }
   var currentOrder;
   try { currentOrder = shapeLayerOrder(preflight.layer); } catch (e) { return { status: "indeterminate", message: "Rollback layer order is indeterminate." }; }
-  if (currentOrder.length !== preflight.order.length + 1 || currentOrder[0] !== createdUuid || !mutationSameSequence(currentOrder.slice(1), preflight.order)) {
+  var others = [], createdCount = 0;
+  for (var c = 0; c < currentOrder.length; c++) {
+    if (currentOrder[c] === createdUuid) createdCount++;
+    else others.push(currentOrder[c]);
+  }
+  if ((params.placement === undefined && item !== state.operationState.createdObject) ||
+      item.uuid !== createdUuid || item.layer !== preflight.layer ||
+      (params.placement !== undefined && item.parent !== preflight.layer) || createdCount !== 1 ||
+      currentOrder.length !== preflight.order.length + 1 || !mutationSameSequence(others, preflight.order) ||
+      (params.placement === undefined && currentOrder[0] !== createdUuid)) {
     return { status: "indeterminate", message: "Rollback refused because the layer is neither the baseline nor the created state." };
   }
   try { item.remove(); } catch (removeError) { return { status: "indeterminate", message: "Rollback removal is indeterminate." }; }
@@ -1226,7 +1307,7 @@ function normalizedRequest(input) {
 export const createShapeToolContract = {
     name: 'illustrator_create_shape',
     title: 'Plan or Create Shape',
-    description: `Plan or create one ellipse, regular polygon (${CREATE_SHAPE_MIN_POLYGON_SIDES}-${CREATE_SHAPE_MAX_POLYGON_SIDES} sides), star (${CREATE_SHAPE_MIN_STAR_POINTS}-${CREATE_SHAPE_MAX_STAR_POINTS} points, outer radius larger than inner), straight line, straight-segment path, or curve with explicit direction handles and smooth/corner point types (2-${CREATE_SHAPE_MAX_PATH_POINTS} points, open or closed) on an explicit layer path in artboard-top-left points. Degenerate shapes (zero size, coincident consecutive points or star vertices, closed curves that enclose no area) and self-intersecting straight paths are rejected before any write; curve self-intersection is not checked. Apply creates once, verifies the native UUID, layer order, closed state, anchors, handles, point types and bounds against the plan, and rolls back only its own created item with absence proven. Optional appearance (opacity, fill, stroke) is set and read back in the same apply.`,
+    description: `Plan or create one ellipse, regular polygon (${CREATE_SHAPE_MIN_POLYGON_SIDES}-${CREATE_SHAPE_MAX_POLYGON_SIDES} sides), star (${CREATE_SHAPE_MIN_STAR_POINTS}-${CREATE_SHAPE_MAX_STAR_POINTS} points, outer radius larger than inner), straight line, straight-segment path, or curve with explicit direction handles and smooth/corner point types (2-${CREATE_SHAPE_MAX_PATH_POINTS} points, open or closed) on an explicit layer path in artboard-top-left points. Degenerate shapes (zero size, coincident consecutive points or star vertices, closed curves that enclose no area) and self-intersecting straight paths are rejected before any write; curve self-intersection is not checked. Apply creates once, verifies the native UUID, layer order, closed state, anchors, handles, point types and bounds against the plan, and rolls back only its own created item with absence proven. Optional placement creates immediately above/below an unlocked, visible, editable PathItem UUID directly on the requested layer; omitted placement creates at the front. Above/below public P0 passed on 30.8.2. Optional appearance (opacity, fill, stroke) is set and read back in the same apply.`,
     inputSchema,
     publicInputSchema: createShapePublicInputSchema,
     outputSchema: createShapeResponseSchema,

@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { WINDOWS_RUNNER_EXIT as EXIT, WINDOWS_RUNNER_STDERR_TOKEN as TOKEN } from './runner-exit-codes.js';
 const SESSION_TYPE = [
     "Add-Type -TypeDefinition @'",
@@ -45,7 +46,8 @@ const RUNNER_LINES = [
     `if ($nonce -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { exit ${EXIT.goNonceMismatch} }`,
     `if ($jsxPath.Length -eq 0) { exit ${EXIT.goNonceMismatch} }`,
     ...SESSION_TYPE,
-    '[Console]::Out.Write("ready $nonce`n")',
+    '$creationTime = [Diagnostics.Process]::GetCurrentProcess().StartTime.ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture)',
+    '[Console]::Out.Write("ready $nonce $PID $creationTime`n")',
     '[Console]::Out.Flush()',
     '$go = [Console]::In.ReadLine()',
     `if ($go -cne "go $nonce") { Stop-McpRunner ${EXIT.goNonceMismatch} '${TOKEN.goNonceMismatch}' }`,
@@ -83,10 +85,26 @@ export function windowsRunnerFileContents() {
 }
 export function windowsRunnerInvocation(input) {
     return {
-        command: `${input.systemRoot.replace(/\\+$/u, '')}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
+        command: windowsPowerShellExecutable(input.systemRoot),
         args: ['-NoProfile', '-NonInteractive', '-Sta', '-ExecutionPolicy', 'Bypass', '-File', input.runnerPath, input.nonce, input.jsxPath],
     };
+}
+export function windowsPowerShellExecutable(systemRoot) {
+    return `${systemRoot.replace(/\\+$/u, '')}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
 }
 export function windowsPowerShellEnvironment(env) {
     return Object.fromEntries(Object.entries(env).filter(([name]) => name.toUpperCase() !== 'PSMODULEPATH'));
 }
+export const windowsCommandRunner = (command, args, timeoutMs) => new Promise((resolve) => {
+    execFile(command, args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 65536,
+        env: windowsPowerShellEnvironment(process.env) }, (error, stdout, stderr) => {
+        if (error === null)
+            resolve({ kind: 'exit', code: 0, signal: null, stdout, stderr });
+        else if (error.killed)
+            resolve({ kind: 'timeout', timeoutMs });
+        else if (typeof error.code === 'number')
+            resolve({ kind: 'exit', code: error.code, signal: error.signal ?? null, stdout, stderr });
+        else
+            resolve({ kind: 'spawn_error', message: 'Windows PowerShell could not start.' });
+    });
+});

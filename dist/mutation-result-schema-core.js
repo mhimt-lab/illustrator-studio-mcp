@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { DOCUMENT_KEY_SHORT_PATTERN } from './document-key.js';
+import { PUBLISHED_AS_KEY } from './published-tool-schema.js';
 export const boundsSchema = z.array(z.number().finite()).length(4)
     .superRefine((bounds, context) => {
     if (bounds[0] <= bounds[2] && bounds[1] >= bounds[3])
@@ -14,7 +15,7 @@ export function toBounds(bounds) {
 }
 export const documentKeyShortSchema = z.string().regex(DOCUMENT_KEY_SHORT_PATTERN)
     .describe('First 16 hex characters of SHA-256 over key; accepted as expected_document_key.');
-export const documentMutationProfileSchema = z.enum(['saved_file', 'unsaved_document', 'edit_session_file']);
+export const documentMutationProfileSchema = z.enum(['saved_file', 'unsaved_document', 'edit_session_file', 'dirty_file']);
 export const illustratorApplicationEvidenceSchema = z.strictObject({
     bundleId: z.string().min(1).nullable()
         .describe('Configured bundle identifier the bridge addresses; null when ILLUSTRATOR_APPLICATION is a LaunchServices name.'),
@@ -35,7 +36,7 @@ const documentContextShape = {
     artboardCount: z.number().int().positive(),
     appVersion: z.string(),
     mutationProfile: documentMutationProfileSchema.nullable()
-        .describe('saved_file: verified file revision; unsaved_document: no backing file exists; edit_session_file: file of an open edit session; null: blocked.'),
+        .describe('saved_file: verified file revision; unsaved_document: no backing file exists; edit_session_file: file of an open edit session; dirty_file: saved file with unsaved changes, admitted without a session for declared operations (verification covers the declared targets only; external changes outside them are not detected); null: blocked.'),
     mutationAllowed: z.boolean(),
     mutationBlockedReason: z.string().nullable(),
 };
@@ -99,7 +100,14 @@ const mutationAuditEventSchema = z.discriminatedUnion('event', [
         reasonCode: z.enum(['not_requested', 'not_required']),
     }),
 ]);
-export const mutationAuditSchema = z.array(mutationAuditEventSchema).min(1).max(32);
+const PUBLISHED_AUDIT_EVENT = {
+    type: 'object',
+    properties: { sequence: { type: 'integer' }, phase: { type: 'string' }, event: { type: 'string' }, reasonCode: { type: 'string' }, message: { type: 'string' } },
+    required: ['sequence', 'phase', 'event'],
+    additionalProperties: false,
+};
+export const mutationAuditSchema = z.array(mutationAuditEventSchema).min(1).max(32)
+    .meta({ [PUBLISHED_AS_KEY]: { type: 'array', minItems: 1, maxItems: 32, items: PUBLISHED_AUDIT_EVENT } });
 function mutationAuditSignature(event) {
     return `${event.phase}:${event.event}:${'reasonCode' in event ? event.reasonCode : ''}`;
 }

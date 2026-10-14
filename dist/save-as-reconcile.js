@@ -1,5 +1,7 @@
+import { sameFilePath } from './file-path.js';
+import { assertSameFilePathIdentity } from './file-path-identity.js';
 import { lstat, readdir } from 'node:fs/promises';
-import { basename, dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
 import { isMissingPath } from './private-state.js';
 import { SF_DATALESS, UF_HIDDEN } from './save-as-session.js';
@@ -52,6 +54,11 @@ export async function collectSaveAsFacts(session, flags) {
         staging = { state: 'other' };
     else
         staging = { state: 'directory', entries: (await readdir(session.stagingDirectory)).sort(), dev: stagingObserved.dev, ino: stagingObserved.ino };
+    if (staging.state === 'directory') {
+        const leaves = staging.entries.filter((leaf) => sameFilePath(leaf, basename(session.stagedPath)));
+        if (leaves.length === 1)
+            await assertSameFilePathIdentity(join(session.stagingDirectory, leaves[0]), session.stagedPath);
+    }
     const stagedObserved = staging.state === 'directory' ? await observe(session.stagedPath) : { state: 'absent' };
     const staged = stagedObserved.state === 'absent' ? { state: 'absent' } : { ...stagedObserved, state: 'present' };
     const outputObserved = await observe(session.outputPath);
@@ -81,11 +88,11 @@ export function classifySaveAs(input) {
     if (facts.staging.state === 'other')
         return blocked('The staging path is not a directory.');
     const stagedName = basename(session.stagedPath);
-    if (facts.staging.state === 'directory' && facts.staging.entries.some((name) => name !== stagedName)) {
+    if (facts.staging.state === 'directory' && (facts.staging.entries.some((name) => !sameFilePath(name, stagedName)) || facts.staging.entries.filter((name) => sameFilePath(name, stagedName)).length > 1)) {
         return blocked('The staging directory holds other entries.');
     }
-    const onStaged = documents.filter((document) => document.path === session.stagedPath);
-    const onOutput = documents.filter((document) => document.path === session.outputPath);
+    const onStaged = documents.filter((document) => sameFilePath(document.path, session.stagedPath));
+    const onOutput = documents.filter((document) => sameFilePath(document.path, session.outputPath));
     if (onStaged.length > 1 || onOutput.length > 1)
         return blocked('More than one open document uses the staged file or the output.');
     if (facts.staged.state === 'present' && !facts.staged.isFile)

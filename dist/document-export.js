@@ -1,11 +1,13 @@
+import { HOST_FILE_PATH_HELPERS, sameFilePath } from './file-path.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { link, lstat, mkdir, open, readdir, realpath, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
+import { ARTBOARD_INTEGER_TOLERANCE, artboardRectsEqual } from './artboard-integer.js';
 import { documentContextSchema } from './mutation-result-schema-core.js';
 import { BackupCopyError, captureFileIdentity, fileIdentitySchema, hostDocumentIdentitySchema, CTIME_ONLY_READ_ATTEMPTS, onlyCtimeDiffers, sameContentIdentity, sameFileIdentity, serializeFileIdentity, } from './document-backup.js';
 import { atomicCreatePrivateRecord, readSecurePrivateRecord, unlinkPrivateRecord } from './private-record.js';
-import { classifyExportEntry, ExportSessionFormatError, RASTER_EXPORT_RECORD_MAX_BYTES, RASTER_EXPORT_RECORD_SCHEMAS, RASTER_EXPORT_RECORD_SUFFIXES, RASTER_EXPORT_SESSION_MAX_BYTES, rasterExportSessionSchema, } from './raster-export-records.js';
+import { classifyExportEntry, ExportSessionFormatError, RASTER_EXPORT_RECORD_MAX_BYTES, RASTER_EXPORT_RECORD_SCHEMAS, RASTER_EXACT_RECORD_SCHEMAS, RASTER_EXPORT_RECORD_SUFFIXES, RASTER_EXPORT_SESSION_MAX_BYTES, rasterExportSessionSchema, rasterExactSessionSchema, } from './raster-export-records.js';
 import { ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath } from './private-state.js';
 import { temporaryTwinPattern } from './state-quarantine.js';
 import { noFollowReadFlags, noFollowDirectoryFlags, currentUid } from './platform-primitives.js';
@@ -242,7 +244,26 @@ export class OutputPublishError extends Error {
         this.name = 'OutputPublishError';
     }
 }
-export const EXPORT_HELPERS = `
+export const EXPORT_REGISTRATION_SCAN_LIMITS = { pathItems: 5_000 };
+export const EXPORT_HELPERS = `${HOST_FILE_PATH_HELPERS}
+// Artboard edges read in two places (or sent through JSON and back) may differ by host float noise; they are the same edge within the integer tolerance.
+function exportEdgesEqual(left, right) {
+  return Math.abs(left - right) <= ${ARTBOARD_INTEGER_TOLERANCE};
+}
+// Two artboard-rect keys ("l,t,r,b;l,t,r,b") are the same when every number is within the integer tolerance (a host prints a noisy float with 15 digits).
+function exportRectsEqual(left, right) {
+  if (left === right) return true;
+  var exportLeftBoards = String(left).split(";"), exportRightBoards = String(right).split(";");
+  if (exportLeftBoards.length !== exportRightBoards.length) return false;
+  for (var exportBoardCursor = 0; exportBoardCursor < exportLeftBoards.length; exportBoardCursor++) {
+    var exportLeftEdges = exportLeftBoards[exportBoardCursor].split(","), exportRightEdges = exportRightBoards[exportBoardCursor].split(",");
+    if (exportLeftEdges.length !== 4 || exportRightEdges.length !== 4) return false;
+    for (var exportEdgeCursor = 0; exportEdgeCursor < 4; exportEdgeCursor++) {
+      if (!exportEdgesEqual(Number(exportLeftEdges[exportEdgeCursor]), Number(exportRightEdges[exportEdgeCursor]))) return false;
+    }
+  }
+  return true;
+}
 function exportKeyWithoutIndex(key) {
   return String(key).replace(/\\|index=-?\\d+\\|/, "|index=*|");
 }
@@ -291,12 +312,19 @@ function exportInventoryEntry(doc, index) {
   exportEntry.artboardRects = exportArtboardRects(doc);
   return exportEntry;
 }
+function exportRawInventory() {
+  var entries = [];
+  for (var rawInventoryIndex = 0; rawInventoryIndex < app.documents.length; rawInventoryIndex++) {
+    entries.push(exportInventoryEntry(app.documents[rawInventoryIndex], rawInventoryIndex));
+  }
+  return entries;
+}
 function exportMatchesByPath(paths) {
   var exportMatches = [];
   for (var exportScan = 0; exportScan < app.documents.length; exportScan++) {
     var exportScanPath = exportPathOf(app.documents[exportScan]);
     for (var exportPathCursor = 0; exportPathCursor < paths.length; exportPathCursor++) {
-      if (exportScanPath === paths[exportPathCursor]) {
+      if (hostFilePathMatches(exportScanPath, paths[exportPathCursor])) {
         exportMatches.push({ doc: app.documents[exportScan], index: exportScan, entry: exportInventoryEntry(app.documents[exportScan], exportScan) });
         break;
       }
@@ -317,6 +345,22 @@ function exportRequireWorkCopy(path, expectedKey) {
 }
 `;
 export const EXPORT_READ_SOURCE_SCRIPT = `${EXPORT_HELPERS}
+function exportRegistrationScan(doc, limit) {
+  var scanTotal = doc.pathItems.length;
+  var scanCount = Math.min(scanTotal, limit);
+  var scanHits = 0;
+  var scanUnreadable = 0;
+  for (var scanCursor = 0; scanCursor < scanCount; scanCursor++) {
+    try {
+      var scanPath = doc.pathItems[scanCursor];
+      if (scanPath.stroked === true) {
+        var scanStroke = scanPath.strokeColor;
+        if (scanStroke.typename === "SpotColor" && String(scanStroke.spot.colorType) === String(ColorModel.REGISTRATION)) scanHits++;
+      }
+    } catch (_scanError) { scanUnreadable++; }
+  }
+  return { totalPaths: scanTotal, scannedPaths: scanCount, limit: limit, registrationStrokedPaths: scanHits, unreadablePaths: scanUnreadable };
+}
 var exportSourceContext = requireDocumentForRead(params.expectedDocumentKey);
 var exportSourceDocument = app.activeDocument;
 var exportPresetList = [];
@@ -327,7 +371,8 @@ var result = {
   artboards: exportArtboards(exportSourceDocument),
   counts: exportCounts(exportSourceDocument),
   layers: exportLayers(exportSourceDocument),
-  pdfPresets: exportPresetList
+  pdfPresets: exportPresetList,
+  registrationScan: typeof params.registrationScanLimit === "number" ? exportRegistrationScan(exportSourceDocument, params.registrationScanLimit) : null
 };
 `;
 export const EXPORT_OPEN_PRE_ATTEMPT_CODES = [
@@ -365,7 +410,7 @@ for (var exportOpenedCursor = 0; exportOpenedCursor < app.documents.length; expo
 }
 if (exportOpenedIndex < 0) throw new Error("MCP_ERROR:" + stringifyJson({ code: "EXPORT_WORK_COPY_NOT_LISTED" }));
 var exportOpenedIdentity = getDocumentIdentity(exportOpenedDocument, exportOpenedIndex);
-if (exportOpenedIdentity.path !== params.workCopyPath) {
+if (!hostFilePathMatches(exportOpenedIdentity.path, params.workCopyPath)) {
   throw new Error("MCP_ERROR:" + stringifyJson({ code: "EXPORT_WORK_COPY_PATH_MISMATCH", actual: exportOpenedIdentity.path }));
 }
 if (app.activeDocument !== exportOpenedDocument) throw new Error("MCP_ERROR:" + stringifyJson({ code: "EXPORT_WORK_COPY_NOT_ACTIVE" }));
@@ -481,7 +526,7 @@ if (exportSaveError !== null) {
 }
 if (!exportOutputExists) throw new Error("MCP_ERROR:" + stringifyJson({ code: "EXPORT_SAVE_NO_FILE" }));
 var exportPathAfter = exportPathOf(exportSaveDocument);
-if (exportPathAfter !== params.stagedPath && exportPathAfter !== exportPathBefore) {
+if (!hostFilePathMatches(exportPathAfter, params.stagedPath) && exportPathAfter !== exportPathBefore) {
   throw new Error("MCP_ERROR:" + stringifyJson({ code: "EXPORT_SAVE_UNEXPECTED_PATH", actual: exportPathAfter }));
 }
 var result = {
@@ -521,17 +566,13 @@ if (exportMatchesByPath(params.sessionPaths).length !== 0) {
 app.activeDocument = exportCloseSource.doc;
 var result = {
   closedBeforeClose: exportClosedBefore,
+  documents: exportRawInventory(),
   source: getDocumentContext(),
   documentCount: app.documents.length
 };
 `;
 export const EXPORT_INVENTORY_SCRIPT = `${EXPORT_HELPERS}
-var exportInventoryMatches = exportMatchesByPath(params.sessionPaths);
-var exportInventoryDocuments = [];
-for (var exportInventoryCursor = 0; exportInventoryCursor < exportInventoryMatches.length; exportInventoryCursor++) {
-  exportInventoryDocuments.push(exportInventoryMatches[exportInventoryCursor].entry);
-}
-var result = { documents: exportInventoryDocuments, documentCount: app.documents.length };
+var result = { documents: exportRawInventory(), documentCount: app.documents.length };
 `;
 export const EXPORT_RECONCILE_CLOSE_SCRIPT = `${EXPORT_HELPERS}
 var exportReconcileMatches = exportMatchesByPath(params.sessionPaths);
@@ -543,16 +584,16 @@ if (exportKeyWithoutIndex(exportReconcileEntry.key) !== exportKeyWithoutIndex(pa
     exportReconcileEntry.path !== params.expected.path || exportReconcileEntry.saved !== params.expected.saved ||
     exportReconcileEntry.fileRevision !== params.expected.fileRevision ||
     exportReconcileEntry.textFrames !== params.expected.textFrames || exportReconcileEntry.pageItems !== params.expected.pageItems ||
-    exportReconcileEntry.artboardCount !== params.expected.artboardCount || exportReconcileEntry.artboardRects !== params.expected.artboardRects) {
+    exportReconcileEntry.artboardCount !== params.expected.artboardCount || !exportRectsEqual(exportReconcileEntry.artboardRects, params.expected.artboardRects)) {
   throw new Error("MCP_ERROR:" + stringifyJson({ code: "EXPORT_WORK_COPY_IDENTITY_MISMATCH", actual: exportReconcileEntry }));
 }
 var exportProvenance = params.provenance;
 var exportProvenanceProblem = null;
 if (exportReconcileEntry.saved !== true) exportProvenanceProblem = "unsaved_changes";
-else if (exportReconcileEntry.path !== exportProvenance.workCopyPath && exportReconcileEntry.path !== exportProvenance.stagedPath) exportProvenanceProblem = "path_not_session_owned";
+else if (!hostFilePathMatches(exportReconcileEntry.path, exportProvenance.workCopyPath) && !hostFilePathMatches(exportReconcileEntry.path, exportProvenance.stagedPath)) exportProvenanceProblem = "path_not_session_owned";
 else if (exportReconcileEntry.colorSpace !== exportProvenance.colorSpace) exportProvenanceProblem = "color_space_mismatch";
-else if (exportReconcileEntry.artboardRects !== exportProvenance.artboardRects) exportProvenanceProblem = "artboards_mismatch";
-else if (exportReconcileEntry.path === exportProvenance.workCopyPath && exportReconcileEntry.fileRevision !== exportProvenance.fileRevisionAtOpen) exportProvenanceProblem = "file_revision_mismatch";
+else if (!exportRectsEqual(exportReconcileEntry.artboardRects, exportProvenance.artboardRects)) exportProvenanceProblem = "artboards_mismatch";
+else if (hostFilePathMatches(exportReconcileEntry.path, exportProvenance.workCopyPath) && exportReconcileEntry.fileRevision !== exportProvenance.fileRevisionAtOpen) exportProvenanceProblem = "file_revision_mismatch";
 if (exportProvenanceProblem !== null) {
   throw new Error("MCP_ERROR:" + stringifyJson({ code: "EXPORT_CLOSE_REFUSED", reason: exportProvenanceProblem, actual: exportReconcileEntry }));
 }
@@ -560,24 +601,19 @@ var exportReconcilePreviousInteraction = app.userInteractionLevel;
 app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
 try { exportReconcileMatches[0].doc.close(SaveOptions.DONOTSAVECHANGES); }
 finally { app.userInteractionLevel = exportReconcilePreviousInteraction; }
-var exportReconcileRemaining = exportMatchesByPath(params.sessionPaths);
-var exportReconcileRemainingEntries = [];
-for (var exportRemainingCursor = 0; exportRemainingCursor < exportReconcileRemaining.length; exportRemainingCursor++) {
-  exportReconcileRemainingEntries.push(exportReconcileRemaining[exportRemainingCursor].entry);
-}
-var result = { closed: exportReconcileEntry, documents: exportReconcileRemainingEntries, documentCount: app.documents.length };
+var result = { closed: exportReconcileEntry, documents: exportRawInventory(), documentCount: app.documents.length };
 `;
 export const EXPORT_CLOSE_REFUSED_CODE = 'EXPORT_CLOSE_REFUSED';
 export function closeRefusalReason(entry, provenance) {
     if (entry.saved !== true)
         return 'unsaved_changes';
-    if (entry.path !== provenance.workCopyPath && entry.path !== provenance.stagedPath)
+    if (entry.path === null || (!sameFilePath(entry.path, provenance.workCopyPath) && !sameFilePath(entry.path, provenance.stagedPath)))
         return 'path_not_session_owned';
     if (entry.colorSpace !== provenance.colorSpace)
         return 'color_space_mismatch';
-    if (entry.artboardRects !== provenance.artboardRects)
+    if (!artboardRectsEqual(entry.artboardRects, provenance.artboardRects))
         return 'artboards_mismatch';
-    if (entry.path === provenance.workCopyPath && entry.fileRevision !== provenance.fileRevisionAtOpen)
+    if (entry.path !== null && sameFilePath(entry.path, provenance.workCopyPath) && entry.fileRevision !== provenance.fileRevisionAtOpen)
         return 'file_revision_mismatch';
     return null;
 }
@@ -892,7 +928,8 @@ export async function publishOutput(stagedPath, outputPath, expected, parentScop
     }
 }
 export function workCopyFileName(exportId, sourcePath) {
-    return `${exportId}-work-${basename(sourcePath)}`;
+    const extension = extname(sourcePath);
+    return `${exportId}-work${/^\.[A-Za-z0-9]{1,8}$/u.test(extension) ? extension : '.ai'}`;
 }
 export function serializeOutputIdentity(identity) {
     return serializeFileIdentity(identity);
@@ -951,10 +988,14 @@ export class DocumentExportStore {
         return path;
     }
     async openRasterSession(session) {
-        const contents = `${JSON.stringify(rasterExportSessionSchema.parse(session), null, 2)}\n`;
+        const version = session !== null && typeof session === 'object' ? Reflect.get(session, 'version') : undefined;
+        if (version !== 2 && version !== 3)
+            throw new Error('Unsupported raster session version.');
+        const validated = (version === 2 ? rasterExportSessionSchema : rasterExactSessionSchema).parse(session);
+        const contents = `${JSON.stringify(validated, null, 2)}\n`;
         if (Buffer.byteLength(contents) > RASTER_EXPORT_SESSION_MAX_BYTES)
             throw new Error('The export session exceeds its size limit.');
-        const path = this.sessionPath(session.exportId);
+        const path = this.sessionPath(validated.exportId);
         await atomicCreatePrivateRecord(path, contents);
         return path;
     }
@@ -974,7 +1015,7 @@ export class DocumentExportStore {
             return null;
         if (record.state === 'invalid')
             return { format: 'invalid', reason: 'unsafe_file' };
-        const entry = classifyExportEntry(record.text, { exportId, recordType: 'session' }, { v1: exportSessionSchema, v2: rasterExportSessionSchema });
+        const entry = classifyExportEntry(record.text, { exportId, recordType: 'session' }, { v1: exportSessionSchema, v2: rasterExportSessionSchema, v3: rasterExactSessionSchema });
         if (entry.format === 'v1' && record.bytes.length > EXPORT_SESSION_MAX_BYTES)
             return { format: 'invalid', reason: 'unsafe_file' };
         return entry;
@@ -985,7 +1026,10 @@ export class DocumentExportStore {
         return join(this.recordDirectory, `${exportId}${RASTER_EXPORT_RECORD_SUFFIXES[recordType]}`);
     }
     async writeRasterRecord(recordType, record) {
-        const validated = RASTER_EXPORT_RECORD_SCHEMAS[recordType].parse(record);
+        const version = record !== null && typeof record === 'object' ? Reflect.get(record, 'version') : undefined;
+        if (version !== 2 && version !== 3)
+            throw new Error('Unsupported raster record version.');
+        const validated = (version === 2 ? RASTER_EXPORT_RECORD_SCHEMAS[recordType] : RASTER_EXACT_RECORD_SCHEMAS[recordType]).parse(record);
         if (validated.recordType !== recordType)
             throw new Error('The record type does not match its file.');
         const contents = `${JSON.stringify(validated, null, 2)}\n`;
@@ -1013,7 +1057,7 @@ export class DocumentExportStore {
         const v1 = recordType === 'session' ? exportSessionSchema : recordType === 'host_open' ? exportHostRecordSchema
             : recordType === 'published' ? exportRecordSchema : null;
         const v2 = RASTER_EXPORT_RECORD_SCHEMAS[recordType];
-        const entry = classifyExportEntry(record.text, { exportId, recordType }, { v1, v2 });
+        const entry = classifyExportEntry(record.text, { exportId, recordType }, { v1, v2, v3: RASTER_EXACT_RECORD_SCHEMAS[recordType] });
         if (entry.format === 'invalid')
             return { state: 'invalid', reason: entry.reason };
         if (entry.format === 'v1')
@@ -1034,7 +1078,7 @@ export class DocumentExportStore {
             return null;
         if (entry.format === 'v1')
             return entry.record;
-        throw new ExportSessionFormatError(exportId, entry.format === 'v2' ? 'raster_vector_export_session' : entry.reason);
+        throw new ExportSessionFormatError(exportId, entry.format === 'v2' || entry.format === 'v3' ? 'raster_vector_export_session' : entry.reason);
     }
     hostRecordPath(exportId) {
         return join(this.recordDirectory, `${exportId}.session-host.json`);
