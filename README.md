@@ -13,11 +13,11 @@ Claude Desktop · ChatGPT Work · Claude Code · Codex CLI
 [96 functions](docs/tools.en.md) · Plan before apply · Read-back verification
 
 <!-- demo-video:start -->
-<!-- npm: [![Demo video: made by talking to Illustrator, from a blank page to a print-ready PDF (opens the video)](https://raw.githubusercontent.com/mhimt-lab/illustrator-studio-mcp/main/docs/images/demo-poster-en.webp)](https://github.com/user-attachments/assets/08701dd6-7016-4915-8fb7-811602866b34) -->
+<!-- npm: [![Promo video: what Illustrator Studio MCP can do for designers (opens the video)](https://raw.githubusercontent.com/mhimt-lab/illustrator-studio-mcp/main/docs/images/demo-poster-en.webp)](https://github.com/user-attachments/assets/9a85306a-acb6-4467-8297-d4fb63d8d001) -->
 
-https://github.com/user-attachments/assets/08701dd6-7016-4915-8fb7-811602866b34
+https://github.com/user-attachments/assets/9a85306a-acb6-4467-8297-d4fb63d8d001
 
-*65-second demo recorded live over MCP in the real Illustrator 30.8.1 (waiting time trimmed): it builds a poster, applies a client’s changes in one go, stops instead of overwriting a line you touched up by hand after asking, and exports a print-ready PDF. The touch-up after asking was staged for the demo.*
+*A 2:55 promo video of what it can do for designers. The screens are illustrations, not recordings of Illustrator.*
 <!-- demo-video:end -->
 
 ## Plan → Apply → Verify

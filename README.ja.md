@@ -13,9 +13,9 @@ Claude Desktop · ChatGPT Work · Claude Code · Codex CLI
 [96の機能](docs/tools.md) · 適用の前に計画 · 結果を読み直して確認
 
 <!-- demo-video:start -->
-https://github.com/user-attachments/assets/7bf18adf-ec3e-446f-b878-a40d3d96418c
+https://github.com/user-attachments/assets/f23a3ad7-65e8-424b-b779-803152c61e2d
 
-*実際のIllustrator 30.8.1で、MCP経由の操作をそのまま収録した65秒のデモです（待ち時間はカットしています）。ポスターを作り、クライアントの修正をまとめて反映し、頼んだ後に自分で手直しした行は上書きせずに止まり、入稿用のPDFを書き出します。頼んだ後の手直しは、このデモのために再現した操作です。*
+*デザイナーの実務で使える機能を紹介する、2分55秒のプロモーション動画です。画面はイメージで、Illustratorの実際の画面ではありません。*
 <!-- demo-video:end -->
 
 ## 計画 → 適用 → 検証
