@@ -54,6 +54,24 @@ export const documentContextWithApplicationSchema = z.strictObject({
     ...documentContextShape,
     application: illustratorApplicationEvidenceSchema,
 }).superRefine(refineDocumentContext);
+const preferenceUnitSchema = z.strictObject({
+    code: z.number().int().nullable().describe('Stored integer; null when unreadable.'),
+    name: z.string().nullable().describe('Unit name for a code confirmed on the host; null otherwise.'),
+});
+const preferenceToggleSchema = z.boolean().nullable();
+export const hostPreferencesSchema = z.strictObject({
+    units: z.strictObject({ ruler: preferenceUnitSchema, stroke: preferenceUnitSchema, text: preferenceUnitSchema, asian_text: preferenceUnitSchema }),
+    scale_strokes_and_effects: preferenceToggleSchema.describe('Scale Strokes & Effects.'),
+    use_preview_bounds: preferenceToggleSchema.describe('Use Preview Bounds.'),
+    scale_patterns: preferenceToggleSchema,
+    numbers_are_points: preferenceToggleSchema,
+    corner_policy: z.strictObject({ code: z.number().int().nullable(), scale_corners: preferenceToggleSchema }),
+}).describe('User preferences (read only). Document values stay in pt; units are for talking to the user and converting input.');
+export const getContextResultSchema = z.strictObject({
+    ...documentContextShape,
+    application: illustratorApplicationEvidenceSchema,
+    preferences: hostPreferencesSchema.optional(),
+}).superRefine(refineDocumentContext);
 export const layerPathSchema = z.array(z.number().int().nonnegative()).min(1).max(64);
 export const layerStructuralReasonSchema = z.enum([
     'layer_hidden',

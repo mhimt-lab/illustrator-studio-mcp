@@ -23,7 +23,7 @@ export const batchLayerAfterSchema = z.strictObject({ name, visible, locked })
     context.addIssue({ code: 'custom', message: 'Layer after must set name, visible or locked.' }); });
 const vector = (length) => z.array(z.number().finite()).length(length);
 const evidenceSchema = z.strictObject({
-    path: z.string().min(1).max(4096), version: z.literal('30.8.2'), colorSpace: z.string().min(1), coordinateSystem: z.string().min(1),
+    path: z.string().min(1).max(4096), version: z.string().min(1).max(64), colorSpace: z.string().min(1), coordinateSystem: z.string().min(1),
     rulerUnits: z.string(), rulerOrigin: vector(2), active: z.literal(0), activeLayerPath: evidenceLayerPathSchema,
     board: z.strictObject({ name: z.string(), rect: vector(4), origin: vector(2) }),
     layers: z.array(z.strictObject({ path: evidenceLayerPathSchema, name: z.string().max(1024), visible: z.boolean(), locked: z.boolean(), printable: z.literal(true),
@@ -110,7 +110,7 @@ function batchLayerNeed(value,message){if(!value)throw mutationError("preflight_
 function batchLayerVector(value,length){batchLayerNeed(value&&value.length===length,"Layer evidence vector unavailable.");var out=[];for(var i=0;i<length;i++)out.push(mutationFiniteNumber(value[i],"Layer vector"));return out;}
 function batchLayerRgb(color){batchLayerNeed(color&&color.typename==="RGBColor","Layer batch requires RGB sentinel paint.");return batchLayerVector([color.red,color.green,color.blue],3);}
 function batchLayerEvidence(d){
- batchLayerNeed(app.activeDocument===d&&String(app.version)==="30.8.2"&&d.documentColorSpace===DocumentColorSpace.RGB,"Layer batch requires measured Illustrator 30.8.2 RGB.");
+ batchLayerNeed(app.activeDocument===d&&d.documentColorSpace===DocumentColorSpace.RGB,"Layer batch requires an RGB document.");
  batchLayerNeed(d.layers.length===2&&d.layers[0].layers.length===0&&d.layers[1].layers.length===1&&d.layers[1].layers[0].layers.length===0&&d.artboards.length===1&&d.pageItems.length===3,"Layer batch requires root 2 + child 1 and three direct sentinels.");
  batchLayerNeed(String(app.coordinateSystem)===String(CoordinateSystem.DOCUMENTCOORDINATESYSTEM)&&d.artboards.getActiveArtboardIndex()===0,"Layer batch coordinate profile is unmeasured.");
  var paths=[[0],[1],[1,0]],layers=[],items=[],active=null;
@@ -123,7 +123,7 @@ function batchLayerEvidence(d){
   for(var q=0;q<4;q++){var t=p.pathPoints[q],next=p.pathPoints[(q+1)%4],prior=p.pathPoints[(q+3)%4];batchLayerNeed(mutationSameSequence(t.anchor,t.leftDirection)&&mutationSameSequence(t.anchor,t.rightDirection)&&((t.anchor[0]===next.anchor[0])!==(t.anchor[1]===next.anchor[1]))&&((t.anchor[0]===next.anchor[0])!==(prior.anchor[0]===t.anchor[0])),"Layer sentinel must be a straight axis-aligned rectangle.");points.push({anchor:batchLayerVector(t.anchor,2),left:batchLayerVector(t.leftDirection,2),right:batchLayerVector(t.rightDirection,2),type:String(t.pointType)});}
   items.push({layerPath:path,uuid:p.uuid,name:String(p.name),note:String(p.note),hidden:p.hidden,locked:p.locked,editable:p.editable,opacity:p.opacity,blend:String(p.blendingMode),geometric:batchLayerVector(p.geometricBounds,4),visible:batchLayerVector(p.visibleBounds,4),control:batchLayerVector(p.controlBounds,4),points:points,closed:p.closed,filled:p.filled,stroked:p.stroked,fill:batchLayerRgb(p.fillColor),stroke:batchLayerRgb(p.strokeColor),strokeWidth:p.strokeWidth,guides:p.guides,clipping:p.clipping});
  }
- batchLayerNeed(active!==null&&(!d.selection||d.selection.length===0),"Layer batch requires a bound active layer and empty selection.");
+ batchLayerNeed(active!==null&&(!d.selection||(!isTextRangeSelection(d.selection)&&d.selection.length===0)),"Layer batch requires a bound active layer and empty selection (not a text range).");
  for(var a=0;a<3;a++)for(var b=a+1;b<3;b++)batchLayerNeed(items[a].uuid!==items[b].uuid,"Sentinel UUID collision.");
  var board=d.artboards[0];
  return {path:String(d.fullName.fsName),version:String(app.version),colorSpace:String(d.documentColorSpace),coordinateSystem:String(app.coordinateSystem),rulerUnits:String(d.rulerUnits),rulerOrigin:batchLayerVector(d.rulerOrigin,2),active:d.artboards.getActiveArtboardIndex(),activeLayerPath:active,board:{name:String(board.name),rect:batchLayerVector(board.artboardRect,4),origin:batchLayerVector(board.rulerOrigin,2)},layers:layers,items:items,selection:[]};

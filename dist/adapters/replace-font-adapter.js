@@ -1474,27 +1474,7 @@ function normalizedRequest(input) {
 export const replaceFontToolContract = {
     name: 'illustrator_replace_font',
     title: 'Plan or Replace a Font Throughout a Document',
-    description: 'Plan or replace one installed font with another (exact PostScript names; see illustrator_find_fonts) '
-        + 'on every character that uses it, or several at once with `mappings: [{from, to}]` (up to '
-        + REPLACE_FONT_MAX_MAPPINGS + ' pairs, all or nothing; each source once, and no font both a source and a replacement), '
-        + 'in the bound document or in `scope`: artboard_index, layer_path '
-        + '(illustrator_list_layers), selection: true (selected text frames, not text inside groups), or target_uuids. '
-        + 'The unit is the story: a threaded story changes whole, is listed by its first frame, and has ranges in story '
-        + 'coordinates. Point and area text, horizontal or vertical, threaded, multi-paragraph and justified, are supported. '
-        + 'Apply with the plan\'s next_call. Verified: among the compared attributes (size, leading, tracking, scales, '
-        + 'baseline shift, spacing, glyph, language and fill), only the font of the planned characters changes; other '
-        + 'characters in the scope and other frames\' bounds stay unchanged. One apply holds at most '
-        + REPLACE_FONT_MAX_CHARACTERS.toLocaleString('en-US') + ' characters, ' + REPLACE_FONT_MAX_RUNS.toLocaleString('en-US')
-        + ' style runs and ' + REPLACE_FONT_MAX_FRAMES + ' frames of stories; a larger scope is planned in chunks '
-        + '(`remaining`): apply, then plan again with the same scope; applied chunks stay verified. Several pairs never '
-        + 'chunk: a larger scope is blocked (narrow `scope`). Blocked, with the '
-        + 'frames in `blockedFrames`: source-font frames in the scope that are locked, hidden, path text, overset or too '
-        + 'large, and stories whose font cannot be read. Also refused: fonts not installed, fonts Illustrator resolves but '
-        + 'have no verified OS/font-list source or process-bound documents=0 inventory, the same font twice, an unused '
-        + 'source, overflow after the change, and plans beyond ' + REPLACE_FONT_MAX_SCAN_CHARACTERS.toLocaleString('en-US')
-        + ' characters or ' + REPLACE_FONT_MAX_SCAN_RUNS.toLocaleString('en-US') + ' runs. Composite fonts are unsupported. '
-        + 'When blocked, tell the user the reason and follow next_steps (a script outside this server only for a custom_script refusal). Rollback restores the '
-        + 'exact before state.',
+    description: 'Plan or replace one installed font with another (exact PostScript names; see illustrator_find_fonts) on every character that uses it, or several pairs with `mappings: [{from, to}]` (up to 16, all or nothing; no font both a source and a replacement). Scope is the bound document, or `scope`: artboard_index, layer_path (illustrator_list_layers), selection: true (selected text frames, not text inside groups), or target_uuids. A threaded story changes whole. Point and area text are supported; composite fonts are not. A larger scope is planned in chunks (`remaining`): apply, then plan again with the same scope; with several pairs, narrow `scope` instead. Only the planned characters change font; other text and frames stay unchanged. Frames blocked by lock, hide, path text, overset, size or unreadable stories are listed in `blockedFrames`. When blocked, tell the user the reason and follow next_steps (a script outside this server only for a custom_script refusal).',
     inputSchema,
     publicInputSchema: replaceFontPublicInputSchema,
     outputSchema: replaceFontResponseSchema,

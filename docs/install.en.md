@@ -2,7 +2,7 @@
 
 [日本語](install.md) | **English**
 
-**Public Beta 0.1.0-beta.6.** Requires macOS, stable Illustrator, and Node.js 20+ (the Claude Desktop extension needs no Node.js). The server needs no API key; your AI app's terms and fees are separate. Keep Illustrator in the foreground and the screen unlocked. Check [client-specific verification](compatibility.en.md).
+**Public Beta 0.1.0-beta.7.** Requires macOS, stable Illustrator, and Node.js 20+ (the Claude Desktop extension needs no Node.js). The server needs no API key; your AI app's terms and fees are separate. Keep Illustrator in the foreground and the screen unlocked. Check [client-specific verification](compatibility.en.md).
 
 ## Start with npm / npx (Mac CLI)
 
@@ -10,22 +10,22 @@ Bring stable Illustrator to the foreground, unlock the screen, and open a test d
 
 ```bash
 npx -y illustrator-studio-mcp@beta --version
-npx -y illustrator-studio-mcp@0.1.0-beta.6 doctor
+npx -y illustrator-studio-mcp@0.1.0-beta.7 doctor
 ```
 
-`@beta` discovers the current Public Beta. If the first command prints anything other than `0.1.0-beta.6`, stop and review that version's published instructions and changelog. The second command and persistent registration pin the exact version you reviewed. Omitting a version uses `latest`. Doctor queries Illustrator without editing documents or repairing settings. Skipped or indeterminate checks are not success; macOS may request automation permission on first use.
+`@beta` discovers the current Public Beta. If the first command prints anything other than `0.1.0-beta.7`, stop and review that version's published instructions and changelog. The second command and persistent registration pin the exact version you reviewed. Omitting a version uses `latest`. Doctor queries Illustrator without editing documents or repairing settings. Skipped or indeterminate checks are not success; macOS may request automation permission on first use.
 
 If Node/npm/npx is missing, neither helper nor doctor can start. Install Node.js 20+ from the [official Node.js website](https://nodejs.org/), reopen Terminal, and check `node --version`, `npm --version`, and `command -v npx`. An AI app may have a different PATH: use the actual absolute npx path in its configuration and ensure Node is also visible there. Registry unavailable / offline is an acquisition failure; do not substitute a cached copy or another version and call it success.
 
-The already published npm 0.1.0-beta.5 `--version` was measured with an empty cache on an existing Mac (beta.6 is checked after publication). A new Mac, doctor, client reconnection, and live update/rollback remain separate, unfinished checks.
+The already published npm 0.1.0-beta.5 `--version` was measured with an empty cache on an existing Mac (later versions are checked after publication). A new Mac, doctor, client reconnection, and live update/rollback remain separate, unfinished checks.
 
 ## Install the release file
 
-Download the tgz and `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.6) into the same directory, then run there. `SHA256SUMS` also lists the Desktop extension (`.mcpb`); `--ignore-missing` skips files you did not download.
+Download the tgz and `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.7) into the same directory, then run there. `SHA256SUMS` also lists the Desktop extension (`.mcpb`); `--ignore-missing` skips files you did not download.
 
 ```bash
 shasum -a 256 -c SHA256SUMS --ignore-missing
-npm install -g ./illustrator-studio-mcp-0.1.0-beta.6.tgz
+npm install -g ./illustrator-studio-mcp-0.1.0-beta.7.tgz
 illustrator-studio-mcp --version
 illustrator-studio-mcp doctor
 ```
@@ -34,15 +34,15 @@ Stop if the checksum differs. Built JavaScript is included in `dist/`; no build 
 
 ## Register the installed command
 
-Preserve other server entries and confirm this name is absent before copying your client's one-line registration. The default Illustrator target is `id:com.adobe.illustrator`. These complete commands pin published beta.6.
+Preserve other server entries and confirm this name is absent before copying your client's one-line registration. The default Illustrator target is `id:com.adobe.illustrator`. These complete commands pin published beta.7.
 
 ### Claude Code
 
 ```bash
-claude mcp add --transport stdio --scope user illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.6
+claude mcp add --transport stdio --scope user illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.7
 ```
 
-Restart and check `/mcp`. The saved command is `npx`, with arguments `-y`, `illustrator-studio-mcp@0.1.0-beta.6`.
+Restart and check `/mcp`. The saved command is `npx`, with arguments `-y`, `illustrator-studio-mcp@0.1.0-beta.7`.
 
 ### Claude Desktop
 
@@ -50,8 +50,8 @@ Restart and check `/mcp`. The saved command is `npx`, with arguments `-y`, `illu
 
 The Desktop extension runs on the Node.js built into Claude Desktop. It needs neither the npm install nor configuration file edits.
 
-1. [Download illustrator-studio-mcp-0.1.0-beta.6.mcpb](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.6/illustrator-studio-mcp-0.1.0-beta.6.mcpb). To check the file, download `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.6) into the same directory and run `shasum -a 256 -c SHA256SUMS --ignore-missing` there. If the hash does not match, stop and do not install.
-2. Double-click the `.mcpb` file to open it in Claude Desktop. In the install dialog, confirm the author **mhimt**, version **0.1.0-beta.6**, and license **BUSL-1.1**, then choose Install. The extension is not signed.
+1. [Download illustrator-studio-mcp-0.1.0-beta.7.mcpb](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.7/illustrator-studio-mcp-0.1.0-beta.7.mcpb). To check the file, download `SHA256SUMS` from the [GitHub prerelease](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.7) into the same directory and run `shasum -a 256 -c SHA256SUMS --ignore-missing` there. If the hash does not match, stop and do not install.
+2. Double-click the `.mcpb` file to open it in Claude Desktop. In the install dialog, confirm the author **mhimt**, version **0.1.0-beta.7**, and license **BUSL-1.1**, then choose Install. The extension is not signed.
 3. For stable Illustrator, keep the default "Illustrator application" setting `id:com.adobe.illustrator` and save (use `id:com.adobe.illustratorBeta` for Illustrator Beta).
 4. Confirm the extension is enabled, then start a new chat with a read-only request ([Start with a read](#start-with-a-read)).
 
@@ -85,7 +85,7 @@ Fully quit and reopen Desktop, then check the connection. Review the paths after
 ### Codex CLI
 
 ```bash
-codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.6
+codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.7
 ```
 
 After saving, inspect the exact pin with `codex mcp get illustrator-studio`. Do not duplicate it under another server name. If using TOML instead, save the same exact version:
@@ -93,7 +93,7 @@ After saving, inspect the exact pin with `codex mcp get illustrator-studio`. Do 
 ```toml
 [mcp_servers.illustrator-studio]
 command = "npx"
-args = ["-y", "illustrator-studio-mcp@0.1.0-beta.6"]
+args = ["-y", "illustrator-studio-mcp@0.1.0-beta.7"]
 
 [mcp_servers.illustrator-studio.env]
 ILLUSTRATOR_APPLICATION = "id:com.adobe.illustrator"
@@ -105,7 +105,7 @@ For editing tools, the `apply: false` plan returns a `next_call`. Codex can appl
 
 ### Read-only setup helper
 
-`0.1.0-beta.6` adds `setup`. It displays the complete registration command pinned to the version it runs from. Check that version's `--version` and `doctor` first, then run:
+`setup` has been available since beta.6. It displays the complete registration command pinned to the version it runs from. Check that version's `--version` and `doctor` first, then run:
 
 ```bash
 npx -y illustrator-studio-mcp@beta setup --client claude-code
@@ -120,10 +120,10 @@ Use this MCP in **Work** in the ChatGPT desktop app, with the run location (the 
 
 #### Add the plugin (main method)
 
-You can add it entirely from the ChatGPT app. You need Node.js 20 or newer (install it with the installer from the [official website](https://nodejs.org/). The plugin launches `illustrator-studio-mcp@0.1.0-beta.6` with `npx`).
+You can add it entirely from the ChatGPT app. You need Node.js 20 or newer (install it with the installer from the [official website](https://nodejs.org/). The plugin launches `illustrator-studio-mcp@0.1.0-beta.7` with `npx`).
 
 1. In the ChatGPT sidebar, open Plugins, then choose Add (top right) → Add a marketplace (the same menu is also under Settings → Plugins → Add).
-2. In "Add plugin marketplace", enter `mhimt-lab/illustrator-studio-mcp` as the Source and `v0.1.0-beta.6` as the Git ref, then click Add marketplace. The Git ref pins the version; we recommend adding it with the version pinned.
+2. In "Add plugin marketplace", enter `mhimt-lab/illustrator-studio-mcp` as the Source and `v0.1.0-beta.7` as the Git ref, then click Add marketplace. The Git ref pins the version; we recommend adding it with the version pinned.
 3. On the same screen, search for "Illustrator" and click the "+" next to **Illustrator Studio MCP**. It is done when "Illustrator Studio MCP plugin installed" appears.
 4. Choose Work at the top, check that the computer icon at the lower right of the message box is set to On your computer, then start with a read in a new chat ([Start with a read](#start-with-a-read)).
 
@@ -138,11 +138,11 @@ Adding it from the app writes the same settings as adding it with the commands b
 With Codex CLI, you can also add it with these two commands in Terminal:
 
 ```bash
-codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.6
+codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.7
 codex plugin add illustrator-studio-mcp@illustrator-studio-mcp
 ```
 
-The `--ref v0.1.0-beta.6` in the first line pins the version. After adding it, quit ChatGPT completely and start it again. Under Settings → Plugins, check that **Illustrator Studio MCP** is enabled and that `illustrator-studio-plugin` is listed under "From plugins" on the MCP tab.
+The `--ref v0.1.0-beta.7` in the first line pins the version. After adding it, quit ChatGPT completely and start it again. Under Settings → Plugins, check that **Illustrator Studio MCP** is enabled and that `illustrator-studio-plugin` is listed under "From plugins" on the MCP tab.
 
 To remove it with commands, uninstall it under Plugins, then run `codex plugin marketplace remove illustrator-studio-mcp`. In our checks, updating the plugin changed no other settings, and removing it deleted only the entries for this plugin and its marketplace (manually registered MCP servers, other plugins, and execution records remained).
 
@@ -161,7 +161,7 @@ Then quit ChatGPT completely and start it again.
 The ChatGPT desktop app and Codex CLI share the same MCP configuration ([official documentation](https://learn.chatgpt.com/docs/extend/mcp)). If you have Codex CLI, one command in Terminal registers the server. If you already registered it under "Codex CLI" above, the same server appears in ChatGPT.
 
 ```bash
-codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.6
+codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.7
 ```
 
 - If a server with the same name exists, choose a different name so the existing entry is not overwritten.
@@ -184,7 +184,7 @@ npm root -g
 1. In the ChatGPT desktop app, choose **Work**, then Settings → Plugins → **MCP** → Add → **STDIO**.
 2. Enter the following. If a server with the same name exists, inspect it instead of overwriting it.
    - Command: the absolute path of node from `command -v node`
-   - Arguments: the output of `npm root -g` followed by `/illustrator-studio-mcp/dist/index.js`, as an absolute path (without a global install, use the absolute path from `command -v npx` as the command and `-y` and `illustrator-studio-mcp@0.1.0-beta.6` as the arguments)
+   - Arguments: the output of `npm root -g` followed by `/illustrator-studio-mcp/dist/index.js`, as an absolute path (without a global install, use the absolute path from `command -v npx` as the command and `-y` and `illustrator-studio-mcp@0.1.0-beta.7` as the arguments)
    - Environment variable: `ILLUSTRATOR_APPLICATION` = `id:com.adobe.illustrator`
 3. After saving, turn the server's switch off and on again to reconnect.
 
@@ -211,24 +211,24 @@ Compare the response with Illustrator. No document and no selection are differen
 
 Inspect the saved current exact pin with `claude mcp get illustrator-studio` or `codex mcp get illustrator-studio`. Confirm the name belongs to this server and retain the original configuration, scope, and environment. Claude examples use user scope; do not replace an entry in another scope with these commands. Replacement commands below apply only to the default `npx -y <exact>` entry with no custom args/env. For customized settings, such as targeting Illustrator Beta, preserve the original configuration and edit only its exact pin with the client's configuration editor. Resolve pending operations, indeterminate outcomes, and open edit sessions; check downgrade compatibility and the changelog. Never delete execution records to bypass them.
 
-Example: current=`0.1.0-beta.5`, target=`0.1.0-beta.6`, previous=`0.1.0-beta.5`. For published versions, choose your client's one-line explicit update (it removes and re-adds only the named entry):
+Example: current=`0.1.0-beta.6`, target=`0.1.0-beta.7`, previous=`0.1.0-beta.6`. For published versions, choose your client's one-line explicit update (it removes and re-adds only the named entry):
+
+```bash
+claude mcp remove --scope user illustrator-studio && claude mcp add --transport stdio --scope user illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.7
+codex mcp remove illustrator-studio && codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.7
+```
+
+For rollback, review the retained previous exact pin and execute your client's one-line command. Complete commands for this example:
 
 ```bash
 claude mcp remove --scope user illustrator-studio && claude mcp add --transport stdio --scope user illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.6
 codex mcp remove illustrator-studio && codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.6
 ```
 
-For rollback, review the retained previous exact pin and execute your client's one-line command. Complete commands for this example:
-
-```bash
-claude mcp remove --scope user illustrator-studio && claude mcp add --transport stdio --scope user illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.5
-codex mcp remove illustrator-studio && codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.5
-```
-
  After the helper is published, run the target version's helper with current/previous to display all three versions and complete `update` / `rollback` commands:
 
 ```bash
-npx -y illustrator-studio-mcp@beta setup --client codex --current 0.1.0-beta.5 --previous 0.1.0-beta.5
+npx -y illustrator-studio-mcp@beta setup --client codex --current 0.1.0-beta.6 --previous 0.1.0-beta.6
 ```
 
 Review the displayed target before executing your chosen line. Never save `@beta` in persistent configuration. If registration fails, stop, inspect stored settings, and restore the retained original configuration. There is no automatic update or settings rewrite. After update/rollback, run `--version` and `doctor` for that exact version, restart the AI app, and check `/mcp`. Settings storage, connection, and Illustrator operation success are separate evidence.

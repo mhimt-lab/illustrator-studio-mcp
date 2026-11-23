@@ -307,7 +307,7 @@ export const recipeToolContracts = {
     save: {
         name: 'illustrator_save_recipe',
         title: 'Save a Declarative Illustrator Recipe',
-        description: `Validate and store a versioned declarative recipe (schema_version 1): ${RECIPE_MIN_STEPS} to ${RECIPE_MAX_STEPS} steps drawn only from the operations illustrator_mutate_batch admits (replace_point_text, set_text_style size or RGB fill, transform_object translate-only, set_path_appearance), typed inputs with optional defaults, and {{inputs.<name>}} substitution only. Arbitrary ExtendScript, JSX, expressions, and unknown step kinds are rejected. The recipe is stored create-once under the private state root as <recipe_id>@<recipe_version>.json with its canonical SHA-256; re-saving identical content is a no-op and different content for the same id@version is refused. Touches no Illustrator document.`,
+        description: 'Validate and store a versioned declarative recipe (schema_version 1): 2 to 16 steps drawn only from the operations illustrator_mutate_batch admits (replace_point_text, set_text_style size or RGB fill, transform_object translate-only, set_path_appearance), typed inputs with optional defaults, and {{inputs.<name>}} substitution only. Arbitrary ExtendScript, JSX, expressions and unknown step kinds are rejected. The recipe is stored create-once under the private state root as <recipe_id>@<recipe_version>.json with its canonical SHA-256; re-saving identical content is a no-op, and different content for the same id@version is refused. Touches no Illustrator document.',
         inputSchema: saveRecipeInputSchema.shape,
         outputSchema: saveRecipeResultSchema,
         annotations: STATE_ONLY,

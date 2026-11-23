@@ -54,6 +54,11 @@ export function insertSibling(order, index, entry) {
         throw new Error('Layer insertion index is out of range.');
     return [...order.slice(0, index), entry, ...order.slice(index)];
 }
+export function insertSiblings(order, index, entries) {
+    if (!Number.isInteger(index) || index < 0 || index > order.length)
+        throw new Error('Layer insertion index is out of range.');
+    return [...order.slice(0, index), ...entries, ...order.slice(index)];
+}
 export function reorderSibling(order, fromIndex, toIndex) {
     if (!Number.isInteger(fromIndex) || fromIndex < 0 || fromIndex >= order.length)
         throw new Error('Layer source index is out of range.');

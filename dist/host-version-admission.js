@@ -28,7 +28,8 @@ export function admitHostVersionPlan(operation, appVersion, channel, options = {
             throw new HostVersionChannelRefusedError(refused);
         return refused;
     }
-    const backupRequired = evaluation.status === 'unmeasured' && operation !== 'optimize_images' && typeof options.documentPath === 'string';
+    const backupRequired = evaluation.status === 'unmeasured' && !('sourceUnchanged' in HOST_VERSION_POLICY.operations[operation])
+        && typeof options.documentPath === 'string' && options.documentMutationProfile !== 'unsaved_document';
     return { ...note, channel: 'stable', ...(backupRequired ? { backupRequired: true } : {}) };
 }
 export function describeHostVersionScope(operation) {

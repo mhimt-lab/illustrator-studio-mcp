@@ -11,13 +11,14 @@ function canonicalJsonDigest(value) {
     return canonicalSha256(JSON.parse(serialized));
 }
 const ZOD_LAZY_METHODS = [
-    'optional', 'nullable', 'nullish', 'array', 'or', 'and', 'transform',
+    'clone', 'optional', 'exactOptional', 'nullable', 'nullish', 'nonoptional', 'array', 'or', 'and', 'transform',
     'default', 'prefault', 'catch', 'pipe', 'readonly', 'describe', 'meta',
-    'brand', 'register', 'check', 'refine', 'superRefine', 'overwrite',
+    'brand', 'register', 'check', 'with', 'refine', 'superRefine', 'overwrite',
+    'isOptional', 'isNullable', 'apply',
 ];
 const SEALED_ZOD_DEFINITION_GUARDS = new WeakMap();
 const SEALED_ZOD_MUTABLE_AUTHORITY_GUARDS = new Set();
-const ACTIVE_ZOD_PARSE_CONTEXTS = new WeakSet();
+let zodGuardDepth = 0;
 const ZOD_MATERIALIZATION_PASS_LIMIT = 4;
 function guardedZodAuthorityCount(context) {
     return context.pendingFreeze.size + context.mutableAuthorities.size;
@@ -178,20 +179,25 @@ function assertZodMutableAuthorities() {
     for (const assertAuthority of SEALED_ZOD_MUTABLE_AUTHORITY_GUARDS)
         assertAuthority();
 }
-function runWithZodMutableAuthorityGuards(runtimeContext, run) {
-    if (typeof runtimeContext !== 'object' || runtimeContext === null) {
-        assertZodMutableAuthorities();
-        return run();
-    }
-    if (ACTIVE_ZOD_PARSE_CONTEXTS.has(runtimeContext))
-        return run();
-    ACTIVE_ZOD_PARSE_CONTEXTS.add(runtimeContext);
+function runWithZodMutableAuthorityGuards(run) {
+    if (zodGuardDepth > 0)
+        return runNestedZodParse(run);
+    assertZodMutableAuthorities();
+    const result = runNestedZodParse(run);
+    assertZodMutableAuthorities();
+    return result;
+}
+function runNestedZodParse(run) {
+    zodGuardDepth += 1;
     try {
-        assertZodMutableAuthorities();
-        return run();
+        const result = run();
+        if (typeof result?.then === 'function') {
+            throw new Error('Sealed Zod schemas do not support asynchronous validation.');
+        }
+        return result;
     }
     finally {
-        ACTIVE_ZOD_PARSE_CONTEXTS.delete(runtimeContext);
+        zodGuardDepth -= 1;
     }
 }
 function installZodDefinitionGuards(context) {
@@ -236,7 +242,7 @@ function installZodDefinitionGuards(context) {
         };
         candidate._zod.run = (payload, runtimeContext) => {
             assertDefinition();
-            return runWithZodMutableAuthorityGuards(runtimeContext, () => run(payload, runtimeContext));
+            return runWithZodMutableAuthorityGuards(() => run(payload, runtimeContext));
         };
         SEALED_ZOD_DEFINITION_GUARDS.set(schema, assertDefinition);
     }

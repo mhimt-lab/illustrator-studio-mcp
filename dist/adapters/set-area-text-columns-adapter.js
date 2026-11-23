@@ -617,16 +617,7 @@ function normalizedRequest(input) {
 export const setAreaTextColumnsToolContract = {
     name: 'illustrator_set_area_text_columns',
     title: 'Plan or Set Area-Text Columns',
-    description: 'Plan or apply the column and row layout of one existing area-text frame: `column_count` and '
-        + `\`row_count\` (1 to ${AREA_COLUMNS_MAX_COUNT}), \`column_gutter\` and \`row_gutter\` (0 to ${AREA_COLUMNS_MAX_GUTTER} pt), `
-        + 'and `flow_links_horizontally` (text flows across rows before columns when true). Request at least one; the '
-        + 'others stay as they are. The target is an unthreaded, horizontal AREATEXT frame directly on a layer, bound '
-        + 'by explicit document key and native UUID; read it first with illustrator_get_area_text_options. The plan '
-        + 'returns the exact before and after state; apply echoes them as expected_before and confirmed_after, runs '
-        + 'in the foreground, verifies every option by native read-back, and requires the whole story to be visible '
-        + 'afterwards: a layout that would hide text (overflow) is undone with the measured inverse and reported as '
-        + 'rolled back. A frame that already overflows may be edited only into a layout that shows all of it. '
-        + 'Area inset, threading and unthreading are not offered (unsupported on the measured host).',
+    description: 'Plan or apply the column and row layout of one existing area-text frame: `column_count` and `row_count` (1 to 20), `column_gutter` and `row_gutter` (0 to 1000 pt), and `flow_links_horizontally` (text flows across rows before columns when true). Request at least one; the others stay as they are. The frame must be unthreaded, horizontal, and directly on a layer; read it first with illustrator_get_area_text_options. Apply echoes the plan\'s expected_before and confirmed_after, runs in the foreground, and verifies every option by read-back. A layout that would hide text is undone and reported as rolled back; a frame that already overflows may only be edited into a layout that shows all of it. Area inset, threading and unthreading are not offered.',
     inputSchema,
     publicInputSchema: setAreaTextColumnsPublicInputSchema,
     outputSchema: setAreaTextColumnsResponseSchema,

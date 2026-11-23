@@ -2,19 +2,51 @@ import { illustratorApplicationTarget, } from './illustrator-application.js';
 import { HostProcessExitError } from './host-transport.js';
 import { executionIdentityMatches, executionRecordsMatch } from './execution-record.js';
 import { createHash, randomUUID } from 'node:crypto';
+import { LockObservationBudgetExhaustedError } from './lock-observation-budget.js';
 import { CommandLockedError, MUTATION_DURABLE_STATE_VERSION, assertNeverTerminalKind, } from './command-store.js';
-import { IndeterminateExecutionError, CommandQuarantinedError, CommandReleasedUnverifiedError, ProvenPreApplyFailureError, HostReferenceInvalidError, hostReferenceInvalidDetail, } from './domain.js';
+import { IndeterminateExecutionError, CommandQuarantinedError, CommandReleasedAsOrphanError, CommandReleasedUnverifiedError, ProvenPreApplyFailureError, HostReferenceInvalidError, hostReferenceInvalidDetail, } from './domain.js';
 import { buildJsxCommand } from './jsx-runtime.js';
 import { auditMismatchInResult } from './mutation-audit-consistency.js';
 import { barrierTargetFromKey, barrierTargetFromResultText } from './release-barrier.js';
 import { validateMutationResultArtifact, } from './mutation-result-validator.js';
 export const DEFAULT_CALL_QUEUE_WAIT_LIMIT_MS = 60_000;
+export function commandMayWriteAuditEvents(command) {
+    return command.kind === 'mutation' || command.script.includes('recordMutationAuditEvent');
+}
+export function describeValidationCause(error) {
+    const issues = typeof error === 'object' && error !== null ? error.issues : undefined;
+    if (!Array.isArray(issues) || issues.length === 0)
+        return '';
+    const first = issues[0];
+    const code = typeof first?.code === 'string' && /^[a-z_]{1,40}$/.test(first.code) ? first.code : 'invalid';
+    const path = Array.isArray(first?.path)
+        ? first.path.filter((part) => typeof part === 'number' || (typeof part === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(part))).slice(0, 8).join('.')
+        : '';
+    return ` (reason_code ${code}${path === '' ? '' : ` at ${path}`}${issues.length > 1 ? `; ${String(issues.length - 1)} more` : ''})`;
+}
 function readReleaseHint(kind, commandId) {
     if (kind !== 'read')
         return '';
     return ` The read's lock stays until you reconcile it: run illustrator_reconcile with command_id=${commandId} (action=inspect). ` +
         `If it reports canAbandon, run it again with action=abandon, command_id=${commandId} and confirm_command_id=${commandId}; ` +
         'if Illustrator is still running the script, wait for it to finish first.';
+}
+export const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
+export const MAX_READ_HOST_TIMEOUT_MS = 300_000;
+export const STALE_READ_RELEASE_MARGIN_MS = 60_000;
+export const STALE_READ_RELEASE_MIN_AGE_MS = MAX_READ_HOST_TIMEOUT_MS + STALE_READ_RELEASE_MARGIN_MS;
+export const STALE_READ_CLAIM_RESUME_MS = 60_000;
+export const STALE_READ_CLAIM_WAIT_MS = 250;
+const RECENT_GO_LIMIT = 16;
+function formatAge(ms) {
+    const seconds = Math.max(0, Math.round(ms / 1000));
+    if (seconds < 60)
+        return `${seconds} s`;
+    if (seconds < 3600)
+        return `${Math.round(seconds / 60)} min`;
+    if (seconds < 172_800)
+        return `${Math.round(seconds / 3600)} h`;
+    return `${Math.round(seconds / 86_400)} days`;
 }
 export class IllustratorBusyError extends Error {
     waitedMs;
@@ -75,12 +107,16 @@ export class DurableCommandBridge {
     queueTail = Promise.resolve();
     terminalObserver = null;
     barrierStore;
+    now;
+    inFlightCommandIds = new Set();
+    recentGoCommandIds = [];
     constructor(application, store, registry, transport, options = {}) {
         this.store = store;
         this.registry = registry;
         this.transport = transport;
         this.queueWaitLimitMs = options.queueWaitLimitMs ?? DEFAULT_CALL_QUEUE_WAIT_LIMIT_MS;
         this.barrierStore = options.barrierStore ?? null;
+        this.now = options.now ?? Date.now;
         if (!this.registry.isSealed() || this.store.getAdapterRegistry() !== this.registry) {
             throw new Error('Bridge and command store must share the exact sealed mutation adapter registry.');
         }
@@ -240,6 +276,19 @@ export class DurableCommandBridge {
             }
         }
         return await this.reconcileCommand(options);
+    }
+    async releaseProvenPreCreateLock(commandId, evidence) {
+        this.store.files(commandId);
+        const leave = await this.enterQueue();
+        try {
+            if (this.inFlightCommandIds.has(commandId) || this.recentGoCommandIds.includes(commandId)) {
+                return { state: 'refused', reason: 'not_lock_owner', message: `Command ${commandId} is running in this server.` };
+            }
+            return await this.store.releaseProvenPreCreateLock(commandId, evidence);
+        }
+        finally {
+            leave();
+        }
     }
     async releaseUnverified(commandId, confirmCommandId) {
         this.store.files(commandId);
@@ -620,6 +669,10 @@ export class DurableCommandBridge {
         }
     }
     async executeOne(command) {
+        if (this.staleReadReleaseApplies() && command.kind === 'read' &&
+            (command.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS) > MAX_READ_HOST_TIMEOUT_MS) {
+            throw new Error(`A read command may declare a host timeout of at most ${MAX_READ_HOST_TIMEOUT_MS} ms (got ${String(command.timeoutMs)}).`);
+        }
         let mutationAdapter = null;
         if (command.kind === 'mutation') {
             mutationAdapter = this.registry.resolveIdentity(command.idempotency.operation, command.mutationValidator, command.adapterIdentity);
@@ -637,8 +690,10 @@ export class DurableCommandBridge {
                 await this.transport.assertHostAvailable(mutationAdapter.mutationHostApplicationMode);
             }
         }
-        const callApplication = await this.transport.resolveCallApplication(this.target);
-        await this.store.acquire(commandId);
+        const call = command.kind === 'read' ? command.hostCall : undefined;
+        const callApplication = await this.transport.resolveCallApplication(this.target, call);
+        await this.acquireLock(commandId);
+        this.inFlightCommandIds.add(commandId);
         let files;
         let expectedExecution;
         let goSent = false;
@@ -662,13 +717,13 @@ export class DurableCommandBridge {
                         ...(editSessionAdmission === undefined ? {} : { editSessionAdmission }),
                         ...(dirtyFileAdmission === undefined ? {} : { dirtyFileAdmission }),
                     })}` },
-                { path: files.runnerPath, contents: this.transport.buildRunner(files.scriptPath, callApplication, command.timeoutMs ?? 30_000, command.kind === 'mutation' ? command.mutationHostApplicationMode : undefined) },
+                { path: files.runnerPath, contents: this.transport.buildRunner(files.scriptPath, callApplication, command.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS, command.kind === 'mutation' ? command.mutationHostApplicationMode : undefined, call) },
             ]);
-            await this.store.prepareHostArtifactTemps(files);
+            await this.store.prepareHostArtifactTemps(files, { auditEvents: commandMayWriteAuditEvents(command) });
             const launchFiles = files;
-            await this.transport.launch(launchFiles, command.timeoutMs ?? 30_000, async (identity) => {
+            await this.transport.launch(launchFiles, command.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS, async (identity) => {
                 expectedExecution = await this.store.writeExecution(launchFiles, identity);
-            }, () => { goSent = true; });
+            }, () => { goSent = true; this.noteGo(commandId); }, call);
             const resultRecord = await this.store.readResult(commandId);
             const envelope = parseHostResultEnvelope(resultRecord, commandId);
             if (!envelope.ok || resultRecord.state !== 'valid') {
@@ -719,8 +774,8 @@ export class DurableCommandBridge {
                     finalizedAt = attestation.finalizedAt;
                     terminalState = attestation.terminalState;
                 }
-                catch (_error) {
-                    throw new IndeterminateExecutionError(`Illustrator mutation result could not be canonically validated and durably attested (${commandId}).`, commandId);
+                catch (cause) {
+                    throw new IndeterminateExecutionError(`Illustrator mutation result could not be canonically validated and durably attested${describeValidationCause(cause)} (${commandId}).`, commandId);
                 }
                 try {
                     await this.observeAttested(commandId, terminalState);
@@ -820,6 +875,115 @@ export class DurableCommandBridge {
             }
             throw error;
         }
+        finally {
+            this.inFlightCommandIds.delete(commandId);
+        }
+    }
+    staleReadReleaseApplies() {
+        return this.transport.processGroupLiveness !== undefined;
+    }
+    noteGo(commandId) {
+        this.recentGoCommandIds.push(commandId);
+        if (this.recentGoCommandIds.length > RECENT_GO_LIMIT)
+            this.recentGoCommandIds.shift();
+    }
+    async acquireLock(commandId) {
+        try {
+            await this.store.acquire(commandId);
+            return;
+        }
+        catch (first) {
+            if (!(first instanceof CommandLockedError))
+                throw first;
+            let released = false;
+            let refusalNote = null;
+            try {
+                released = await this.releaseStaleUnstartedRead(first.commandId);
+            }
+            catch (error) {
+                refusalNote = `Automatic release of the stale read failed (${error instanceof Error ? error.message : String(error)}); the lock is kept.`;
+            }
+            if (released) {
+                try {
+                    await this.store.acquire(commandId);
+                    return;
+                }
+                catch (second) {
+                    if (!(second instanceof CommandLockedError))
+                        throw second;
+                    throw await this.describedLockError(second, null);
+                }
+            }
+            throw await this.describedLockError(first, refusalNote);
+        }
+    }
+    async releaseStaleUnstartedRead(ownerId) {
+        if (ownerId === 'unknown' || !this.staleReadReleaseApplies())
+            return false;
+        if (this.inFlightCommandIds.has(ownerId) || this.recentGoCommandIds.includes(ownerId))
+            return false;
+        const observationBudget = this.store.createLockObservationBudget();
+        const processGroupLiveness = (processGroupId) => this.transport.processGroupLiveness(processGroupId);
+        const inspect = async () => await this.store.inspectStaleUnstartedRead(ownerId, {
+            minAgeMs: STALE_READ_RELEASE_MIN_AGE_MS, now: this.now(), processGroupLiveness, resumeClaimed: true, observationBudget,
+        });
+        const eligibility = await inspect();
+        if (!eligibility.eligible)
+            return false;
+        const claim = await this.store.claimStaleReadRelease(ownerId, eligibility.evidence, this.now());
+        if (claim.state === 'held' && (claim.claimedAt === null || this.now() - claim.claimedAt <= STALE_READ_CLAIM_RESUME_MS)) {
+            observationBudget.startWaiting();
+            try {
+                while (true) {
+                    if (await this.store.readLockOwner(observationBudget, 'stale_owner') !== ownerId)
+                        return true;
+                }
+            }
+            catch (error) {
+                if (error instanceof LockObservationBudgetExhaustedError)
+                    return false;
+                throw error;
+            }
+        }
+        const again = await inspect();
+        if (!again.eligible)
+            return false;
+        await this.store.releaseStaleUnstartedRead(ownerId, again.evidence, observationBudget);
+        const seconds = String(Math.round(again.evidence.ageMs / 1000));
+        process.stderr.write(`illustrator-studio-mcp: released stale unstarted read ${ownerId} (process group ${again.evidence.executionProcessGroupId} stopped, age ${seconds} s)\n`);
+        return await this.store.readLockOwner(observationBudget, 'completion_owner') !== ownerId;
+    }
+    async describedLockError(error, note) {
+        if (error.commandId === 'unknown')
+            return error;
+        let description;
+        try {
+            description = await this.store.describeLockOwner(error.commandId, (execution) => this.releaseExecutionLiveness(execution));
+        }
+        catch (_describeError) {
+            return error;
+        }
+        const id = error.commandId;
+        const parts = [];
+        if (description.kind === null || description.createdAt === null)
+            parts.push('its record is unreadable');
+        else
+            parts.push(`${description.kind}, created ${description.createdAt}, ${formatAge(this.now() - Date.parse(description.createdAt))} ago`);
+        if (description.liveness === 'missing')
+            parts.push('no execution record');
+        else if (description.processGroupId !== null) {
+            parts.push(`process group ${description.processGroupId} ${description.liveness === 'inactive' ? 'has stopped' : `is ${description.liveness}`}`);
+        }
+        else
+            parts.push(`its execution is ${description.liveness}`);
+        parts.push(`canAbandon=${String(description.canAbandon)}`);
+        const inspect = `illustrator_reconcile (action=inspect, command_id=${id})`;
+        const steps = description.canAbandon
+            ? `It can be abandoned: check it with ${inspect}, then run illustrator_reconcile (action=abandon, command_id=${id}, confirm_command_id=${id}).`
+            : description.liveness === 'active'
+                ? `Its process is still running: wait for it to finish and retry, or check it with ${inspect}.`
+                : `Check it with ${inspect}.`;
+        return new CommandLockedError(id, { summary: parts.join('; '), nextSteps: note === null ? steps : `${steps} ${note}` });
     }
     async replayMutation(command) {
         const commandId = command.idempotency.commandId;
@@ -855,8 +1019,8 @@ export class DurableCommandBridge {
             try {
                 validatedData = (await this.readValidatedCompactReplay(stored)).data;
             }
-            catch (_error) {
-                throw new IndeterminateExecutionError(`Compact replay result failed canonical validation (${commandId}).`, commandId);
+            catch (cause) {
+                throw new IndeterminateExecutionError(`Compact replay result failed canonical validation${describeValidationCause(cause)} (${commandId}).`, commandId);
             }
             await this.finishCompactCleanup(stored);
             await this.observeAttested(commandId, stored.terminalState);
@@ -878,6 +1042,8 @@ export class DurableCommandBridge {
             throw new IndeterminateExecutionError(`Durable version 1 metadata is quarantined; the command cannot be replayed or reapplied (${commandId}).`, commandId);
         }
         if (metadata.state === 'invalid') {
+            if (metadata.reason === 'metadata_missing' && await this.store.hasOrphanFence(commandId))
+                throw new CommandReleasedAsOrphanError(commandId);
             throw new IndeterminateExecutionError(`Durable idempotency metadata is ${metadata.reason}; the command cannot be replayed or reapplied (${commandId}).`, commandId);
         }
         const stored = metadata.value;

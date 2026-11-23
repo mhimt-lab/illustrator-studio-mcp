@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { summarizeValidationFailure } from './tool-arguments.js';
 import { canonicalCommandIdSchema } from './command-id.js';
 import { canonicalSha256 } from './mutation-canonical.js';
-import { boundAppearancePreviewResultSchema, pathAppearanceMutationSchema, pathAppearanceStateSchema, } from './adapters/set-path-appearance-adapter.js';
+import { appearancePlanSchema, boundAppearancePreviewResultSchema, pathAppearanceMutationSchema, pathAppearanceStateSchema, } from './adapters/set-path-appearance-adapter.js';
 import { IndeterminateExecutionError, ProvenPreApplyFailureError } from './domain.js';
 import { noFollowNonBlockingReadFlags, noFollowDirectoryFlags } from './platform-primitives.js';
 export const M6_P0_RECIPE_ID = 'm6_appearance_preview_v2';
@@ -16,7 +16,7 @@ export const M6_P0_RECIPE_DEFINITION = Object.freeze({
     id: M6_P0_RECIPE_ID,
     version: M6_P0_RECIPE_VERSION,
     steps: Object.freeze([
-        Object.freeze({ id: 'set_path_appearance', operation: 'set_path_appearance', version: 9 }),
+        Object.freeze({ id: 'set_path_appearance', operation: 'set_path_appearance', version: 10 }),
         Object.freeze({ id: 'render_png_preview', operation: 'set_path_appearance.bound_preview', version: 2 }),
         Object.freeze({ id: 'publish_png_preview', operation: 'publish_png_no_replace', version: 4 }),
     ]),
@@ -443,9 +443,7 @@ export async function publishPngPreviewNoReplace(planValue, options = {}) {
     }
 }
 const recipeAppearancePlanSchema = z.strictObject({
-    targetUuid: z.string().min(1).max(255),
-    before: pathAppearanceStateSchema,
-    after: pathAppearanceStateSchema,
+    ...appearancePlanSchema.shape,
     confirmationStatus: z.literal('required'),
     applyAllowed: z.literal(false),
 });

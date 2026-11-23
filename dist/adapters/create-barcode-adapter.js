@@ -8,6 +8,7 @@ import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canon
 import { BEARER_BAR_MODES, mmToPt } from '../barcode/layout.js';
 import { BARCODE_BACKGROUNDS, BARCODE_SYMBOLOGIES, barcodeWarnings, hostLayout, resolveBarcode, symbolSummary, } from '../barcode/plan.js';
 import { CREATE_RECTANGLE_MODULE_SCRIPT } from './create-rectangle/jsx.js';
+import { EDIT_SESSION_CAPACITY_SCRIPT } from './edit-session-capacity-jsx.js';
 import { mutationTransactionSchema } from './create-rectangle/result-schema.js';
 import { sameCanonical } from './layer-ops-shared.js';
 export const CREATE_BARCODE_OPERATION = 'create_barcode';
@@ -264,7 +265,7 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
     await assertOperationSafetyAdapterConformance({ registration: CREATE_BARCODE_SAFETY, plan, result: safetyResult(result, requestDigest, attestation) }, resolver);
 }
 export const CREATE_BARCODE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
-${CREATE_RECTANGLE_MODULE_SCRIPT}
+${CREATE_RECTANGLE_MODULE_SCRIPT}${EDIT_SESSION_CAPACITY_SCRIPT}
 var BARCODE_EDGE_TOLERANCE_PT = ${BARCODE_EDGE_TOLERANCE_PT};
 
 var barcodeHostError = null;
@@ -301,6 +302,14 @@ function barcodeSameFill(left, right) {
 }
 function barcodeEdges(item) { var b = item.geometricBounds; return [b[0], b[1], b[2], b[3]]; }
 
+/** Every item the symbol adds: the group, the background, the bearer bars, the bars, and per numeral one path or one compound path plus its contours. */
+function barcodeItemCount() {
+  var layout = params.layout;
+  var count = 1 + (params.background === "white" ? 1 : 0) + layout.frame.length + layout.bars.length;
+  for (var n = 0; n < layout.digits.length; n++) count += layout.digits[n][2].length > 1 ? 1 + layout.digits[n][2].length : 1;
+  return count;
+}
+
 function barcodePreflight(forApply) {
   var context = forApply ? requireDocument(params.expectedDocumentKey) : requireDocumentForRead(params.expectedDocumentKey);
   var doc = app.activeDocument;
@@ -325,6 +334,7 @@ function barcodePreflight(forApply) {
   if (forApply && blockers.length > 0) {
     throw new Error("MCP_ERROR:" + stringifyJson({ code: "BARCODE_APPLY_BLOCKED", reasonCodes: blockers, layerPath: params.expectedLayerPath }));
   }
+  if (forApply) sessionCapacityRefuse(context, barcodeItemCount(), "BARCODE_SESSION_TOO_LARGE", "The barcode");
   return { context: context, doc: doc, layerChain: layerChain, targetLayer: layerInspection.targetLayer, layerInspection: layerInspection, blockers: blockers,
     artboardBounds: artboardBounds, targetBounds: targetBounds, fills: fills };
 }
@@ -559,6 +569,8 @@ function barcodeRollback(state) {
 
 var barcodeExecution = runMutationTransaction({
   apply: params.apply === true,
+  editSessionAffected: function (phase, preflight, plan, state, value) { return phase === "after" ? [value.uuid] : []; },
+  editSessionLayers: function (phase, preflight) { return [preflight.targetLayer]; },
   initialOperationState: function () { return { group: null, groupUuid: null, uuids: [], direct: 0 }; },
   preflight: barcodePreflight,
   plan: barcodePlan,
@@ -612,12 +624,7 @@ export function barcodeHostParams(request) {
 export const createBarcodeToolContract = {
     name: 'illustrator_create_barcode',
     title: 'Plan or Create a JAN / EAN / ITF-14 Barcode',
-    description: 'Plan or draw an EAN-13 (JAN standard, ean13), EAN-8 (JAN short, ean8) or ITF-14 (GS1 distribution, itf14) barcode as native vector in one group of expected_layer_path: an optional white background rectangle (Quiet Zones included), one black fill-only rectangle per dark run (CMYK K100 / RGB 0,0,0), the itf14 bearer bars and the numerals. '
-        + 'data is the GTIN string: check_digit "validate" (default) needs the complete number, "calculate" appends the digit to 12 / 7 / 13 digits; nothing is normalized, a JSON number is refused, and numbers are never assigned (whether a GTIN is yours cannot be checked). '
-        + 'Size: EAN magnification 0.8-2.0 (default 1.0, X 0.33 mm) or x_dimension_mm 0.264-0.66, not both, standard bar height only. itf14: exactly 14 digits (a GTIN-13 only with normalize_gtin13 "prefix_zero", shown in the plan), x_dimension_mm 0.635-1.016 (default 1.016), wide:narrow 2.5, and bearer_bar is required, never chosen for you: plate (the usual form: 4.8 mm frame all round, bars 31.8 mm joined to it, Quiet Zones 10.9 mm inside) or non_plate (top and bottom 2X). At X 1.016 the frame is 153.8 x 41.4 mm; Quiet Zones and numerals scale with X below it. Placement on the case is not enforced. x, y place the symbol box from the artboard top-left in pt. '
-        + 'The numerals are mandatory (hri.enabled:false is refused): filled outlines of the bundled OCR-B font (no installed font needed), one per module column (itf14: 6.2 mm high, 1.2 mm under the frame, centred, grouped 3-5-5-1), the EAN-13 leading digit in the left Quiet Zone. '
-        + 'The plan returns the resolved GTIN, scale, mm size, counts, warnings and decode.plan (software decode of the planned bars; a mismatch refuses the request). Apply checks every edge and numeral by read-back, rolls back only its group on a mismatch, then returns decode.raster (zbarimg on a raster of the group made in a throwaway document: match | mismatch | not_run). '
-        + 'A raster mismatch is an error naming the group to remove. Not GS1 certification or print verification. Not available inside an edit session.',
+    description: 'Plan or draw an EAN-13 (ean13), EAN-8 (ean8) or ITF-14 (itf14) barcode as native vector in one new group at expected_layer_path. data is the GTIN digit string: check_digit "validate" (default) needs the complete number, "calculate" appends the check digit to the body. Nothing is normalized and GTINs are never assigned, so the caller supplies its own. Size: magnification (EAN, 0.8-2.0) or x_dimension_mm, not both. itf14 needs bearer_bar (plate or non_plate; never chosen for you). Numerals are always outlines (hri.enabled:false is refused). The plan returns the resolved GTIN, layout, warnings and a software decode of the planned bars. Apply verifies every edge and numeral by read-back and rolls back only its own group on a read-back mismatch; a raster decode mismatch is an error naming the group to remove. Not GS1 certification or print verification. Supports edit sessions: the created group, every bar and numeral outline, and the target layer\'s stacking order join the session head before one final save; a symbol that would push the session past its item limit is refused before any change. Inside a session a raster decode mismatch cannot be removed with illustrator_delete_objects: do not save, close the session, close the document without saving and reopen the saved file.',
     inputSchema,
     publicInputSchema: createBarcodePublicInputSchema,
     outputSchema: createBarcodeResponseSchema,

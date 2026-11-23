@@ -8,17 +8,33 @@ import { documentContextSchema, mutationAuditSchema } from '../mutation-result-s
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { POINT_TEXT_CHARACTER_SCRIPT, POINT_TEXT_MAX_CODE_UNITS, POINT_TEXT_GROUP_SCRIPT, POINT_TEXT_SNAPSHOT_SCRIPT, } from './point-text-host-script.js';
 import { POINT_TEXT_MULTILINE_SCRIPT, multilineRejectionSchema, } from './point-text-multiline.js';
-import { RECORDED_MULTILINE_PROFILE, TEXT_RECORDED_MULTILINE_SCRIPT, rangeEditSnapshotSchema, recordedBreakReplacementSchema, checkRecordedMultilineReplacement, isBreakEntry } from './text-recorded-multiline-profile.js';
+import { RECORDED_MULTILINE_PROFILE, TEXT_RECORDED_MULTILINE_SCRIPT, rangeEditSnapshotSchema, recordedBreakReplacementSchema, checkRecordedMultilineReplacement, emptyParagraphRefusal, isBreakEntry } from './text-recorded-multiline-profile.js';
 import { TEXT_RECORDED_MODULE_SCRIPT, sameRecordedSnapshots } from './text-recorded-profile.js';
 import { validateClusterRange } from './point-text-cluster.js';
 import { textLookupFailureError } from './text-lookup-error.js';
+import { GuidedRefusalError } from '../blocked-guidance.js';
 export const REPLACE_TEXT_RANGE_OPERATION = 'replace_text_range';
 export const REPLACE_TEXT_RANGE_VALIDATOR = { kind: REPLACE_TEXT_RANGE_OPERATION, version: 1 };
 const CANONICAL_VERSION = 4;
-const RESULT_SCHEMA_VERSION = 7;
+const RESULT_SCHEMA_VERSION = 8;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
-const ERROR_MAPPING_VERSION = 2;
+const ERROR_MAPPING_VERSION = 3;
+export const RANGE_CAPABILITY_REFUSAL_CODE = 'RANGE_CAPABILITY_REFUSED';
+export const RANGE_CAPABILITY_REFUSALS = [
+    { reason: 'text_manual_pair_kerning', messages: ['Point-text operations do not support manual pair kerning.', 'Point-text range operations do not support manual pair kerning.'],
+        detail: 'The frame carries manual pair kerning, which Illustrator destroys when a range is replaced (measured: also outside the requested range), so this tool cannot edit it in place.' },
+    { reason: 'text_tab_stops', messages: ['Point-text operations do not support tab stops.'],
+        detail: 'The frame carries tab stops, which were never measured through a range replacement, so this tool does not edit it.' },
+    { reason: 'text_frame_tags', messages: ['Point-text operations do not support a target that carries tags.'],
+        detail: 'The frame carries tags, which were never measured through a range replacement, so this tool does not edit it.' },
+];
+const RANGE_CAPABILITY_REFUSAL_SUFFIX = ' illustrator_replace_text_range refuses this frame under this condition. Choose a frame without it, or use a client script outside this server: first use illustrator_create_backup for a saved file, then verify with MCP read tools, report external changes, and re-read the document key (reopen any edit session).';
+export function rangeCapabilityRefusal(detail) {
+    if (detail?.code !== RANGE_CAPABILITY_REFUSAL_CODE)
+        return null;
+    return new GuidedRefusalError(detail.reason ?? 'unsupported', detail.message ?? 'The frame carries a state a range replacement cannot keep.');
+}
 const replacementSchema = recordedBreakReplacementSchema;
 const rangeRejectionSchema = z.enum([
     'offset_out_of_range',
@@ -328,7 +344,7 @@ export function checkTextRangeRequest(before, start, end, replacement) {
     const replacementRejection = validateClusterRange(`x${replacement}x`, 1, replacement.length + 1);
     if (replacement.length > 0 && replacementRejection !== null)
         return replacementRejection;
-    const multilineRejection = checkRecordedMultilineReplacement(before, start, end, replacement);
+    const multilineRejection = checkRecordedMultilineReplacement(before, start, end, replacement, before.profile === RECORDED_MULTILINE_PROFILE);
     if (multilineRejection !== null)
         return multilineRejection;
     const first = before.characters[start];
@@ -452,6 +468,54 @@ function rangeSnapshot(document, target, expectedUuid) {
   return snapshot.profile === RECORDED_MULTILINE_PROFILE ? snapshot : pointTextRoundSnapshot(snapshot);
 }
 
+/**
+ * (#767) Targets whose pinned attribute values the plain profile cannot bind (baselineShift per character, kinsoku, frame opacity, ...)
+ * are read by the recorded profile instead, as the recorded multiline profile (#670) and set_text_style (#681) already do: every attribute
+ * is recorded before the write and compared after it. The fallback is sticky for a target within one host call, so a deletion of the only
+ * off-profile character cannot flip the profile between the before and the after snapshot.
+ */
+var RANGE_RECORDED_FORCED = {};
+
+/** Only a mismatch of a pinned attribute VALUE (character, paragraph or frame table) may fall back; every structural refusal stays as it is. */
+function rangeIsPinRefusal(error) {
+  return !!error && error.mutationReasonCode === "preflight_failed" && typeof error.message === "string" &&
+    error.message.indexOf(" outside profile ") >= 0;
+}
+
+/**
+ * The recorded read of a single-line target. These plain-profile refusals are kept because the recorded tables cannot justify lifting them:
+ * a manual pair kern is destroyed by a range replacement, including one outside the range (measured), and tab stops and tags are not
+ * measured through a range replacement.
+ */
+function rangeRecordedSingleLine(document, target, expectedUuid) {
+  var snapshot = recordedMultilineSnapshot(document, target, expectedUuid);
+  pointTextSupportedJustification(snapshot.justification);
+  // The shared reader records an unread tab collection as err:<n> with count 0. Only this range slice requires
+  // a known empty collection: bind the same snapshot's row to its canonical labels, without another native read.
+  var tables = RECORDED_MULTILINE_TABLES.latest[expectedUuid];
+  var paragraphRow = tables && tables.paragraphs && tables.paragraphs[0];
+  var tabColumn = -1;
+  for (var column = 0; column < STYLE_V3_PARA_LABELS.length; column++) {
+    if (STYLE_V3_PARA_LABELS[column] === "tabStops") { tabColumn = column; break; }
+  }
+  if (!tables || !tables.paragraphs || tables.paragraphs.length !== 1 || !paragraphRow ||
+      paragraphRow.length !== STYLE_V3_PARA_LABELS.length || tabColumn < 0 ||
+      typeof paragraphRow[tabColumn] !== "string" || typeof snapshot.tabStopCount !== "number" ||
+      !isFinite(snapshot.tabStopCount) || snapshot.tabStopCount < 0 || Math.floor(snapshot.tabStopCount) !== snapshot.tabStopCount ||
+      (snapshot.tabStopCount === 0 && paragraphRow[tabColumn] !== "0") ||
+      (snapshot.tabStopCount > 0 && paragraphRow[tabColumn].indexOf(String(snapshot.tabStopCount) + ";") !== 0)) {
+    throw mutationError("preflight_failed", "Target tab stops are unavailable.");
+  }
+  if (snapshot.manualKerning !== "none") {
+    throw mutationError("preflight_failed", "Point-text range operations do not support manual pair kerning.");
+  }
+  if (snapshot.tabStopCount !== 0) throw mutationError("preflight_failed", "Point-text operations do not support tab stops.");
+  if (snapshot.frame.tagCount !== 0) {
+    throw mutationError("preflight_failed", "Point-text operations do not support a target that carries tags.");
+  }
+  return snapshot;
+}
+
 function rangeSnapshotRaw(document, target, expectedUuid) {
   if (!target || target.typename !== "TextFrame") {
     throw mutationError("preflight_failed", "Point-text operations support TextFrame targets only.");
@@ -463,6 +527,23 @@ function rangeSnapshotRaw(document, target, expectedUuid) {
     throw mutationError("preflight_failed", "Target native UUID is unavailable or changed.");
   }
   if (recordedMultilineSelected(target)) return recordedMultilineSnapshot(document, target, expectedUuid);
+  if (RANGE_RECORDED_FORCED[expectedUuid] === true) return rangeRecordedSingleLine(document, target, expectedUuid);
+  try { return rangePlainSnapshot(document, target, expectedUuid); }
+  catch (plainError) {
+    if (!rangeIsPinRefusal(plainError)) throw plainError;
+    var recorded;
+    try { recorded = rangeRecordedSingleLine(document, target, expectedUuid); }
+    catch (recordedError) {
+      // A specific refusal of the recorded read is the reason to report; an unexpected host error in it leaves the plain refusal, which is true.
+      if (recordedError && recordedError.mutationReasonCode) throw recordedError;
+      throw plainError;
+    }
+    RANGE_RECORDED_FORCED[expectedUuid] = true;
+    return recorded;
+  }
+}
+
+function rangePlainSnapshot(document, target, expectedUuid) {
   var groups = pointTextGroupAncestry(target);
   if (!target.story || !target.story.textFrames ||
       target.story.textFrames.length !== 1 || target.story.textFrames[0] !== target) {
@@ -480,15 +561,16 @@ function rangeSnapshotRaw(document, target, expectedUuid) {
     throw mutationError("preflight_failed", "Target native text-run state is unavailable.");
   }
   var justificationName = pointTextSupportedJustification(textRange.paragraphAttributes.justification);
+  var paragraphProfile = pointTextParagraphProfile(textRange);
   return pointTextWithGroups({
     uuid: target.uuid,
     type: target.typename,
     kind: "TextType.POINTTEXT",
-    profile: POINT_TEXT_PROFILE,
+    profile: paragraphProfile.name,
     frameShape: pointTextFrameShape(target),
     storyFrameCount: 1,
     manualKerning: "none",
-    tabStopCount: pointTextParagraphState(textRange),
+    tabStopCount: pointTextParagraphState(textRange, paragraphProfile),
     justification: justificationName,
     characters: pointTextCharacterFingerprints(target),
     frame: pointTextFrameState(target),
@@ -522,6 +604,21 @@ function rangeWrite(target, start, end, text) {
   range.contents = text;
 }
 
+/** #912: only the three published capability messages, matched exactly, become a coded refusal; everything else is rethrown as it is. */
+var RANGE_CAPABILITY_REFUSALS = ${JSON.stringify(RANGE_CAPABILITY_REFUSALS)};
+function rangeCapabilityRethrow(error) {
+  if (!error || error.mutationReasonCode !== "preflight_failed" || typeof error.message !== "string") return;
+  for (var group = 0; group < RANGE_CAPABILITY_REFUSALS.length; group++) {
+    var entry = RANGE_CAPABILITY_REFUSALS[group];
+    for (var index = 0; index < entry.messages.length; index++) {
+      if (error.message === entry.messages[index]) {
+        throw mutationError("preflight_failed", stringifyJson({ code: ${JSON.stringify(RANGE_CAPABILITY_REFUSAL_CODE)}, reason: entry.reason,
+          message: error.message + " " + entry.detail + " Target: " + String(params.targetUuid) + "." + ${JSON.stringify(RANGE_CAPABILITY_REFUSAL_SUFFIX)} }));
+      }
+    }
+  }
+}
+
 function rangeResolve(forApply) {
   var context = forApply ? requireDocument(params.expectedDocumentKey) : requireDocumentForRead(params.expectedDocumentKey);
   var document = app.activeDocument;
@@ -529,7 +626,9 @@ function rangeResolve(forApply) {
   if (target === null) {
     throw mutationError("preflight_failed", stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: params.targetUuid }));
   }
-  var before = rangeSnapshot(document, target, params.targetUuid);
+  var before;
+  try { before = rangeSnapshot(document, target, params.targetUuid); }
+  catch (snapshotError) { rangeCapabilityRethrow(snapshotError); throw snapshotError; }
   if (params.end > before.characters.length || params.start >= params.end) {
     throw mutationError("preflight_failed", "The requested point-text range is outside the target contents.");
   }
@@ -775,14 +874,7 @@ function normalizedRequest(input) {
 export const replaceTextRangeToolContract = {
     name: 'illustrator_replace_text_range',
     title: 'Plan or Replace a Point-Text Range',
-    description: 'Plan or replace one bounded UTF-16 range of a POINTTEXT frame (one line, or up to 32 host items separated by CR or U+0003) in a layer or in unlocked, visible groups (plain or clipped), bound by '
-        + 'explicit document key and native UUID. Mixed character styles are supported and every character outside the '
-        + 'range keeps its exact contents and style. Ranges that would split a surrogate pair, a combining mark, a '
-        + 'variation selector or an emoji sequence are refused, as are single-line frames carrying manual pair kerning, contents '
-        + 'containing U+200D, and scripts whose cluster rules are unmeasured. Apply performs exact compare-and-set over '
-        + 'a per-character fingerprint, native read-back verification, and verified inverse rollback. In CR/U+0003 text, character, host paragraph and frame attributes are recorded and compared; bounds are observed. '
-        + 'The range stays inside one host item; one ordinary unit may be replaced by one CR or U+0003 to split it. Empty items, delimiter deletion and conversion are refused with delimiter kinds and positions.'
-        + ' Every frame also requires an estimated apply result <=209715 UTF-8 bytes (80% of 262144): about 200 units with short font metadata (180 with CR/U+0003), fewer with longer metadata or large enclosing groups. Split the range or frame when refused (result_too_large).',
+    description: 'Plan or replace one bounded UTF-16 range of a POINTTEXT frame (one line, or up to 32 host items separated by CR or U+0003) in a layer or unlocked, visible groups, bound by document key and native UUID. Characters outside the range keep their contents and style. Refused: ranges that split a surrogate pair, combining mark, variation selector or emoji sequence; single-line frames with manual pair kerning; text containing U+200D; scripts with unmeasured cluster rules. The range stays inside one host item; an ordinary unit may be replaced by one CR or U+0003 to split it, while empty items and delimiter deletion or conversion are refused. Apply compares the exact before contents, reads back the result, and rolls back by verified inverse on failure. Each frame\'s apply result must stay under 209715 UTF-8 bytes (about 200 units); split the range or frame when refused with result_too_large.',
     inputSchema,
     publicInputSchema: replaceTextRangePublicInputSchema,
     outputSchema: replaceTextRangeResponseSchema,
@@ -827,6 +919,12 @@ export function createReplaceTextRangeAdapter() {
             if (detail?.code === 'OBJECT_NOT_FOUND') {
                 return new Error(`No PageItem with UUID ${JSON.stringify(detail.uuid ?? '')} exists in the bound document.`);
             }
+            const emptyStructure = emptyParagraphRefusal(detail);
+            if (emptyStructure !== null)
+                return emptyStructure;
+            const capability = rangeCapabilityRefusal(detail);
+            if (capability !== null)
+                return capability;
             if (detail?.code === 'TEXT_RANGE_APPLY_BLOCKED') {
                 return new Error(`Point-text range replacement is blocked: ${(detail.reasonCodes ?? []).join(', ') || 'unknown reason'}.`);
             }

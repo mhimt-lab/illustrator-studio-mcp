@@ -380,14 +380,7 @@ function normalizedRequest(input) {
 export const setTextOrientationToolContract = {
     name: 'illustrator_set_text_orientation',
     title: 'Plan or Set Text Orientation and Leading',
-    description: 'Plan or apply a change of writing direction (horizontal ⇄ vertical, 横組み⇄縦組み) on one layer-direct, '
-        + 'unthreaded point-text or area-text frame, bound by explicit document key and native UUID, optionally with a '
-        + 'leading (行送り) in points written to every character with auto leading off, or "auto" to turn auto leading '
-        + 'back on. The orientation must change. Area text must show its whole story before and after; a change that '
-        + 'makes it overflow is rolled back. Kinsoku, mojikumi, burasagari and roman hanging are not supported. Apply '
-        + 'performs exact compare-and-set over a per-character fingerprint, native read-back verification, and the '
-        + 'measured inverse (original orientation, then each character\'s own leading). Snapshots carry `runs` of equal attributes '
-        + '(echo them unchanged); a frame whose estimated apply result still exceeds 209715 UTF-8 bytes is refused with result_too_large.',
+    description: 'Plan or apply a change of writing direction (horizontal ⇄ vertical, 横組み⇄縦組み) on one layer-direct, unthreaded point-text or area-text frame, bound by document key and native UUID. Optionally set a leading (行送り) in points on every character with auto leading off, or "auto" to turn auto leading back on. The orientation must change. Area text must show its whole story before and after; a change that makes it overflow is rolled back. Kinsoku, mojikumi, burasagari and roman hanging are not supported. Echo the snapshot\'s runs unchanged. A frame whose estimated apply result exceeds 209715 UTF-8 bytes is refused with result_too_large.',
     inputSchema,
     publicInputSchema: setTextOrientationPublicInputSchema,
     outputSchema: setTextOrientationResponseSchema,

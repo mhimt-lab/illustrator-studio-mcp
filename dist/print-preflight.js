@@ -1,9 +1,38 @@
 import { PREFLIGHT_SCOPE_NOTE } from './preflight-scope-note.js';
+import { freeformGradientFields } from './freeform-gradient-ambiguity.js';
 export const PRINT_PREFLIGHT_LIMITS = {
     pageItems: 5_000,
     images: 200,
     findings: 500,
 };
+function totalInkNotes(conditions, gradientInkUnchecked) {
+    if (conditions.maximumTotalInkPercent === undefined) {
+        return ['Total ink (C+M+Y+K) was not checked: no maximum_total_ink_percent was given.'];
+    }
+    const notes = [
+        'Total ink checks CMYK colors of path fills and strokes, text runs and gradient stops. Spot colors (including their tints), gray, RGB and pattern colors are outside the check.',
+        'Total ink of embedded CMYK images is not checked.',
+    ];
+    if (gradientInkUnchecked)
+        notes.push('Gradient stop colors were not returned for at least one gradient, so its stops were not checked for total ink.');
+    return notes;
+}
+export function blackNotes(conditions, registrationExcluded) {
+    if (conditions.classifyBlacks !== true)
+        return [];
+    const sized = conditions.richBlackMinTextPt !== undefined || conditions.richBlackMinStrokePt !== undefined;
+    const parts = [
+        'Black classification judged each used CMYK value: four_color_solid_black (C, M, Y, K all 100); rgb_converted_black (K 60-99, C, M, Y at least 60 and within 15); overprint_avoidance_black (K 100, C+M+Y above 0 to 5); rich_black_used (K 100, C+M+Y above 5).',
+        sized
+            ? 'Rich-black size checks cover text run fills and path strokes.'
+            : 'Object sizes were not checked.',
+        'Spot, gray, RGB and image colors are outside it.',
+    ];
+    if (registrationExcluded !== undefined) {
+        parts.push(`Registration not counted: ${registrationExcluded.trimMarks} trim-mark line(s) from illustrator_create_trim_marks, ${registrationExcluded.outsideArtboards} object(s) wholly outside every artboard.`);
+    }
+    return [parts.join(' ')];
+}
 const sectionCategories = [
     'color', 'overprint', 'transparency', 'raster_effect', 'bleed',
     'geometry', 'stroke', 'font', 'image', 'layer',
@@ -190,5 +219,7 @@ export function createPrintPreflightResult(host, imageItems, imageComplete, cond
         },
         facts: host.facts,
         findings,
+        notes: [...totalInkNotes(conditions, host.scan.gradientInkUnchecked), ...blackNotes(conditions, host.scan.registrationExcluded)],
+        ...freeformGradientFields(host.scan.possibleFreeformGradientFills ?? 0),
     };
 }

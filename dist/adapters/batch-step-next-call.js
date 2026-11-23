@@ -12,14 +12,27 @@ export const SET_TEXT_STYLE_BATCH_STYLE_FIELDS = Object.freeze({
     vertical_scale: 'verticalScale',
     fill_color: 'fillColor',
 });
+function canonicalChannel(value) {
+    if (typeof value !== 'number')
+        return value;
+    const rounded = Math.round(value * 100_000) / 100_000;
+    return Object.is(rounded, -0) ? 0 : rounded;
+}
 export function batchTextStyleInternal(style) {
     const keys = Object.keys(style);
     if (keys.length !== 1 || !Object.hasOwn(SET_TEXT_STYLE_BATCH_STYLE_FIELDS, keys[0]))
         return null;
     const key = keys[0];
     const value = style[key];
-    if (key === 'fill_color')
-        return isRecord(value) ? { fillColor: { model: 'rgb', ...value } } : null;
+    if (key === 'fill_color') {
+        if (!isRecord(value))
+            return null;
+        if (value.model === 'cmyk') {
+            return { fillColor: { model: 'cmyk', cyan: canonicalChannel(value.cyan), magenta: canonicalChannel(value.magenta),
+                    yellow: canonicalChannel(value.yellow), black: canonicalChannel(value.black) } };
+        }
+        return { fillColor: { model: 'rgb', ...value } };
+    }
     return { [SET_TEXT_STYLE_BATCH_STYLE_FIELDS[key]]: value };
 }
 export const SET_TEXT_STYLE_BATCH_NEXT_CALL = Object.freeze({
@@ -41,10 +54,20 @@ export const SET_PATH_APPEARANCE_BATCH_NEXT_CALL = Object.freeze({
         const { fill, stroke, opacity } = plan.after;
         if (!isRecord(fill) || !isRecord(stroke))
             return false;
+        let requestedStroke = stroke.kind === 'none' ? { kind: 'none' } : stroke;
+        if (isRecord(request.appearance.stroke) && request.appearance.stroke.kind === 'solid' &&
+            !Object.hasOwn(request.appearance.stroke, 'width')) {
+            if (!isRecord(plan.before) || !isRecord(plan.before.stroke) || plan.before.stroke.kind !== 'solid' ||
+                stroke.kind !== 'solid' || typeof stroke.width !== 'number' || !Number.isFinite(stroke.width) ||
+                plan.before.stroke.width !== stroke.width)
+                return false;
+            const { width: _width, ...keptStroke } = stroke;
+            requestedStroke = keptStroke;
+        }
         return plan.targetUuid === request.target_uuid && isDeepStrictEqual(request.appearance, {
             opacity,
             fill: fill.kind === 'none' ? { kind: 'none' } : fill,
-            stroke: stroke.kind === 'none' ? { kind: 'none' } : stroke,
+            stroke: requestedStroke,
         });
     },
 });

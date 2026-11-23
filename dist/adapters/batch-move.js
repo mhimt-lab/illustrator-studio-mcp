@@ -8,7 +8,6 @@ import { defineBatchStep } from './batch-step-contract.js';
 import { MOVE_OBJECT_TO_LAYER_BATCH_NEXT_CALL } from './batch-step-next-call.js';
 export const BATCH_MOVE_OPERATION = MOVE_OBJECT_TO_LAYER_OPERATION;
 export const BATCH_MOVE_STEP_COUNT = 2;
-export const BATCH_MOVE_VERSION = '30.8.2';
 export const BATCH_MOVE_RESULT_BUDGET_BYTES = 150_000;
 export const BATCH_MOVE_BLOCKERS = [
     'source_layer_hidden', 'source_ancestor_hidden', 'source_layer_locked', 'source_ancestor_locked',
@@ -144,11 +143,9 @@ export function batchMovePlanIssue(plans) {
 }
 export const BATCH_MOVE_SCRIPT = `
 var BATCH_MOVE_STEP_COUNT = ${BATCH_MOVE_STEP_COUNT};
-var BATCH_MOVE_VERSION = ${JSON.stringify(BATCH_MOVE_VERSION)};
 var BATCH_MOVE_RESULT_BUDGET_BYTES = ${BATCH_MOVE_RESULT_BUDGET_BYTES};
 
 function batchMoveProfile(document, context) {
-  if (context.appVersion !== BATCH_MOVE_VERSION) throw mutationError("preflight_failed", "Layer-move batch requires measured Illustrator " + BATCH_MOVE_VERSION + ".");
   if (context.colorSpace !== "RGB" || document.documentColorSpace !== DocumentColorSpace.RGB) {
     throw mutationError("preflight_failed", "Layer-move batch supports RGB documents only.");
   }

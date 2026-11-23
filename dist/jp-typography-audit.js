@@ -1,5 +1,10 @@
 import { z } from 'zod';
+import { assertShapeExtraSourceUnchanged, judgeShapeExtraFrame, jpAuditLooseLineSchema, jpAuditSettingCombinationSchema, looseLineEvidenceSchema, settingCombinationEvidenceSchema, shapeExtraInputError, shapeMeasurementSchema, } from './jp-loose-line-audit.js';
+import { frameExtentEvidenceSchema, judgeSettingProfileFrame, jpAuditSettingProfileSchema, settingMismatchEvidenceSchema, settingProfilePolicyError, settingProfilePresetReport, settingProfileResultSchema, settingProfileRulesRun, } from './jp-setting-profile-audit.js';
 import { documentContextSchema } from './mutation-result-schema-core.js';
+import { groupFindings } from './jp-audit-grouping.js';
+import { evaluateLatinBodyFrame, LATIN_DEFERRED_REASON, LATIN_DEFERRED_RULES, LATIN_FINDING_RULES, LATIN_RULE_META, LATIN_RULES, LATIN_SKIP_REASONS, latinBodyNeeds, latinBodyPolicyError, latinBodyResultSchema, } from './latin-body-audit.js';
+import { breaksCluster, clusterAt, clusterBefore, countCharacters, isBreakUnit, isJapanese } from './typography-text.js';
 export const JP_AUDIT_LIMITS = { frames: 200, characters: 20_000, lines: 2_000, paragraphs: 2_000, targets: 50, findings: 500,
     terms: 100 };
 export const JLREQ_CLASS_MEMBERS = {
@@ -63,12 +68,6 @@ function relaxed(codePoint, relaxations) {
 }
 const HALFWIDTH_PUNCTUATION = new Set([0x28, 0x29, 0x5B, 0x5D, 0x7B, 0x7D, 0x21, 0x3F, 0x3A, 0x3B, 0x2E, 0x2C,
     0xFF61, 0xFF62, 0xFF63, 0xFF64, 0xFF65]);
-function isJapanese(codePoint) {
-    return (codePoint >= 0x3000 && codePoint <= 0x30FF) || (codePoint >= 0x31F0 && codePoint <= 0x31FF) ||
-        (codePoint >= 0x3400 && codePoint <= 0x4DBF) || (codePoint >= 0x4E00 && codePoint <= 0x9FFF) ||
-        (codePoint >= 0xF900 && codePoint <= 0xFAFF) || (codePoint >= 0xFF01 && codePoint <= 0xFF60) ||
-        (codePoint >= 0xFF66 && codePoint <= 0xFF9F) || (codePoint >= 0x20000 && codePoint <= 0x3FFFF);
-}
 function isDigit(codePoint) {
     return CLASS_OF.get(foldFullWidth(codePoint)) === 'cl-24';
 }
@@ -76,75 +75,54 @@ function isNumeralSeparator(codePoint) {
     const folded = foldFullWidth(codePoint);
     return folded === 0x2C || folded === 0x2E;
 }
-const isHigh = (unit) => unit >= 0xD800 && unit <= 0xDBFF;
-const isLow = (unit) => unit >= 0xDC00 && unit <= 0xDFFF;
-function continuationLengthAt(text, index) {
-    const unit = text.charCodeAt(index);
-    if ((unit >= 0xFE00 && unit <= 0xFE0F) || unit === 0x3099 || unit === 0x309A)
-        return 1;
-    if (unit === 0xDB40) {
-        const next = text.charCodeAt(index + 1);
-        if (next >= 0xDD00 && next <= 0xDDEF)
-            return 2;
-    }
-    return 0;
-}
-function continuationLengthBefore(text, end) {
-    if (end >= 1) {
-        const unit = text.charCodeAt(end - 1);
-        if ((unit >= 0xFE00 && unit <= 0xFE0F) || unit === 0x3099 || unit === 0x309A)
-            return 1;
-        if (end >= 2 && unit >= 0xDD00 && unit <= 0xDDEF && text.charCodeAt(end - 2) === 0xDB40)
-            return 2;
-    }
-    return 0;
-}
-function clusterBefore(text, end) {
-    let baseEnd = end;
-    for (let unit = continuationLengthBefore(text, baseEnd); unit > 0; unit = continuationLengthBefore(text, baseEnd))
-        baseEnd -= unit;
-    if (baseEnd <= 0)
-        return null;
-    const last = text.charCodeAt(baseEnd - 1);
-    if (isHigh(last))
-        return null;
-    if (isLow(last)) {
-        if (baseEnd < 2 || !isHigh(text.charCodeAt(baseEnd - 2)))
-            return null;
-        return { start: baseEnd - 2, end, codePoint: text.codePointAt(baseEnd - 2), text: text.slice(baseEnd - 2, end) };
-    }
-    return { start: baseEnd - 1, end, codePoint: last, text: text.slice(baseEnd - 1, end) };
-}
-function clusterAt(text, start) {
-    if (start >= text.length)
-        return null;
-    const first = text.charCodeAt(start);
-    if (isLow(first) || continuationLengthAt(text, start) > 0)
-        return null;
-    let end = start + 1;
-    if (isHigh(first)) {
-        if (!isLow(text.charCodeAt(start + 1)))
-            return null;
-        end = start + 2;
-    }
-    for (let unit = continuationLengthAt(text, end); unit > 0; unit = continuationLengthAt(text, end))
-        end += unit;
-    return { start, end, codePoint: text.codePointAt(start), text: text.slice(start, end) };
-}
-function breaksCluster(text, offset) {
-    if (offset <= 0 || offset >= text.length)
-        return false;
-    return (isHigh(text.charCodeAt(offset - 1)) && isLow(text.charCodeAt(offset))) || continuationLengthAt(text, offset) > 0;
-}
-function isBreakUnit(text, index) {
-    const unit = text.charCodeAt(index);
-    return unit === 0x0D || unit === 0x0A || unit === 0x03;
-}
 export const JUSTIFY_BODY_SPACING_ATTRIBUTES = ['minimum_word_spacing', 'desired_word_spacing', 'maximum_word_spacing',
     'minimum_letter_spacing', 'desired_letter_spacing', 'maximum_letter_spacing', 'minimum_glyph_scaling', 'desired_glyph_scaling',
     'maximum_glyph_scaling'];
 const HOST_SPACING_FIELDS = ['minimumWordSpacing', 'desiredWordSpacing', 'maximumWordSpacing', 'minimumLetterSpacing',
     'desiredLetterSpacing', 'maximumLetterSpacing', 'minimumGlyphScaling', 'desiredGlyphScaling', 'maximumGlyphScaling'];
+const SCOPE_DIGEST_SOURCE = `
+function jpAuditDigest(uuids) {
+  var first = 2166136261;
+  var second = 5381;
+  var hex = function (value) { var text = value.toString(16); while (text.length < 8) text = "0" + text; return text; };
+  for (var index = 0; index < uuids.length; index++) {
+    var text = uuids[index] + "\\n";
+    for (var position = 0; position < text.length; position++) {
+      var code = text.charCodeAt(position);
+      first = (first ^ code) >>> 0;
+      first = (first + (first << 1) + (first << 4) + (first << 7) + (first << 8) + (first << 24)) >>> 0;
+      second = (((second << 5) + second) ^ code) >>> 0;
+    }
+  }
+  return hex(first) + hex(second);
+}
+`;
+export function scopeUuidDigest(uuids) {
+    let first = 2166136261;
+    let second = 5381;
+    const hex = (value) => value.toString(16).padStart(8, '0');
+    for (const uuid of uuids) {
+        const text = `${uuid}\n`;
+        for (let position = 0; position < text.length; position += 1) {
+            const code = text.charCodeAt(position);
+            first = (first ^ code) >>> 0;
+            first = (first + (first << 1) + (first << 4) + (first << 7) + (first << 8) + (first << 24)) >>> 0;
+            second = (((second << 5) + second) ^ code) >>> 0;
+        }
+    }
+    return hex(first) + hex(second);
+}
+export function wholePageScopeDigest(host) {
+    if ((host.startIndex ?? 0) !== 0 || (host.nextIndex ?? null) !== null)
+        return null;
+    const entries = [...host.frames, ...host.skipped];
+    if (entries.length !== host.framesInScope || entries.some((entry) => entry.index === undefined))
+        return null;
+    const ordered = entries.sort((left, right) => left.index - right.index);
+    if (ordered.some((entry, position) => entry.index !== position))
+        return null;
+    return scopeUuidDigest(ordered.map((entry) => entry.uuid));
+}
 export const AUDIT_JAPANESE_TYPOGRAPHY_SCRIPT = `
 var JP_AUDIT_MAX_FRAMES = ${JP_AUDIT_LIMITS.frames};
 var JP_AUDIT_MAX_CHARACTERS = ${JP_AUDIT_LIMITS.characters};
@@ -152,6 +130,7 @@ var JP_AUDIT_MAX_LINES = ${JP_AUDIT_LIMITS.lines};
 var JP_AUDIT_MAX_PARAGRAPHS = ${JP_AUDIT_LIMITS.paragraphs};
 var JP_AUDIT_SPACING_FIELDS = ${JSON.stringify(HOST_SPACING_FIELDS)};
 
+${SCOPE_DIGEST_SOURCE}
 function jpAuditFail(code, detail) {
   detail.code = code;
   throw new Error("MCP_ERROR:" + stringifyJson(detail));
@@ -223,6 +202,24 @@ function jpAuditJustifyBody(attributes) {
   } catch (justifyError) { return { error: "paragraph_attribute_unreadable" }; }
 }
 
+/** Hyphenation (policy latin_body_v1), read apart so that a failure here never hides the other values; Node checks the type. */
+function jpAuditLatinBody(attributes) {
+  try { return { hyphenation: attributes.hyphenation }; }
+  catch (latinBodyError) { return { error: "paragraph_attribute_unreadable" }; }
+}
+
+/**
+ * kinsoku and mojikumi are read apart. A paragraph whose kinsoku is None or whose mojikumi is "none" reads as error 9563 on the host (#841 P0):
+ * that is the value "none" (#871), not an unreadable paragraph. Any other failure goes up to the caller as before.
+ */
+function jpAuditSettingName(attributes, key) {
+  try { return String(attributes[key]); }
+  catch (settingError) {
+    if (settingError && settingError.number === 9563) return "none";
+    throw settingError;
+  }
+}
+
 /**
  * Two measured exceptions are kept as values, every other failure is paragraph_unreadable: the attributes of a
  * zero-length paragraph throw "Illegal Argument", and after a trailing \\r the last paragraph item throws
@@ -246,10 +243,12 @@ function jpAuditParagraphs(collection, count, contents) {
       start = paragraph.start;
       end = paragraph.end;
       var attributes = paragraph.paragraphAttributes;
-      var record = { start: start, end: end, kinsoku: String(attributes.kinsoku),
-        mojikumi: String(attributes.mojikumi), burasagariType: String(attributes.burasagariType),
+      var kinsoku = jpAuditSettingName(attributes, "kinsoku");
+      var mojikumi = jpAuditSettingName(attributes, "mojikumi");
+      var record = { start: start, end: end, kinsoku: kinsoku, mojikumi: mojikumi, burasagariType: String(attributes.burasagariType),
         bunriKinshi: attributes.bunriKinshi, kinsokuOrder: String(attributes.kinsokuOrder) };
       if (params.readJustifyBody === true) record.justifyBody = jpAuditJustifyBody(attributes);
+      if (params.readLatinBody === true) record.latinBody = jpAuditLatinBody(attributes);
       out.push(record);
     } catch (paragraphError) {
       var empty = typeof start === "number" && start === end && jpAuditThrownMessage(paragraphError) === "Illegal Argument";
@@ -262,7 +261,14 @@ function jpAuditParagraphs(collection, count, contents) {
 var jpAuditContext = requireDocumentForRead(params.expectedDocumentKey);
 var jpAuditDocument = app.activeDocument;
 var jpAuditSavedBefore = jpAuditDocument.saved;
-// The whole-document scope is read by index up to the frame limit; frames past it are counted, never enumerated.
+// The whole-document scope is read by index, one page at a time (a page ends at the frame, character, line or paragraph limit); frames past
+// the page are counted, never read. startIndex is where this page starts in the scope (0 for the first page).
+var jpAuditStart = typeof params.startIndex === "number" ? params.startIndex : 0;
+// A number when a second read of character attributes follows: the characters of the frames that read may take are limited, and a page ends before it.
+var jpAuditAttributeBudget = typeof params.attributeBudget === "number" ? params.attributeBudget : null;
+// A soft size for this page (#1071): no frame is added once the page's characters would pass it. The first admitted frame is always taken, and the
+// check is made where a frame is admitted (after every reason to skip it), so a re-read with the same value gives the same page as the first read.
+var jpAuditPageHint = typeof params.pageCharacters === "number" ? params.pageCharacters : null;
 var jpAuditAll = null;
 var jpAuditTargets = [];
 var jpAuditScopeCount;
@@ -276,14 +282,19 @@ if (params.targetUuids === null) {
   }
   jpAuditScopeCount = jpAuditTargets.length;
 }
+if (jpAuditStart < 0 || jpAuditStart > jpAuditScopeCount || (jpAuditStart === jpAuditScopeCount && jpAuditStart > 0)) {
+  jpAuditFail("JP_AUDIT_START_OUT_OF_RANGE", { start: jpAuditStart, count: jpAuditScopeCount });
+}
 var jpAuditFrames = [];
 var jpAuditSkipped = [];
 var jpAuditStop = null;
+var jpAuditNext = null;
 var jpAuditCharacters = 0;
+var jpAuditAttributeCharacters = 0;
 var jpAuditLineTotal = 0;
 var jpAuditParagraphTotal = 0;
-for (var jpAuditFrameIndex = 0; jpAuditFrameIndex < jpAuditScopeCount; jpAuditFrameIndex++) {
-  if (jpAuditFrameIndex >= JP_AUDIT_MAX_FRAMES) { jpAuditStop = "scan_limit"; break; }
+for (var jpAuditFrameIndex = jpAuditStart; jpAuditFrameIndex < jpAuditScopeCount; jpAuditFrameIndex++) {
+  if (jpAuditFrameIndex - jpAuditStart >= JP_AUDIT_MAX_FRAMES) { jpAuditStop = "scan_limit"; jpAuditNext = jpAuditFrameIndex; break; }
   var jpAuditFrame = jpAuditAll === null ? jpAuditTargets[jpAuditFrameIndex] : jpAuditAll[jpAuditFrameIndex];
   var jpAuditUuid = "";
   try { jpAuditUuid = String(jpAuditFrame.uuid); } catch (jpAuditUuidError) { jpAuditUuid = ""; }
@@ -314,44 +325,78 @@ for (var jpAuditFrameIndex = 0; jpAuditFrameIndex < jpAuditScopeCount; jpAuditFr
       if (jpAuditSkip === null && jpAuditKind === "point" && jpAuditOrientation === "vertical") jpAuditSkip = "vertical_point_text";
     }
   } catch (jpAuditFrameError) { jpAuditSkip = "unreadable_frame"; }
-  if (jpAuditSkip !== null) { jpAuditSkipped.push({ uuid: jpAuditUuid, name: jpAuditFrameName, reason: jpAuditSkip }); continue; }
+  if (jpAuditSkip !== null) { jpAuditSkipped.push({ index: jpAuditFrameIndex, uuid: jpAuditUuid, name: jpAuditFrameName, reason: jpAuditSkip }); continue; }
   var jpAuditContents;
   try { jpAuditContents = String(jpAuditFrame.contents); }
-  catch (jpAuditContentsError) { jpAuditSkipped.push({ uuid: jpAuditUuid, name: jpAuditFrameName, reason: "unreadable_frame" }); continue; }
-  if (jpAuditContents.length === 0) { jpAuditSkipped.push({ uuid: jpAuditUuid, name: jpAuditFrameName, reason: "empty" }); continue; }
-  if (jpAuditCharacters + jpAuditContents.length > JP_AUDIT_MAX_CHARACTERS) { jpAuditStop = "scan_limit"; break; }
+  catch (jpAuditContentsError) { jpAuditSkipped.push({ index: jpAuditFrameIndex, uuid: jpAuditUuid, name: jpAuditFrameName, reason: "unreadable_frame" }); continue; }
+  if (jpAuditContents.length === 0) { jpAuditSkipped.push({ index: jpAuditFrameIndex, uuid: jpAuditUuid, name: jpAuditFrameName, reason: "empty" }); continue; }
+  // A frame that alone is past a limit of one read can never fit a page: it is reported as too_large (never dropped) and the scan goes on.
+  if (jpAuditContents.length > JP_AUDIT_MAX_CHARACTERS) { jpAuditSkipped.push({ index: jpAuditFrameIndex, uuid: jpAuditUuid, name: jpAuditFrameName, reason: "too_large" }); continue; }
+  var jpAuditCountsForAttributes = jpAuditAttributeBudget !== null && jpAuditContents.length <= jpAuditAttributeBudget;
+  if (jpAuditCharacters + jpAuditContents.length > JP_AUDIT_MAX_CHARACTERS ||
+      (jpAuditCountsForAttributes && jpAuditAttributeCharacters + jpAuditContents.length > jpAuditAttributeBudget)) {
+    jpAuditStop = "scan_limit"; jpAuditNext = jpAuditFrameIndex; break;
+  }
   var jpAuditLineCount = -1;
   try { jpAuditLineCount = Number(jpAuditFrame.lines.length); } catch (jpAuditCountError) { jpAuditLineCount = -1; }
-  if (jpAuditLineCount > 0 && jpAuditLineTotal + jpAuditLineCount > JP_AUDIT_MAX_LINES) { jpAuditStop = "line_cap"; break; }
+  if (jpAuditLineCount > JP_AUDIT_MAX_LINES) { jpAuditSkipped.push({ index: jpAuditFrameIndex, uuid: jpAuditUuid, name: jpAuditFrameName, reason: "too_large" }); continue; }
+  if (jpAuditLineCount > 0 && jpAuditLineTotal + jpAuditLineCount > JP_AUDIT_MAX_LINES) { jpAuditStop = "line_cap"; jpAuditNext = jpAuditFrameIndex; break; }
   var jpAuditParagraphCollection = null;
   var jpAuditParagraphCount = 0;
   try { jpAuditParagraphCollection = jpAuditFrame.paragraphs; jpAuditParagraphCount = Number(jpAuditParagraphCollection.length); }
   catch (jpAuditParagraphCountError) { jpAuditParagraphCollection = null; }
+  if (jpAuditParagraphCollection !== null && jpAuditParagraphCount > JP_AUDIT_MAX_PARAGRAPHS) {
+    jpAuditSkipped.push({ index: jpAuditFrameIndex, uuid: jpAuditUuid, name: jpAuditFrameName, reason: "too_large" });
+    continue;
+  }
   if (jpAuditParagraphCollection !== null && jpAuditParagraphTotal + jpAuditParagraphCount > JP_AUDIT_MAX_PARAGRAPHS) {
     jpAuditStop = "paragraph_cap";
+    jpAuditNext = jpAuditFrameIndex;
     break;
+  }
+  if (jpAuditPageHint !== null && jpAuditFrames.length > 0 && jpAuditCharacters + jpAuditContents.length > jpAuditPageHint) {
+    jpAuditStop = "scan_limit"; jpAuditNext = jpAuditFrameIndex; break;
   }
   if (jpAuditParagraphCollection !== null) jpAuditParagraphTotal += jpAuditParagraphCount;
   jpAuditCharacters += jpAuditContents.length;
+  if (jpAuditCountsForAttributes) jpAuditAttributeCharacters += jpAuditContents.length;
   var jpAuditLineRecords = null;
   if (jpAuditLineCount >= 0) {
     jpAuditLineTotal += jpAuditLineCount;
     try { jpAuditLineRecords = jpAuditLines(jpAuditFrame); } catch (jpAuditLinesError) { jpAuditLineRecords = null; }
   }
-  jpAuditFrames.push({ uuid: jpAuditUuid, name: jpAuditFrameName, kind: jpAuditKind, orientation: jpAuditOrientation,
+  jpAuditFrames.push({ index: jpAuditFrameIndex, uuid: jpAuditUuid, name: jpAuditFrameName, kind: jpAuditKind, orientation: jpAuditOrientation,
     contents: jpAuditContents, lines: jpAuditLineRecords,
     paragraphs: jpAuditParagraphs(jpAuditParagraphCollection, jpAuditParagraphCount, jpAuditContents) });
 }
+// A digest of the scope's UUIDs in order, read only when there is more than one page (a continuation, or a page that left frames): Node binds
+// the next page's cursor to it, so a frame added, removed or moved between two pages is detected, not silently skipped. The targets are known to Node.
+var jpAuditScopeDigest = null;
+if (jpAuditAll !== null && (jpAuditStart > 0 || jpAuditNext !== null)) {
+  var jpAuditScopeUuids = [];
+  for (var jpAuditScopeIndex = 0; jpAuditScopeIndex < jpAuditScopeCount; jpAuditScopeIndex++) {
+    var jpAuditScopeUuid = "";
+    try { jpAuditScopeUuid = String(jpAuditAll[jpAuditScopeIndex].uuid); } catch (jpAuditScopeUuidError) { jpAuditScopeUuid = ""; }
+    jpAuditScopeUuids.push(jpAuditScopeUuid);
+  }
+  jpAuditScopeDigest = jpAuditDigest(jpAuditScopeUuids);
+}
 var result = { document: jpAuditContext, savedBefore: jpAuditSavedBefore, savedAfter: jpAuditDocument.saved,
-  framesInScope: jpAuditScopeCount, stop: jpAuditStop, frames: jpAuditFrames, skipped: jpAuditSkipped };
+  framesInScope: jpAuditScopeCount, startIndex: jpAuditStart, nextIndex: jpAuditNext, scopeDigest: jpAuditScopeDigest, stop: jpAuditStop,
+  frames: jpAuditFrames, skipped: jpAuditSkipped };
 `;
-export const JP_AUDIT_SKIP_REASONS = ['path_text', 'threaded', 'locked_or_hidden', 'vertical_point_text', 'empty', 'unreadable_frame'];
-export const JP_AUDIT_INCOMPLETE_REASONS = ['skipped_frames', 'scan_limit', 'line_cap', 'paragraph_cap', 'finding_limit', 'unreadable_line',
-    'unreadable_paragraph', 'unreadable_paragraph_attribute', 'overset_paragraph'];
+export const JP_AUDIT_SKIP_REASONS = ['path_text', 'threaded', 'locked_or_hidden', 'vertical_point_text', 'empty', 'unreadable_frame', 'too_large'];
+export const JP_AUDIT_INCOMPLETE_REASONS = ['skipped_frames', 'scan_limit', 'line_cap', 'paragraph_cap', 'finding_limit', 'response_limit', 'unreadable_line',
+    'unreadable_paragraph', 'unreadable_paragraph_attribute', 'overset_paragraph', 'paragraph_shape_unmeasured', 'rule_skipped',
+    'setting_profile_unmeasured'];
 export const JP_AUDIT_RULES = ['JP_LINE_END_PROHIBITED', 'JP_LINE_START_PROHIBITED', 'JP_UNBREAKABLE_SPLIT',
     'JP_PROTECTED_TERM_SPLIT', 'JP_HALFWIDTH_PUNCTUATION', 'JP_OVERSET', 'JP_JUSTIFY_LAST_LINE', 'JP_SPACING_RANGE',
-    'JP_SHORT_LAST_LINE', 'JP_SHORT_LINE_HEAD'];
-export const JP_AUDIT_POLICIES = ['jp_line_break_v1', 'jp_justify_body_v1', 'jp_paragraph_shape_v1'];
+    'JP_SHORT_LAST_LINE', 'JP_SHORT_LINE_HEAD', 'JP_LOOSE_LINE', 'JP_PARAGRAPH_SETTING_COMBINATION', 'JP_SETTING_PROFILE_MISMATCH',
+    'JP_BETA_FRAME_EXTENT'];
+export const JP_AUDIT_RESULT_FORMATS = ['grouped', 'findings'];
+export const JP_AUDIT_POLICIES = ['jp_line_break_v1', 'jp_justify_body_v1', 'jp_paragraph_shape_v1', 'latin_body_v1', 'jp_setting_profile_v1'];
+export const JP_AUDIT_RESPONSE_BYTES = { default: 30_000, max: 80_000 };
+export const JP_AUDIT_CURSOR_RESERVE_BYTES = 2_048;
 export const JUSTIFICATIONS = ['LEFT', 'CENTER', 'RIGHT', 'FULLJUSTIFY', 'FULLJUSTIFYLASTLINELEFT', 'FULLJUSTIFYLASTLINECENTER',
     'FULLJUSTIFYLASTLINERIGHT'];
 export const LAST_LINE_ALIGNMENTS = ['left', 'center', 'right', 'justify'];
@@ -370,13 +415,18 @@ const skipEntrySchema = z.strictObject({
     name: z.string().max(255),
     reason: z.enum(JP_AUDIT_SKIP_REASONS),
 });
+const hostSkipEntrySchema = skipEntrySchema.extend({ index: z.number().int().nonnegative().optional() });
 export const jpAuditHostDataSchema = z.strictObject({
     document: documentContextSchema,
     savedBefore: z.boolean(),
     savedAfter: z.boolean(),
     framesInScope: z.number().int().nonnegative(),
+    startIndex: z.number().int().nonnegative().default(0),
+    nextIndex: z.number().int().positive().nullable().default(null),
+    scopeDigest: z.string().regex(/^[0-9a-f]{16}$/u).nullable().default(null),
     stop: z.enum(['scan_limit', 'line_cap', 'paragraph_cap']).nullable(),
     frames: z.array(z.strictObject({
+        index: z.number().int().nonnegative().optional(),
         uuid: z.string().max(255),
         name: z.string().max(255),
         kind: z.enum(['point', 'area']),
@@ -392,13 +442,17 @@ export const jpAuditHostDataSchema = z.strictObject({
                 justifyBody: z.union([
                     z.strictObject({ justification: z.string(), spacing: z.array(z.unknown()) }),
                     z.strictObject({ error: z.literal('paragraph_attribute_unreadable') }),
+                ]).optional(),
+                latinBody: z.union([
+                    z.strictObject({ hyphenation: z.unknown() }),
+                    z.strictObject({ error: z.literal('paragraph_attribute_unreadable') }),
                 ]).optional() }),
             z.strictObject({ start: z.unknown(), end: z.unknown(), empty: z.literal(true) }),
             z.strictObject({ trailingEmpty: z.literal(true) }),
             z.strictObject({ error: z.literal('paragraph_unreadable') }),
         ])).max(JP_AUDIT_LIMITS.paragraphs).nullable(),
     })).max(JP_AUDIT_LIMITS.frames),
-    skipped: z.array(skipEntrySchema).max(JP_AUDIT_LIMITS.frames),
+    skipped: z.array(hostSkipEntrySchema).max(JP_AUDIT_LIMITS.frames),
 });
 export const jpAuditProtectedTermSchema = z.strictObject({ text: z.string().min(1).max(64) });
 const spacingBoundSchema = z.strictObject({ at_least: z.number().min(-1000).max(1000).optional(),
@@ -416,7 +470,11 @@ export const jpAuditParagraphShapeSchema = z.strictObject({
             .max(Object.keys(JLREQ_CLASS_MEMBERS).length),
     }).optional(),
     short_last_line_max_characters: z.number().int().min(1).max(100).optional(),
+    loose_line: jpAuditLooseLineSchema.optional(),
+    setting_combination: jpAuditSettingCombinationSchema.optional(),
 });
+export { latinBodySchema as jpAuditLatinBodySchema } from './latin-body-audit.js';
+export { jpAuditSettingProfileSchema };
 const currentStateSchema = z.strictObject({
     kinsoku: z.string(),
     mojikumi: z.string(),
@@ -424,40 +482,98 @@ const currentStateSchema = z.strictObject({
     bunri_kinshi: z.boolean().nullable(),
     kinsoku_order: z.string(),
 });
-const findingSchema = z.strictObject({
-    rule_id: z.enum(JP_AUDIT_RULES),
-    severity: z.enum(['error', 'warning']),
-    determinism: z.enum(['deterministic', 'heuristic']),
-    source_class: z.enum(['jlreq', 'adobe', 'house_rule']),
-    source_ref: z.string(),
-    target: z.strictObject({
-        uuid: z.string().max(255),
-        name: z.string().max(255),
-        kind: z.enum(['point', 'area']),
-        orientation: z.enum(['horizontal', 'vertical']),
+const jpAuditNoBreakPlanCallSchema = z.strictObject({
+    tool: z.literal('illustrator_set_no_break'),
+    arguments: z.strictObject({
+        expected_document_key: z.string().min(1).max(16_384),
+        target_uuid: z.string().min(1).max(255),
+        start: z.number().int().safe().nonnegative(),
+        end: z.number().int().safe().nonnegative(),
+        no_break: z.literal(true),
+        apply: z.literal(false),
     }),
+});
+const NO_BREAK_RULES = new Set(['JP_UNBREAKABLE_SPLIT', 'JP_PROTECTED_TERM_SPLIT']);
+export const JP_AUDIT_NO_BREAK_NOTE = 'next_call is a plan call only (apply false); illustrator_set_no_break refuses, with a reason, any target outside its measured profile (layer-direct, no manual kerning or tab stops, supported justification, and so on). Vertical text gets no next_call.';
+function noBreakPlanCall(documentKey, targetUuid, range) {
+    return { tool: 'illustrator_set_no_break', arguments: { expected_document_key: documentKey, target_uuid: targetUuid,
+            start: range.start, end: range.end, no_break: true, apply: false } };
+}
+const evidenceLineShape = {
+    line_start: hostOffset.nullable(),
+    line_end: hostOffset.nullable(),
+    character: z.string().nullable(),
+    character_class: z.string().nullable(),
+    prev_line_tail: z.string().nullable(),
+    next_line_head: z.string().nullable(),
+};
+const evidenceExtraShape = {
+    term: z.string().optional(),
+    justification: z.string().optional(),
+    expected_last_line: z.string().optional(),
+    spacing: z.array(z.strictObject({ attribute: z.string(), value: z.number(),
+        at_least: z.number().nullable(), at_most: z.number().nullable() })).optional(),
+    loose_line: looseLineEvidenceSchema.optional(),
+    setting_combination: settingCombinationEvidenceSchema.optional(),
+    setting_mismatch: settingMismatchEvidenceSchema.optional(),
+    frame_extent: frameExtentEvidenceSchema.optional(),
+    last_line_characters: z.number().int().nonnegative().optional(),
+    head_characters: z.number().int().positive().optional(),
+    max_characters: z.number().int().positive().optional(),
+    min_characters: z.number().int().positive().optional(),
+    hyphenation: z.boolean().optional(),
+    consecutive_hyphen_lines: z.number().int().positive().optional(),
+    max_consecutive_hyphens: z.number().int().positive().optional(),
+    excerpt: z.string().optional(),
+};
+const findingRuleId = z.enum([...JP_AUDIT_RULES, ...LATIN_FINDING_RULES]);
+const findingTargetSchema = z.strictObject({
+    uuid: z.string().max(255),
+    name: z.string().max(255),
+    kind: z.enum(['point', 'area']),
+    orientation: z.enum(['horizontal', 'vertical']),
+});
+const findingSchema = z.strictObject({
+    rule_id: findingRuleId,
+    severity: z.enum(['error', 'warning', 'info']),
+    determinism: z.enum(['deterministic', 'heuristic']),
+    source_class: z.enum(['jlreq', 'adobe', 'house_rule', 'convention']),
+    source_ref: z.string(),
+    target: findingTargetSchema,
     range: z.strictObject({ start: hostOffset, end: hostOffset }),
     line_index: z.number().int().nonnegative().nullable(),
-    evidence: z.strictObject({
-        line_start: hostOffset.nullable(),
-        line_end: hostOffset.nullable(),
-        character: z.string().nullable(),
-        character_class: z.string().nullable(),
-        prev_line_tail: z.string().nullable(),
-        next_line_head: z.string().nullable(),
-        term: z.string().optional(),
-        justification: z.string().optional(),
-        expected_last_line: z.string().optional(),
-        spacing: z.array(z.strictObject({ attribute: z.string(), value: z.number(),
-            at_least: z.number().nullable(), at_most: z.number().nullable() })).optional(),
-        last_line_characters: z.number().int().nonnegative().optional(),
-        head_characters: z.number().int().positive().optional(),
-        max_characters: z.number().int().positive().optional(),
-    }),
+    evidence: z.strictObject({ ...evidenceLineShape, ...evidenceExtraShape }),
     current_state: currentStateSchema.nullable(),
     recommendation: z.string(),
     can_auto_fix: z.literal(false),
     required_capability: z.enum(['set_no_break']).nullable(),
+    next_call: jpAuditNoBreakPlanCallSchema.optional(),
+});
+const groupedRuleSchema = z.strictObject({
+    rule_id: findingRuleId,
+    severity: z.enum(['error', 'warning', 'info']),
+    determinism: z.enum(['deterministic', 'heuristic']),
+    source_class: z.enum(['jlreq', 'adobe', 'house_rule', 'convention']),
+    source_ref: z.string(),
+    recommendation: z.string(),
+    can_auto_fix: z.literal(false),
+    required_capability: z.enum(['set_no_break']).nullable(),
+});
+const groupedIndex = z.number().int().nonnegative();
+const groupedFindingsSchema = z.strictObject({
+    rules: z.array(groupedRuleSchema).max(64),
+    frames: z.array(findingTargetSchema).max(JP_AUDIT_LIMITS.findings),
+    states: z.array(currentStateSchema).max(JP_AUDIT_LIMITS.findings),
+    groups: z.array(z.strictObject({
+        rule: groupedIndex,
+        frame: groupedIndex,
+        state: groupedIndex.nullable(),
+        evidence: z.strictObject({ line_start: evidenceLineShape.line_start.optional(), line_end: evidenceLineShape.line_end.optional(),
+            character: evidenceLineShape.character.optional(), character_class: evidenceLineShape.character_class.optional(),
+            prev_line_tail: evidenceLineShape.prev_line_tail.optional(), next_line_head: evidenceLineShape.next_line_head.optional(),
+            ...evidenceExtraShape }),
+        ranges: z.array(z.tuple([hostOffset, hostOffset, groupedIndex.nullable(), groupedIndex])).min(1).max(JP_AUDIT_LIMITS.findings),
+    })).max(JP_AUDIT_LIMITS.findings),
 });
 const observedValueSchema = z.strictObject({ value: z.union([z.string(), z.number()]), paragraph_count: z.number().int().positive() });
 const JUSTIFY_BODY_ATTRIBUTES = ['justification', ...JUSTIFY_BODY_SPACING_ATTRIBUTES];
@@ -479,26 +595,51 @@ export const jpAuditResultSchema = z.strictObject({
         host_new_document_default: z.record(z.string(), z.union([z.string(), z.number()])),
         host_default_source: z.string(),
     }).nullable(),
-    paragraph_shape: z.strictObject({ rules_run: z.array(z.string()) }).nullable(),
+    paragraph_shape: z.strictObject({ rules_run: z.array(z.string()), measurement: shapeMeasurementSchema.optional() }).nullable(),
+    latin_body: latinBodyResultSchema.optional(),
+    setting_profile: settingProfileResultSchema.optional(),
     document: documentContextSchema,
     coverage: z.strictObject({
         frames_in_scope: z.number().int().nonnegative(),
         frames_audited: z.number().int().nonnegative(),
         frames_skipped: z.array(skipEntrySchema),
+        page: z.strictObject({
+            first_frame_index: z.number().int().nonnegative(),
+            next_frame_index: z.number().int().positive().nullable(),
+        }),
     }),
     incomplete: z.array(z.enum(JP_AUDIT_INCOMPLETE_REASONS)),
-    findings: z.array(findingSchema).max(JP_AUDIT_LIMITS.findings),
+    notes: z.array(z.string()).max(1),
+    format: z.enum(JP_AUDIT_RESULT_FORMATS),
+    findings: z.array(findingSchema).max(JP_AUDIT_LIMITS.findings).optional(),
+    grouped: groupedFindingsSchema.optional(),
+    next_cursor: z.string().min(1).max(32_768).optional(),
 });
-export function jpAuditPolicyError(policies, justifyBody, paragraphShape) {
+export function jpAuditPolicyError(policies, justifyBody, paragraphShape, latinBody, protectedTermCount = 0, settingProfile) {
     if (new Set(policies).size !== policies.length)
         return 'policy must not repeat an entry.';
+    if (policies.includes('latin_body_v1')) {
+        const latinError = latinBodyPolicyError(latinBody, protectedTermCount);
+        if (latinError !== null)
+            return latinError;
+    }
+    else if (latinBody !== undefined) {
+        return 'latin_body is used only with policy latin_body_v1.';
+    }
+    const profileError = settingProfilePolicyError(policies.includes('jp_setting_profile_v1'), settingProfile);
+    if (profileError !== null)
+        return profileError;
     if (!policies.includes('jp_paragraph_shape_v1')) {
         if (paragraphShape !== undefined)
             return 'paragraph_shape is used only with policy jp_paragraph_shape_v1.';
     }
     else if (paragraphShape === undefined || (paragraphShape.short_line_head === undefined &&
-        paragraphShape.short_last_line_max_characters === undefined)) {
-        return 'policy jp_paragraph_shape_v1 needs paragraph_shape with at least one of short_line_head or short_last_line_max_characters; no threshold is assumed.';
+        paragraphShape.short_last_line_max_characters === undefined && paragraphShape.loose_line === undefined &&
+        paragraphShape.setting_combination === undefined)) {
+        return 'policy jp_paragraph_shape_v1 needs paragraph_shape with at least one of short_line_head, short_last_line_max_characters, loose_line or setting_combination; no threshold is assumed.';
+    }
+    else if (shapeExtraInputError(paragraphShape) !== null) {
+        return shapeExtraInputError(paragraphShape);
     }
     else if (paragraphShape.short_line_head !== undefined &&
         new Set(paragraphShape.short_line_head.punctuation_classes).size !== paragraphShape.short_line_head.punctuation_classes.length) {
@@ -525,7 +666,7 @@ export function jpAuditPolicyError(policies, justifyBody, paragraphShape) {
     }
     return null;
 }
-const RULE_ORDER = Object.fromEntries(JP_AUDIT_RULES.map((rule, index) => [rule, index]));
+const RULE_ORDER = new Map([...JP_AUDIT_RULES, ...LATIN_FINDING_RULES].map((rule, index) => [rule, index]));
 const RULE_META = {
     JP_LINE_END_PROHIBITED: { severity: 'error', source_class: 'jlreq', source_ref: 'JLReq 3.1.8', required_capability: null,
         recommendation: 'An opening bracket ends the line. Move it to the next line by changing the frame width, tracking, or text; Illustrator\'s own kinsoku setting for the paragraph is in current_state.' },
@@ -550,8 +691,16 @@ const RULE_META = {
         recommendation: 'The last line of the paragraph is short. Adjust tracking, frame width or text, then audit again because the line breaks move.' },
     JP_SHORT_LINE_HEAD: { severity: 'warning', source_class: 'house_rule', source_ref: 'paragraph_shape.short_line_head', required_capability: null,
         recommendation: 'A wrapped line starts with a few characters and then punctuation. Adjust tracking, frame width, no-break or text, then audit again because the line breaks move.' },
+    JP_LOOSE_LINE: { severity: 'warning', source_class: 'house_rule', source_ref: 'paragraph_shape.loose_line', required_capability: null,
+        recommendation: 'The characters of a justified, wrapped line are spread apart by more than loose_line allows (measured against the nominal advance, in em; ink bearings are not removed). Adjust tracking, frame width, mojikumi set or text, then audit again because the line breaks move.' },
+    JP_SETTING_PROFILE_MISMATCH: { severity: 'warning', source_class: 'house_rule', source_ref: 'setting_profile.expected', required_capability: null,
+        recommendation: 'A character range or paragraph differs from the value setting_profile.expected names (evidence: attribute, expected, current, current_raw). Change it if the house style requires it; this audit changes nothing.' },
+    JP_BETA_FRAME_EXTENT: { severity: 'warning', source_class: 'adobe', source_ref: 'Adobe mojikumi manual p.08', required_capability: null,
+        recommendation: 'The inner width (horizontal) or height (vertical) of the frame is not a whole number of character advances, so a justified paragraph spreads its lines unevenly. Resize the frame to one of the candidates, then audit again.' },
+    JP_PARAGRAPH_SETTING_COMBINATION: { severity: 'warning', source_class: 'house_rule', source_ref: 'paragraph_shape.setting_combination', required_capability: null,
+        recommendation: 'The paragraph is fully justified with a mojikumi set and kerning method that setting_combination names; the extra space of justification can open unevenly around punctuation. Consider another mojikumi set or kerning method for this paragraph, then audit again.' },
 };
-const RULE_DETERMINISM = { JP_SHORT_LAST_LINE: 'heuristic', JP_SHORT_LINE_HEAD: 'heuristic' };
+const RULE_DETERMINISM = { JP_SHORT_LAST_LINE: 'heuristic', JP_SHORT_LINE_HEAD: 'heuristic', JP_LOOSE_LINE: 'heuristic' };
 function readJustifyBody(paragraph) {
     const raw = paragraph.justifyBody;
     if (raw === undefined || typeof raw.justification !== 'string' || !Array.isArray(raw.spacing) ||
@@ -565,20 +714,9 @@ function readJustifyBody(paragraph) {
         return null;
     return { justification: match[1], spacing: Object.fromEntries(JUSTIFY_BODY_SPACING_ATTRIBUTES.map((attribute, index) => [attribute, normalizeSpacing(values[index])])) };
 }
-function countCharacters(text) {
-    let count = 0;
-    for (let index = 0; index < text.length;) {
-        if (isBreakUnit(text, index)) {
-            index += 1;
-            continue;
-        }
-        const cluster = clusterAt(text, index);
-        if (cluster === null)
-            return null;
-        count += 1;
-        index = cluster.end;
-    }
-    return count;
+function readHyphenation(paragraph) {
+    const raw = paragraph.latinBody;
+    return raw !== undefined && typeof raw.hyphenation === 'boolean' ? raw.hyphenation : null;
 }
 function paragraphStateAt(paragraphs, offset) {
     if (paragraphs === null)
@@ -616,10 +754,12 @@ function paragraphsReadable(frame) {
 function stripBreaks(text) {
     return text.replace(/[\r\n\u0003]/gu, '');
 }
-export function judgeJapaneseTypography(host, policy) {
+export function judgeJapaneseTypographyPage(host, policy) {
     if (host.savedBefore !== host.savedAfter) {
         throw new Error('The document\'s saved state changed during the read-only audit; the read is not reported.');
     }
+    const startIndex = host.startIndex ?? 0;
+    const nextIndex = host.nextIndex ?? null;
     const policies = JP_AUDIT_POLICIES.filter((id) => (policy.policies ?? ['jp_line_break_v1']).includes(id));
     const lineBreak = policies.includes('jp_line_break_v1');
     const justifyBody = policies.includes('jp_justify_body_v1') ? policy.justifyBody ?? null : null;
@@ -628,6 +768,14 @@ export function judgeJapaneseTypography(host, policy) {
     const paragraphShape = policies.includes('jp_paragraph_shape_v1') ? policy.paragraphShape ?? null : null;
     if (policies.includes('jp_paragraph_shape_v1') && paragraphShape === null)
         throw new Error('policy jp_paragraph_shape_v1 needs paragraph_shape.');
+    const latin = policies.includes('latin_body_v1') ? policy.latinBody ?? null : null;
+    if (policies.includes('latin_body_v1') && latin === null)
+        throw new Error('policy latin_body_v1 needs latin_body.');
+    const settingProfile = policies.includes('jp_setting_profile_v1') ? policy.settingProfile ?? null : null;
+    if (policies.includes('jp_setting_profile_v1') && settingProfile === null)
+        throw new Error('policy jp_setting_profile_v1 needs setting_profile.');
+    const latinNeeds = latinBodyNeeds(latin?.rules ?? []);
+    const latinSkips = new Map();
     const observed = new Map(JUSTIFY_BODY_ATTRIBUTES.map((attribute) => [attribute, new Map()]));
     let paragraphsRead = 0;
     const relaxations = new Set(policy.lineStartRelaxations);
@@ -637,6 +785,19 @@ export function judgeJapaneseTypography(host, policy) {
     if (host.stop !== null)
         incomplete.add(host.stop);
     const collected = [];
+    const shapeExtra = paragraphShape !== null && (paragraphShape.loose_line !== undefined || paragraphShape.setting_combination !== undefined);
+    if (policy.paragraphShapeExtra !== undefined) {
+        if (policy.paragraphShapeExtra.document.key !== host.document.key) {
+            throw new Error('The document changed between the two reads of the audit; the read is not reported.');
+        }
+        assertShapeExtraSourceUnchanged(policy.paragraphShapeExtra);
+    }
+    const shapeSkipped = [];
+    const profileSkipped = [];
+    const profileHeights = [];
+    let profileFramesMeasured = 0;
+    let shapeFramesMeasured = 0;
+    let shapeLinesJudged = 0;
     host.frames.forEach((frame, frameOrder) => {
         const contents = frame.contents;
         const target = { uuid: frame.uuid, name: frame.name, kind: frame.kind, orientation: frame.orientation };
@@ -654,15 +815,19 @@ export function judgeJapaneseTypography(host, policy) {
         if (frame.lines === null || lines.some((line) => line === null))
             incomplete.add('unreadable_line');
         const lineAt = (index) => (index === null ? null : lines[index] ?? null);
-        const push = (rule, anchor, range, lineIndex, evidence, stateOffset) => {
+        const push = (rule, anchor, range, lineIndex, evidence, stateOffset, source) => {
             const line = lineAt(lineIndex);
-            collected.push({ frameOrder, anchor, finding: {
-                    rule_id: rule, ...RULE_META[rule], determinism: RULE_DETERMINISM[rule] ?? 'deterministic', target, range, line_index: lineIndex,
-                    evidence: { line_start: line?.start ?? null, line_end: line?.end ?? null, character: null, character_class: null,
-                        prev_line_tail: null, next_line_head: null, ...evidence },
-                    current_state: paragraphStateAt(frame.paragraphs, stateOffset),
-                    can_auto_fix: false,
-                } });
+            const finding = {
+                rule_id: rule, ...RULE_META[rule], ...(source ?? {}), determinism: RULE_DETERMINISM[rule] ?? 'deterministic', target, range, line_index: lineIndex,
+                evidence: { line_start: line?.start ?? null, line_end: line?.end ?? null, character: null, character_class: null,
+                    prev_line_tail: null, next_line_head: null, ...evidence },
+                current_state: paragraphStateAt(frame.paragraphs, stateOffset),
+                can_auto_fix: false,
+            };
+            if (NO_BREAK_RULES.has(rule) && frame.orientation === 'horizontal') {
+                finding.next_call = noBreakPlanCall(host.document.keyShort, frame.uuid, range);
+            }
+            collected.push({ frameOrder, anchor, finding });
         };
         const visibleFromStart = frame.lines !== null && (lines.length === 0 || lines[0]?.start === 0);
         if (frame.lines !== null && !visibleFromStart)
@@ -868,16 +1033,84 @@ export function judgeJapaneseTypography(host, policy) {
                 }
             }
         }
+        if (settingProfile !== null) {
+            const outcome = judgeSettingProfileFrame({ uuid: frame.uuid, name: frame.name, contents, kind: frame.kind, orientation: frame.orientation,
+                rawLines: frame.lines }, policy.paragraphShapeExtra?.frames.find((entry) => entry.uuid === frame.uuid), settingProfile);
+            for (const draft of outcome.findings)
+                push(draft.rule, draft.anchor, draft.range, null, draft.evidence, draft.stateOffset, draft.source);
+            profileSkipped.push(...outcome.skipped);
+            profileHeights.push(...outcome.heights);
+            if (outcome.measured)
+                profileFramesMeasured += 1;
+        }
+        if (shapeExtra) {
+            const outcome = judgeShapeExtraFrame({ uuid: frame.uuid, name: frame.name, contents, rawLines: frame.lines, lines, linesReadable }, policy.paragraphShapeExtra?.frames.find((entry) => entry.uuid === frame.uuid), { looseLine: paragraphShape.loose_line, settingCombination: paragraphShape.setting_combination }, jlreqClassOf);
+            for (const draft of outcome.findings)
+                push(draft.rule, draft.anchor, draft.range, draft.lineIndex, draft.evidence, draft.stateOffset);
+            shapeSkipped.push(...outcome.skipped);
+            shapeLinesJudged += outcome.linesJudged;
+            if (outcome.measured)
+                shapeFramesMeasured += 1;
+        }
+        if (latin !== null) {
+            const latinParagraphs = [];
+            for (const paragraph of frame.paragraphs ?? []) {
+                if (!('kinsoku' in paragraph))
+                    continue;
+                const { start, end } = paragraph;
+                if (typeof start !== 'number' || typeof end !== 'number' || !Number.isInteger(start) || !Number.isInteger(end) || end <= start)
+                    continue;
+                latinParagraphs.push({ start, end,
+                    justification: latinNeeds.justification ? readJustifyBody(paragraph)?.justification ?? null : null,
+                    hyphenation: latinNeeds.hyphenation ? readHyphenation(paragraph) : null });
+            }
+            const judged = evaluateLatinBodyFrame({ input: latin, protectedTerms: policy.protectedTerms }, {
+                contents, orientation: frame.orientation, lines, linesReadable, softWraps, paragraphs: latinParagraphs
+            });
+            for (const raw of judged.findings) {
+                const meta = LATIN_RULE_META[raw.rule];
+                const line = lineAt(raw.lineIndex);
+                collected.push({ frameOrder, anchor: raw.anchor, finding: {
+                        rule_id: raw.rule, severity: meta.severity, determinism: meta.determinism, source_class: meta.source_class,
+                        source_ref: meta.source_ref, target, range: raw.range, line_index: raw.lineIndex,
+                        evidence: { line_start: line?.start ?? null, line_end: line?.end ?? null, character: null, character_class: null,
+                            prev_line_tail: null, next_line_head: null, ...raw.evidence },
+                        current_state: null, recommendation: meta.recommendation, can_auto_fix: false, required_capability: null,
+                    } });
+            }
+            for (const entry of judged.skipped) {
+                const key = `${entry.rule}:${entry.reason}`;
+                const known = latinSkips.get(key);
+                if (known === undefined)
+                    latinSkips.set(key, { rule: entry.rule, reason: entry.reason, frames: 1 });
+                else
+                    known.frames += 1;
+            }
+            for (const reason of judged.incomplete)
+                incomplete.add(reason);
+        }
     });
+    const latinRulesSkipped = [];
+    if (latin !== null) {
+        for (const rule of LATIN_DEFERRED_RULES.filter((candidate) => latin.rules.includes(candidate))) {
+            latinRulesSkipped.push({ rule_id: rule, reason: LATIN_DEFERRED_REASON[rule], frames: null });
+        }
+        latinRulesSkipped.push(...[...latinSkips.values()].map((entry) => ({ rule_id: entry.rule, reason: entry.reason, frames: entry.frames })));
+        const requestOrder = [...LATIN_RULES, ...LATIN_DEFERRED_RULES];
+        latinRulesSkipped.sort((left, right) => requestOrder.indexOf(left.rule_id) - requestOrder.indexOf(right.rule_id) ||
+            LATIN_SKIP_REASONS.indexOf(left.reason) - LATIN_SKIP_REASONS.indexOf(right.reason));
+        if (latinRulesSkipped.length > 0)
+            incomplete.add('rule_skipped');
+    }
     collected.sort((left, right) => left.frameOrder - right.frameOrder || left.anchor - right.anchor ||
-        RULE_ORDER[left.finding.rule_id] - RULE_ORDER[right.finding.rule_id] ||
+        RULE_ORDER.get(left.finding.rule_id) - RULE_ORDER.get(right.finding.rule_id) ||
         left.finding.range.start - right.finding.range.start || left.finding.range.end - right.finding.range.end);
     const findings = collected.map((entry) => entry.finding);
-    if (findings.length > policy.maxFindings)
-        incomplete.add('finding_limit');
-    const orderedIncomplete = JP_AUDIT_INCOMPLETE_REASONS.filter((reason) => incomplete.has(reason));
-    return jpAuditResultSchema.parse({
-        status: orderedIncomplete.length === 0 ? 'complete' : 'partial',
+    if (shapeSkipped.length > 0)
+        incomplete.add('paragraph_shape_unmeasured');
+    if (profileSkipped.length > 0)
+        incomplete.add('setting_profile_unmeasured');
+    const base = {
         policies,
         policy: lineBreak ? {
             id: 'jp_line_break_v1',
@@ -902,15 +1135,133 @@ export function judgeJapaneseTypography(host, policy) {
             host_new_document_default: { ...HOST_NEW_DOCUMENT_DEFAULTS },
             host_default_source: HOST_DEFAULTS_SOURCE,
         },
+        ...(latin === null ? {} : { latin_body: {
+                rules_run: LATIN_RULES.filter((rule) => latin.rules.includes(rule)),
+                rules_skipped: latinRulesSkipped,
+            } }),
+        ...(settingProfile === null ? {} : { setting_profile: {
+                rules_run: settingProfileRulesRun(settingProfile),
+                ...(settingProfile.preset === undefined ? {} : { preset: settingProfilePresetReport(settingProfile) }),
+                frames_measured: profileFramesMeasured, skipped: profileSkipped,
+                ...(settingProfile.frame_extent === undefined ? {} : { frame_heights: profileHeights })
+            } }),
         paragraph_shape: paragraphShape === null ? null : { rules_run: [
                 ...(paragraphShape.short_line_head === undefined ? [] : ['JP_SHORT_LINE_HEAD']),
                 ...(paragraphShape.short_last_line_max_characters === undefined ? [] : ['JP_SHORT_LAST_LINE']),
-            ] },
+                ...(paragraphShape.loose_line === undefined ? [] : ['JP_LOOSE_LINE']),
+                ...(paragraphShape.setting_combination === undefined ? [] : ['JP_PARAGRAPH_SETTING_COMBINATION']),
+            ], ...(shapeExtra ? { measurement: { frames_measured: shapeFramesMeasured, lines_judged: shapeLinesJudged, skipped: shapeSkipped } } : {}) },
         document: host.document,
-        coverage: { frames_in_scope: host.framesInScope, frames_audited: host.frames.length, frames_skipped: host.skipped },
-        incomplete: orderedIncomplete,
-        findings: findings.slice(0, policy.maxFindings),
-    });
+        coverage: { frames_in_scope: host.framesInScope, frames_audited: host.frames.length,
+            frames_skipped: host.skipped.map(({ uuid, name, reason }) => ({ uuid, name, reason })),
+            page: { first_frame_index: startIndex, next_frame_index: nextIndex } },
+    };
+    return { base, findings, incomplete, startIndex, nextIndex, documentKeyShort: host.document.keyShort };
+}
+export function auditNextCallOf(documentKeyShort) {
+    return (finding) => (NO_BREAK_RULES.has(finding.rule_id) && finding.target.orientation === 'horizontal'
+        ? noBreakPlanCall(documentKeyShort, finding.target.uuid, finding.range) : undefined);
+}
+function buildAuditResult(page, shown, incomplete, format) {
+    const reasons = JP_AUDIT_INCOMPLETE_REASONS.filter((reason) => incomplete.has(reason));
+    return {
+        status: reasons.length === 0 ? 'complete' : 'partial',
+        ...page.base,
+        incomplete: reasons,
+        notes: shown.some((finding) => finding.next_call !== undefined) ? [JP_AUDIT_NO_BREAK_NOTE] : [],
+        format,
+        ...(format === 'findings' ? { findings: shown } : { grouped: groupFindings(shown, auditNextCallOf(page.documentKeyShort)) }),
+    };
+}
+export function assembleAuditResult(page, options) {
+    if (options.skip > page.findings.length)
+        throw new Error('The cursor skips more findings than the page holds.');
+    const available = page.findings.slice(options.skip);
+    const countLimit = Math.min(options.maxFindings, available.length);
+    const build = (shown, incomplete) => buildAuditResult(page, shown, incomplete, options.format);
+    const withLimits = (shown) => {
+        const incomplete = new Set([...page.incomplete, ...(options.extraIncomplete ?? [])]);
+        if (countLimit < available.length)
+            incomplete.add('finding_limit');
+        if (shown < countLimit)
+            incomplete.add('response_limit');
+        return incomplete;
+    };
+    let shown = countLimit;
+    if (options.maxResponseBytes !== undefined && countLimit > 1) {
+        const budget = options.maxResponseBytes - (options.reserveBytes ?? 0);
+        const fits = (count) => Buffer.byteLength(JSON.stringify(build(available.slice(0, count), withLimits(count))), 'utf8') <= budget;
+        let low = 1;
+        let high = countLimit;
+        while (low < high) {
+            const middle = Math.ceil((low + high) / 2);
+            if (fits(middle))
+                low = middle;
+            else
+                high = middle - 1;
+        }
+        shown = low;
+    }
+    const incomplete = withLimits(shown);
+    const parsed = jpAuditResultSchema.parse(build(available.slice(0, shown), incomplete));
+    const next = shown < available.length ? { offset: page.startIndex, skip: options.skip + shown }
+        : page.nextIndex !== null ? { offset: page.nextIndex, skip: 0 } : null;
+    return { result: parsed, next };
+}
+export function fitAuditPage(host, policy, full, options) {
+    const whole = { page: full, extraIncomplete: [], frames: host.frames.length, cut: false };
+    if (options.skip > 0 || host.frames.length < 2 || full.findings.length === 0)
+        return whole;
+    const frameCount = host.frames.length;
+    const perFrame = new Map();
+    for (const finding of full.findings)
+        perFrame.set(finding.target.uuid, (perFrame.get(finding.target.uuid) ?? 0) + 1);
+    const ends = [0];
+    for (const frame of host.frames)
+        ends.push(ends[ends.length - 1] + (perFrame.get(frame.uuid) ?? 0));
+    if (ends[frameCount] !== full.findings.length)
+        throw new Error('A finding belongs to no frame of its page; the read is not reported.');
+    const budget = options.maxResponseBytes === undefined ? undefined : options.maxResponseBytes - (options.reserveBytes ?? 0);
+    const measure = (frames) => {
+        const count = ends[frames];
+        const incomplete = new Set([...full.incomplete, ...(frames < frameCount ? ['response_limit'] : [])]);
+        const bytes = Buffer.byteLength(JSON.stringify(buildAuditResult(full, full.findings.slice(0, count), incomplete, options.format)), 'utf8');
+        return { countExceeded: count > options.maxFindings, bytesExceeded: budget !== undefined && bytes > budget };
+    };
+    const fits = (frames) => { const m = measure(frames); return !m.countExceeded && !m.bytesExceeded; };
+    if (fits(frameCount))
+        return whole;
+    if (host.frames.some((frame) => frame.index === undefined) || host.skipped.some((entry) => entry.index === undefined)) {
+        throw new Error('A page cannot be cut at a frame because the host did not return where its frames are in the scope.');
+    }
+    let low = 0;
+    let high = frameCount - 1;
+    while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (fits(middle))
+            low = middle;
+        else
+            high = middle - 1;
+    }
+    const kept = Math.max(1, low);
+    const missing = kept === low ? measure(kept + 1) : null;
+    const cutIndex = host.frames[kept].index;
+    const keptUuids = new Set(host.frames.slice(0, kept).map((frame) => frame.uuid));
+    const shorter = { ...host, frames: host.frames.slice(0, kept), skipped: host.skipped.filter((entry) => entry.index < cutIndex),
+        nextIndex: cutIndex, stop: 'scan_limit' };
+    const shorterPolicy = policy.paragraphShapeExtra === undefined ? policy
+        : { ...policy, paragraphShapeExtra: { ...policy.paragraphShapeExtra, frames: policy.paragraphShapeExtra.frames.filter((entry) => keptUuids.has(entry.uuid)) } };
+    const extraIncomplete = [];
+    if (missing !== null) {
+        if (missing.countExceeded)
+            extraIncomplete.push('finding_limit');
+        if (missing.bytesExceeded || !missing.countExceeded)
+            extraIncomplete.push('response_limit');
+    }
+    return { page: judgeJapaneseTypographyPage(shorter, shorterPolicy), extraIncomplete, frames: kept, cut: true };
+}
+export function judgeJapaneseTypography(host, policy) {
+    return assembleAuditResult(judgeJapaneseTypographyPage(host, policy), { format: 'findings', skip: 0, maxFindings: policy.maxFindings }).result;
 }
 function unbreakablePair(contents, tail, head) {
     const tailFolded = foldFullWidth(tail.codePoint);

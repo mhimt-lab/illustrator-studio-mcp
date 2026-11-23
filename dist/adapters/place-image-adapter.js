@@ -1,4 +1,5 @@
 import { HOST_FILE_PATH_HELPERS, sameFilePath } from '../file-path.js';
+import { ACTIVE_LAYER_GUARD_SCRIPT } from './active-layer-guard-host-script.js';
 import { realpath } from 'node:fs/promises';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
@@ -26,11 +27,7 @@ const ERROR_MAPPING_VERSION = 1;
 const canonicalNumberSchema = z.number().finite().min(-PLACE_IMAGE_MAX_COORDINATE_PT).max(PLACE_IMAGE_MAX_COORDINATE_PT)
     .overwrite((value) => Object.is(value, -0) ? 0 : value);
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
-const absolutePathSchema = z.string().min(2).max(PLACE_IMAGE_MAX_PATH_LENGTH)
-    .regex(/^\/(?!(?:.*\/)?\.\.(?:\/|$))[^\0]*$/u, 'Source path must be an absolute path without NUL or parent-directory segments.');
-const sourceSchema = z.strictObject({ path: absolutePathSchema, sha256: sha256Schema });
 const anchorSchema = z.strictObject({ x: canonicalNumberSchema, y: canonicalNumberSchema });
-const formatSchema = z.enum(PLACE_IMAGE_MEASURED_FORMATS);
 const dimensionsSchema = z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() });
 const ppiSchema = z.strictObject({ x: z.number().finite().positive(), y: z.number().finite().positive() });
 const lengthSchema = z.number().finite().positive().max(PLACE_FIT_MAX_PT);
@@ -45,143 +42,11 @@ const minimumPpiSchema = z.number().finite().positive().max(PLACE_IMAGE_MAX_MINI
 export const sourceBlockerSchema = z.enum([
     'source_file_missing', 'source_file_unavailable', 'source_hash_mismatch', 'source_format_unmeasured',
 ]);
-export const placeImageAdmissionSchema = z.discriminatedUnion('status', [
-    z.strictObject({
-        status: z.literal('admitted'),
-        resolvedPath: absolutePathSchema,
-        bytes: z.number().int().positive(),
-        modifiedAt: z.string().min(1).max(64),
-        sha256: sha256Schema,
-        format: formatSchema,
-        pixels: dimensionsSchema.nullable(),
-        nativePpi: ppiSchema.nullable(),
-    }),
-    z.strictObject({
-        status: z.literal('blocked'),
-        resolvedPath: absolutePathSchema.nullable(),
-        reason: sourceBlockerSchema,
-        message: z.string().min(1).max(500),
-    }),
-]);
-const commonRequest = {
-    expectedDocumentKey: z.string().min(1).max(16_384),
-    expectedLayerPath: layerPathSchema,
-    artboardIndex: z.number().int().safe().nonnegative(),
-    source: sourceSchema,
-    anchor: anchorSchema,
-    name: z.string().max(255).optional(),
-    size: placeImageSizeSchema.optional(),
-    minimumEffectivePpi: minimumPpiSchema.optional(),
-    focalPoint: fitPointSchema.optional(),
-    alignTo: fitAlignmentSchema.optional(),
-};
 function checkComposition(request, context) {
     if ([request.focalPoint, request.alignTo, request.focal_point, request.align_to].some(value => value !== undefined) &&
         request.size?.fit !== 'contain' && request.size?.fit !== 'cover') {
         context.addIssue({ code: 'custom', message: 'focal_point and align_to require size.fit contain or cover.' });
     }
-}
-const unadmittedInputSchema = z.discriminatedUnion('apply', [
-    z.strictObject({ ...commonRequest, apply: z.literal(false) }),
-    z.strictObject({ ...commonRequest, apply: z.literal(true), commandId: canonicalCommandIdSchema }),
-]).superRefine(checkComposition);
-const internalInputSchema = z.discriminatedUnion('apply', [
-    z.strictObject({ ...commonRequest, admission: placeImageAdmissionSchema.optional(), apply: z.literal(false) }),
-    z.strictObject({ ...commonRequest, admission: placeImageAdmissionSchema.optional(), apply: z.literal(true), commandId: canonicalCommandIdSchema }),
-]).superRefine((request, context) => {
-    checkComposition(request, context);
-    if (request.admission?.status === 'admitted' && request.admission.sha256 !== request.source.sha256) {
-        context.addIssue({ code: 'custom', message: 'An admitted source must carry the requested SHA-256.' });
-    }
-});
-const commonPublic = {
-    expected_document_key: z.string().min(1).max(16_384),
-    expected_layer_path: layerPathSchema,
-    artboard_index: z.number().int().safe().nonnegative(),
-    source: sourceSchema,
-    anchor: anchorSchema,
-    name: z.string().max(255).optional(),
-    size: placeImageSizeSchema.optional(),
-    minimum_effective_ppi: minimumPpiSchema.optional(),
-    focal_point: fitPointSchema.optional(),
-    align_to: fitAlignmentSchema.optional(),
-};
-export const placeImagePublicInputSchema = z.discriminatedUnion('apply', [
-    z.strictObject({ ...commonPublic, apply: z.literal(false).default(false) }),
-    z.strictObject({ ...commonPublic, apply: z.literal(true), command_id: applyCommandIdSchema }),
-]).superRefine(checkComposition);
-const inputSchema = z.strictObject({ ...commonPublic, apply: z.boolean().default(false), command_id: applyCommandIdSchema.optional() });
-const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(placeImagePublicInputSchema, { io: 'input' });
-inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
-function normalizePublicInput(input) {
-    const value = placeImagePublicInputSchema.parse(input);
-    const common = {
-        expectedDocumentKey: value.expected_document_key, expectedLayerPath: value.expected_layer_path,
-        artboardIndex: value.artboard_index, source: value.source, anchor: value.anchor,
-        ...(value.name === undefined ? {} : { name: value.name }),
-        ...(value.size === undefined ? {} : { size: value.size }),
-        ...(value.focal_point === undefined ? {} : { focalPoint: value.focal_point }),
-        ...(value.align_to === undefined ? {} : { alignTo: value.align_to }),
-        ...(value.minimum_effective_ppi === undefined ? {} : { minimumEffectivePpi: value.minimum_effective_ppi }),
-    };
-    return value.apply ? { ...common, apply: true, commandId: value.command_id } : { ...common, apply: false };
-}
-export async function admitPlaceImageRequest(input, services) {
-    const request = unadmittedInputSchema.parse(input);
-    return { ...request, admission: await admitSource(request.source, services.imageFileInspector) };
-}
-export async function admitSource(source, inspector) {
-    return (await admitSourceWithColorSpace(source, inspector)).admission;
-}
-export async function admitSourceWithColorSpace(source, inspector) {
-    const admission = await admitSourceInspection(source, inspector);
-    return admission.status === 'admitted'
-        ? { admission: admission.value, colorSpace: admission.colorSpace, icc: admission.icc }
-        : { admission: admission.value, colorSpace: null, icc: null };
-}
-async function admitSourceInspection(source, inspector) {
-    const blocked = (value) => ({ status: 'blocked', value });
-    let resolvedPath;
-    try {
-        resolvedPath = await realpath(source.path);
-    }
-    catch (error) {
-        const code = error?.code;
-        if (code === 'ENOENT' || code === 'ENOTDIR') {
-            return blocked({ status: 'blocked', resolvedPath: null, reason: 'source_file_missing', message: `Source file ${source.path} does not exist.` });
-        }
-        return blocked({ status: 'blocked', resolvedPath: null, reason: 'source_file_unavailable', message: boundedMessage(error) });
-    }
-    if (!absolutePathSchema.safeParse(resolvedPath).success) {
-        return blocked({ status: 'blocked', resolvedPath: null, reason: 'source_file_unavailable', message: 'Resolved source path is not an admissible absolute path.' });
-    }
-    const inspection = await inspector.inspect(resolvedPath);
-    if (inspection.status === 'missing') {
-        return blocked({ status: 'blocked', resolvedPath, reason: 'source_file_missing', message: `Source file ${resolvedPath} does not exist.` });
-    }
-    if (inspection.status === 'unavailable') {
-        return blocked({ status: 'blocked', resolvedPath, reason: 'source_file_unavailable', message: `${inspection.reason}: ${inspection.message}` });
-    }
-    if (inspection.file.sha256 !== source.sha256) {
-        return blocked({ status: 'blocked', resolvedPath, reason: 'source_hash_mismatch',
-            message: `Source file SHA-256 ${inspection.file.sha256} does not match the requested ${source.sha256}.` });
-    }
-    const format = inspection.metadata.format;
-    if (format.status !== 'available') {
-        return blocked({ status: 'blocked', resolvedPath, reason: 'source_format_unmeasured', message: format.message });
-    }
-    const pixels = inspection.metadata.pixels;
-    const ppi = inspection.metadata.nativePpi;
-    return { status: 'admitted', colorSpace: inspection.metadata.colorSpace, icc: inspection.metadata.icc, value: {
-            status: 'admitted', resolvedPath, bytes: inspection.file.bytes, modifiedAt: inspection.file.modifiedAt,
-            sha256: inspection.file.sha256, format: format.value,
-            pixels: pixels.status === 'available' ? { width: pixels.value.width, height: pixels.value.height } : null,
-            nativePpi: ppi.status === 'available' ? { x: ppi.value.x, y: ppi.value.y } : null,
-        } };
-}
-function boundedMessage(error) {
-    const raw = error instanceof Error ? error.message : String(error);
-    return (raw.length > 0 ? raw : 'Unknown source admission error.').slice(0, 500);
 }
 function round(value) {
     const rounded = Number(value.toFixed(PLACE_IMAGE_PRECISION_DIGITS));
@@ -218,81 +83,6 @@ const nearly = (left, right) => Math.abs(left - right) <= FIT_TOLERANCE;
 const boundsSchema = z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]);
 const positionSchema = z.tuple([z.number().finite(), z.number().finite()]);
 const matrixSchema = z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]);
-const planSchema = z.strictObject({
-    operation: z.literal(PLACE_IMAGE_OPERATION),
-    documentKey: z.string().min(1).max(16_384),
-    coordinateSpace: z.literal('artboard_top_left'),
-    unit: z.literal('pt'),
-    artboardIndex: z.number().int().nonnegative(),
-    artboardBounds: boundsSchema,
-    source: sourceSchema,
-    admission: placeImageAdmissionSchema,
-    anchor: anchorSchema,
-    position: positionSchema,
-    sizeRequest: placeImageSizeSchema.nullable(),
-    size: plannedSizeSchema.nullable(),
-    focalPoint: fitPointSchema.nullable(),
-    alignTo: fitAlignmentSchema.nullable(),
-    requestedPosition: positionSchema,
-    effectivePosition: positionSchema,
-    clamp: positionSchema,
-    effectivePpi: effectivePpiSchema.nullable(),
-    effectivePpiCheck: effectivePpiCheckSchema.nullable(),
-    name: z.string().max(255).nullable(),
-    layer: layerStateSchema,
-    applyBlockedReasonCodes: z.array(blockerSchema),
-    applyAllowed: z.boolean(),
-}).superRefine((plan, context) => {
-    if (plan.applyAllowed !== (plan.applyBlockedReasonCodes.length === 0)) {
-        context.addIssue({ code: 'custom', message: 'Image placement applyAllowed must require no blockers.' });
-    }
-    const pixels = plan.admission.status === 'admitted' ? plan.admission.pixels : null;
-    if ((plan.size !== null) !== (plan.sizeRequest !== null && pixels !== null)) {
-        context.addIssue({ code: 'custom', message: 'Image placement size must be planned exactly when a size is requested and the source pixels are known.' });
-    }
-    if (plan.size !== null) {
-        const expected = pixels === null || plan.sizeRequest === null ? null : fitPlacedSize(pixels, plan.sizeRequest);
-        if (expected && plan.sizeRequest && ['contain', 'cover'].includes(plan.sizeRequest.fit) && (plan.focalPoint !== null || plan.alignTo !== null)) {
-            expected.offset = fitComposition(expected, plan.sizeRequest, plan.focalPoint ?? undefined, plan.alignTo ?? undefined).effectiveOffset;
-        }
-        if (expected === null || !nearly(expected.width, plan.size.width) || !nearly(expected.height, plan.size.height) ||
-            !nearly(expected.offset[0], plan.size.offset[0]) || !nearly(expected.offset[1], plan.size.offset[1])) {
-            context.addIssue({ code: 'custom', message: 'Image placement size must be derived from the source pixels and the requested fit.' });
-        }
-    }
-    checkComposition({ size: plan.sizeRequest ?? undefined, focalPoint: plan.focalPoint ?? undefined, alignTo: plan.alignTo ?? undefined }, context);
-    const originalSize = pixels && plan.sizeRequest ? fitPlacedSize(pixels, plan.sizeRequest) : null;
-    const composition = originalSize && plan.sizeRequest && ['contain', 'cover'].includes(plan.sizeRequest.fit)
-        ? (plan.focalPoint === null && plan.alignTo === null
-            ? { requestedOffset: originalSize.offset, effectiveOffset: originalSize.offset, clamp: [0, 0] }
-            : fitComposition(originalSize, plan.sizeRequest, plan.focalPoint ?? undefined, plan.alignTo ?? undefined)) : null;
-    const requested = derivePlacePosition(plan.artboardBounds, plan.anchor, composition?.requestedOffset ?? [0, 0]);
-    if (!requested.every((v, i) => nearly(v, plan.requestedPosition[i])) ||
-        !plan.position.every((v, i) => nearly(v, plan.effectivePosition[i])) ||
-        !(composition?.clamp ?? [0, 0]).every((v, i) => nearly(v, plan.clamp[i]))) {
-        context.addIssue({ code: 'custom', message: 'Composition requested/effective position and clamp must match the fit.' });
-    }
-    const derived = derivePlacePosition(plan.artboardBounds, plan.anchor, plan.size?.offset ?? [0, 0]);
-    if (!nearly(plan.position[0], derived[0]) || !nearly(plan.position[1], derived[1])) {
-        context.addIssue({ code: 'custom', message: 'Image placement plan position must equal the position derived from the anchor and fit.' });
-    }
-    const ppi = plan.admission.status !== 'admitted' ? null
-        : plan.sizeRequest !== null ? (plan.size === null || pixels === null ? null : { ...placedEffectivePpi(pixels, plan.size), basis: 'requested_size' })
-            : plan.admission.nativePpi === null ? null : { ...plan.admission.nativePpi, basis: 'native_ppi' };
-    if ((ppi === null) !== (plan.effectivePpi === null) ||
-        (ppi !== null && (ppi.basis !== plan.effectivePpi.basis || !nearly(ppi.x, plan.effectivePpi.x) || !nearly(ppi.y, plan.effectivePpi.y)))) {
-        context.addIssue({ code: 'custom', message: 'Image placement effective PPI must come from the source pixels and placed size.' });
-    }
-    if (plan.effectivePpiCheck !== null) {
-        const check = checkEffectivePpi(plan.effectivePpi, plan.effectivePpiCheck.minimumEffectivePpi);
-        if (check.status !== plan.effectivePpiCheck.status || check.failingAxes.join() !== plan.effectivePpiCheck.failingAxes.join()) {
-            context.addIssue({ code: 'custom', message: 'Image placement effective PPI check must compare both axes with the requested minimum.' });
-        }
-    }
-    if (plan.admission.status === 'admitted' && plan.admission.sha256 !== plan.source.sha256) {
-        context.addIssue({ code: 'custom', message: 'Image placement admission must carry the requested SHA-256.' });
-    }
-});
 const failureSchema = z.strictObject({
     phase: z.enum(['apply', 'verify']), reasonCode: z.enum(['apply_failed', 'verify_mismatch']), message: z.string().min(1).max(500),
 }).superRefine((failure, context) => {
@@ -360,98 +150,334 @@ const transactionSchema = z.discriminatedUnion('state', [
             context.addIssue({ code: 'custom', message: 'Image placement failure must match one audit event.' });
     }
 });
-const createdSchema = z.strictObject({
-    uuid: z.string().min(1).max(255),
-    type: z.literal('PlacedItem'),
-    name: z.string().max(255),
-    filePath: absolutePathSchema,
-    position: positionSchema,
-    geometricBounds: boundsSchema,
-    width: z.number().finite().positive(),
-    height: z.number().finite().positive(),
-    matrix: matrixSchema,
-    layerItemUuids: z.array(z.string().min(1).max(255)).min(1).max(PLACE_IMAGE_MAX_DIRECT_ITEMS + 1),
+const macAbsolutePathSchema = z.string().min(2).max(PLACE_IMAGE_MAX_PATH_LENGTH)
+    .regex(/^\/(?!(?:.*\/)?\.\.(?:\/|$))[^\0]*$/u, 'Source path must be an absolute path without NUL or parent-directory segments.');
+export const MACOS_PLACE_IMAGE_PLATFORM = Object.freeze({
+    id: 'macos',
+    requestPathSchema: macAbsolutePathSchema,
+    absolutePathSchema: macAbsolutePathSchema,
+    formatSchema: z.enum(PLACE_IMAGE_MEASURED_FORMATS),
+    sourceBlockerSchema,
+    samePath: sameFilePath,
+    host: Object.freeze({
+        pathHelpers: HOST_FILE_PATH_HELPERS,
+        sourcePathInvalid: 'source.path.charAt(0) !== "/"',
+        resolvedPathInvalid: 'admission.resolvedPath.charAt(0) !== "/"',
+    }),
 });
-function nodeDerivedBlockers(result, planned) {
-    const blockers = new Set();
-    if (planned && !result.document.mutationAllowed)
-        blockers.add('document_mutation_not_allowed');
-    if (result.plan.layer.ancestry.some((ancestor) => !ancestor.visible))
-        blockers.add('layer_hidden');
-    if (result.plan.layer.ancestry.some((ancestor) => ancestor.locked))
-        blockers.add('layer_locked');
-    if (result.plan.layer.itemUuids.length >= PLACE_IMAGE_MAX_DIRECT_ITEMS)
-        blockers.add('layer_item_capacity_exceeded');
-    if (result.plan.admission.status === 'blocked')
-        blockers.add(result.plan.admission.reason);
-    if (result.plan.sizeRequest !== null && result.plan.admission.status === 'admitted' && result.plan.admission.pixels === null) {
-        blockers.add('source_pixels_unavailable');
+export function buildPlaceImageContract(platform) {
+    const absolutePathSchema = platform.absolutePathSchema;
+    const sourceSchema = z.strictObject({ path: platform.requestPathSchema, sha256: sha256Schema });
+    const formatSchema = platform.formatSchema;
+    const placeImageAdmissionSchema = z.discriminatedUnion('status', [
+        z.strictObject({
+            status: z.literal('admitted'),
+            resolvedPath: absolutePathSchema,
+            bytes: z.number().int().positive(),
+            modifiedAt: z.string().min(1).max(64),
+            sha256: sha256Schema,
+            format: formatSchema,
+            pixels: dimensionsSchema.nullable(),
+            nativePpi: ppiSchema.nullable(),
+        }),
+        z.strictObject({
+            status: z.literal('blocked'),
+            resolvedPath: absolutePathSchema.nullable(),
+            reason: platform.sourceBlockerSchema,
+            message: z.string().min(1).max(500),
+        }),
+    ]);
+    const commonRequest = {
+        expectedDocumentKey: z.string().min(1).max(16_384),
+        expectedLayerPath: layerPathSchema,
+        artboardIndex: z.number().int().safe().nonnegative(),
+        source: sourceSchema,
+        anchor: anchorSchema,
+        name: z.string().max(255).optional(),
+        size: placeImageSizeSchema.optional(),
+        minimumEffectivePpi: minimumPpiSchema.optional(),
+        focalPoint: fitPointSchema.optional(),
+        alignTo: fitAlignmentSchema.optional(),
+    };
+    const unadmittedInputSchema = z.discriminatedUnion('apply', [
+        z.strictObject({ ...commonRequest, apply: z.literal(false) }),
+        z.strictObject({ ...commonRequest, apply: z.literal(true), commandId: canonicalCommandIdSchema }),
+    ]).superRefine(checkComposition);
+    const internalInputSchema = z.discriminatedUnion('apply', [
+        z.strictObject({ ...commonRequest, admission: placeImageAdmissionSchema.optional(), apply: z.literal(false) }),
+        z.strictObject({ ...commonRequest, admission: placeImageAdmissionSchema.optional(), apply: z.literal(true), commandId: canonicalCommandIdSchema }),
+    ]).superRefine((request, context) => {
+        checkComposition(request, context);
+        if (request.admission?.status === 'admitted' && request.admission.sha256 !== request.source.sha256) {
+            context.addIssue({ code: 'custom', message: 'An admitted source must carry the requested SHA-256.' });
+        }
+    });
+    const commonPublic = {
+        expected_document_key: z.string().min(1).max(16_384),
+        expected_layer_path: layerPathSchema,
+        artboard_index: z.number().int().safe().nonnegative(),
+        source: sourceSchema,
+        anchor: anchorSchema,
+        name: z.string().max(255).optional(),
+        size: placeImageSizeSchema.optional(),
+        minimum_effective_ppi: minimumPpiSchema.optional(),
+        focal_point: fitPointSchema.optional(),
+        align_to: fitAlignmentSchema.optional(),
+    };
+    const placeImagePublicInputSchema = z.discriminatedUnion('apply', [
+        z.strictObject({ ...commonPublic, apply: z.literal(false).default(false) }),
+        z.strictObject({ ...commonPublic, apply: z.literal(true), command_id: applyCommandIdSchema }),
+    ]).superRefine(checkComposition);
+    const inputSchema = z.strictObject({ ...commonPublic, apply: z.boolean().default(false), command_id: applyCommandIdSchema.optional() });
+    const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(placeImagePublicInputSchema, { io: 'input' });
+    inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
+    function normalizePublicInput(input) {
+        const value = placeImagePublicInputSchema.parse(input);
+        const common = {
+            expectedDocumentKey: value.expected_document_key, expectedLayerPath: value.expected_layer_path,
+            artboardIndex: value.artboard_index, source: value.source, anchor: value.anchor,
+            ...(value.name === undefined ? {} : { name: value.name }),
+            ...(value.size === undefined ? {} : { size: value.size }),
+            ...(value.focal_point === undefined ? {} : { focalPoint: value.focal_point }),
+            ...(value.align_to === undefined ? {} : { alignTo: value.align_to }),
+            ...(value.minimum_effective_ppi === undefined ? {} : { minimumEffectivePpi: value.minimum_effective_ppi }),
+        };
+        return value.apply ? { ...common, apply: true, commandId: value.command_id } : { ...common, apply: false };
     }
-    if (result.plan.size !== null && !placedSizeInRange(result.plan.size))
-        blockers.add('placed_size_out_of_range');
-    return blockers;
-}
-export const placeImageResultSchema = z.union([
-    z.strictObject({ operation: z.literal(PLACE_IMAGE_OPERATION), applied: z.literal(false),
-        document: documentContextSchema, plan: planSchema, transaction: transactionSchema }),
-    z.strictObject({ operation: z.literal(PLACE_IMAGE_OPERATION), applied: z.literal(true),
-        document: documentContextSchema, plan: planSchema, created: createdSchema, transaction: transactionSchema }),
-]).superRefine((result, context) => {
-    const derived = nodeDerivedBlockers(result, result.transaction.state === 'planned');
-    const reported = new Set(result.plan.applyBlockedReasonCodes);
-    if (result.transaction.state === 'planned') {
-        for (const blocker of derived)
-            if (!reported.has(blocker))
-                context.addIssue({ code: 'custom', message: `Planned image placement must expose blocker ${blocker}.` });
-        for (const blocker of reported) {
-            if (!derived.has(blocker) && blocker !== 'source_file_changed' && blocker !== 'source_file_missing') {
-                context.addIssue({ code: 'custom', message: `Planned image placement reports an underivable blocker ${blocker}.` });
+    const planSchema = z.strictObject({
+        operation: z.literal(PLACE_IMAGE_OPERATION),
+        documentKey: z.string().min(1).max(16_384),
+        coordinateSpace: z.literal('artboard_top_left'),
+        unit: z.literal('pt'),
+        artboardIndex: z.number().int().nonnegative(),
+        artboardBounds: boundsSchema,
+        source: sourceSchema,
+        admission: placeImageAdmissionSchema,
+        anchor: anchorSchema,
+        position: positionSchema,
+        sizeRequest: placeImageSizeSchema.nullable(),
+        size: plannedSizeSchema.nullable(),
+        focalPoint: fitPointSchema.nullable(),
+        alignTo: fitAlignmentSchema.nullable(),
+        requestedPosition: positionSchema,
+        effectivePosition: positionSchema,
+        clamp: positionSchema,
+        effectivePpi: effectivePpiSchema.nullable(),
+        effectivePpiCheck: effectivePpiCheckSchema.nullable(),
+        name: z.string().max(255).nullable(),
+        layer: layerStateSchema,
+        applyBlockedReasonCodes: z.array(blockerSchema),
+        applyAllowed: z.boolean(),
+    }).superRefine((plan, context) => {
+        if (plan.applyAllowed !== (plan.applyBlockedReasonCodes.length === 0)) {
+            context.addIssue({ code: 'custom', message: 'Image placement applyAllowed must require no blockers.' });
+        }
+        const pixels = plan.admission.status === 'admitted' ? plan.admission.pixels : null;
+        if ((plan.size !== null) !== (plan.sizeRequest !== null && pixels !== null)) {
+            context.addIssue({ code: 'custom', message: 'Image placement size must be planned exactly when a size is requested and the source pixels are known.' });
+        }
+        if (plan.size !== null) {
+            const expected = pixels === null || plan.sizeRequest === null ? null : fitPlacedSize(pixels, plan.sizeRequest);
+            if (expected && plan.sizeRequest && ['contain', 'cover'].includes(plan.sizeRequest.fit) && (plan.focalPoint !== null || plan.alignTo !== null)) {
+                expected.offset = fitComposition(expected, plan.sizeRequest, plan.focalPoint ?? undefined, plan.alignTo ?? undefined).effectiveOffset;
+            }
+            if (expected === null || !nearly(expected.width, plan.size.width) || !nearly(expected.height, plan.size.height) ||
+                !nearly(expected.offset[0], plan.size.offset[0]) || !nearly(expected.offset[1], plan.size.offset[1])) {
+                context.addIssue({ code: 'custom', message: 'Image placement size must be derived from the source pixels and the requested fit.' });
             }
         }
-    }
-    else if (reported.size !== 0 || !result.plan.applyAllowed || derived.size !== 0 || result.plan.admission.status !== 'admitted') {
-        context.addIssue({ code: 'custom', message: 'Applied image placement must derive from an allowed, admitted plan.' });
-    }
-    if (result.applied) {
-        if (result.transaction.state !== 'verified') {
-            context.addIssue({ code: 'custom', message: 'A placed image must come from a verified transaction.' });
+        checkComposition({ size: plan.sizeRequest ?? undefined, focalPoint: plan.focalPoint ?? undefined, alignTo: plan.alignTo ?? undefined }, context);
+        const originalSize = pixels && plan.sizeRequest ? fitPlacedSize(pixels, plan.sizeRequest) : null;
+        const composition = originalSize && plan.sizeRequest && ['contain', 'cover'].includes(plan.sizeRequest.fit)
+            ? (plan.focalPoint === null && plan.alignTo === null
+                ? { requestedOffset: originalSize.offset, effectiveOffset: originalSize.offset, clamp: [0, 0] }
+                : fitComposition(originalSize, plan.sizeRequest, plan.focalPoint ?? undefined, plan.alignTo ?? undefined)) : null;
+        const requested = derivePlacePosition(plan.artboardBounds, plan.anchor, composition?.requestedOffset ?? [0, 0]);
+        if (!requested.every((v, i) => nearly(v, plan.requestedPosition[i])) ||
+            !plan.position.every((v, i) => nearly(v, plan.effectivePosition[i])) ||
+            !(composition?.clamp ?? [0, 0]).every((v, i) => nearly(v, plan.clamp[i]))) {
+            context.addIssue({ code: 'custom', message: 'Composition requested/effective position and clamp must match the fit.' });
         }
-        if (result.created.layerItemUuids[0] !== result.created.uuid ||
-            result.created.layerItemUuids.length !== result.plan.layer.itemUuids.length + 1 ||
-            result.created.layerItemUuids.slice(1).some((uuid, index) => uuid !== result.plan.layer.itemUuids[index])) {
-            context.addIssue({ code: 'custom', message: 'A placed image must be the only new item, at the front, with the prior order intact.' });
+        const derived = derivePlacePosition(plan.artboardBounds, plan.anchor, plan.size?.offset ?? [0, 0]);
+        if (!nearly(plan.position[0], derived[0]) || !nearly(plan.position[1], derived[1])) {
+            context.addIssue({ code: 'custom', message: 'Image placement plan position must equal the position derived from the anchor and fit.' });
         }
-        const admission = result.plan.admission;
-        if (Math.abs(result.created.position[0] - result.plan.position[0]) > PLACE_IMAGE_TOLERANCE_PT ||
-            Math.abs(result.created.position[1] - result.plan.position[1]) > PLACE_IMAGE_TOLERANCE_PT ||
-            (admission.status === 'admitted' && !sameFilePath(result.created.filePath, admission.resolvedPath)) ||
-            (result.plan.name !== null && result.created.name !== result.plan.name) ||
-            (result.plan.size !== null && (Math.abs(result.created.width - result.plan.size.width) > PLACE_IMAGE_TOLERANCE_PT ||
-                Math.abs(result.created.height - result.plan.size.height) > PLACE_IMAGE_TOLERANCE_PT))) {
-            context.addIssue({ code: 'custom', message: 'A placed image must match the planned position, size, source path, and name.' });
+        const ppi = plan.admission.status !== 'admitted' ? null
+            : plan.sizeRequest !== null ? (plan.size === null || pixels === null ? null : { ...placedEffectivePpi(pixels, plan.size), basis: 'requested_size' })
+                : plan.admission.nativePpi === null ? null : { ...plan.admission.nativePpi, basis: 'native_ppi' };
+        if ((ppi === null) !== (plan.effectivePpi === null) ||
+            (ppi !== null && (ppi.basis !== plan.effectivePpi.basis || !nearly(ppi.x, plan.effectivePpi.x) || !nearly(ppi.y, plan.effectivePpi.y)))) {
+            context.addIssue({ code: 'custom', message: 'Image placement effective PPI must come from the source pixels and placed size.' });
         }
-    }
-    else if (result.transaction.state === 'verified') {
-        context.addIssue({ code: 'custom', message: 'A verified image placement must report the created item.' });
-    }
-    if (result.transaction.state === 'rolled_back') {
-        const rollback = result.transaction.rollback;
-        if (rollback.createdUuid === null || rollback.restoredItemUuids === null ||
-            canonicalSha256(rollback.restoredItemUuids) !== canonicalSha256(result.plan.layer.itemUuids)) {
-            context.addIssue({ code: 'custom', message: 'A rolled-back image placement must name the removed UUID and prove the exact baseline order.' });
+        if (plan.effectivePpiCheck !== null) {
+            const check = checkEffectivePpi(plan.effectivePpi, plan.effectivePpiCheck.minimumEffectivePpi);
+            if (check.status !== plan.effectivePpiCheck.status || check.failingAxes.join() !== plan.effectivePpiCheck.failingAxes.join()) {
+                context.addIssue({ code: 'custom', message: 'Image placement effective PPI check must compare both axes with the requested minimum.' });
+            }
         }
-    }
-    if (result.transaction.state === 'rollback_failed') {
-        const rollback = result.transaction.rollback;
-        if (rollback.createdUuid === null || rollback.restoredItemUuids === null || !rollback.restoredItemUuids.includes(rollback.createdUuid)) {
-            context.addIssue({ code: 'custom', message: 'A failed image placement rollback must name the UUID that is still present and prove it in the read-back order.' });
+        if (plan.admission.status === 'admitted' && plan.admission.sha256 !== plan.source.sha256) {
+            context.addIssue({ code: 'custom', message: 'Image placement admission must carry the requested SHA-256.' });
         }
+    });
+    const createdSchema = z.strictObject({
+        uuid: z.string().min(1).max(255),
+        type: z.literal('PlacedItem'),
+        name: z.string().max(255),
+        filePath: absolutePathSchema,
+        position: positionSchema,
+        geometricBounds: boundsSchema,
+        width: z.number().finite().positive(),
+        height: z.number().finite().positive(),
+        matrix: matrixSchema,
+        layerItemUuids: z.array(z.string().min(1).max(255)).min(1).max(PLACE_IMAGE_MAX_DIRECT_ITEMS + 1),
+    });
+    function nodeDerivedBlockers(result, planned) {
+        const blockers = new Set();
+        if (planned && !result.document.mutationAllowed)
+            blockers.add('document_mutation_not_allowed');
+        if (result.plan.layer.ancestry.some((ancestor) => !ancestor.visible))
+            blockers.add('layer_hidden');
+        if (result.plan.layer.ancestry.some((ancestor) => ancestor.locked))
+            blockers.add('layer_locked');
+        if (result.plan.layer.itemUuids.length >= PLACE_IMAGE_MAX_DIRECT_ITEMS)
+            blockers.add('layer_item_capacity_exceeded');
+        if (result.plan.admission.status === 'blocked')
+            blockers.add(result.plan.admission.reason);
+        if (result.plan.sizeRequest !== null && result.plan.admission.status === 'admitted' && result.plan.admission.pixels === null) {
+            blockers.add('source_pixels_unavailable');
+        }
+        if (result.plan.size !== null && !placedSizeInRange(result.plan.size))
+            blockers.add('placed_size_out_of_range');
+        return blockers;
     }
-});
-export const placeImageResponseSchema = z.strictObject({
-    outcome: placeImageResultSchema,
-    delivery: z.strictObject({ mode: z.enum(['original', 'replay']), finalizedAt: z.string().datetime({ offset: true }) }),
-});
+    const placeImageResultSchema = z.union([
+        z.strictObject({ operation: z.literal(PLACE_IMAGE_OPERATION), applied: z.literal(false),
+            document: documentContextSchema, plan: planSchema, transaction: transactionSchema }),
+        z.strictObject({ operation: z.literal(PLACE_IMAGE_OPERATION), applied: z.literal(true),
+            document: documentContextSchema, plan: planSchema, created: createdSchema, transaction: transactionSchema }),
+    ]).superRefine((result, context) => {
+        const derived = nodeDerivedBlockers(result, result.transaction.state === 'planned');
+        const reported = new Set(result.plan.applyBlockedReasonCodes);
+        if (result.transaction.state === 'planned') {
+            for (const blocker of derived)
+                if (!reported.has(blocker))
+                    context.addIssue({ code: 'custom', message: `Planned image placement must expose blocker ${blocker}.` });
+            for (const blocker of reported) {
+                if (!derived.has(blocker) && blocker !== 'source_file_changed' && blocker !== 'source_file_missing') {
+                    context.addIssue({ code: 'custom', message: `Planned image placement reports an underivable blocker ${blocker}.` });
+                }
+            }
+        }
+        else if (reported.size !== 0 || !result.plan.applyAllowed || derived.size !== 0 || result.plan.admission.status !== 'admitted') {
+            context.addIssue({ code: 'custom', message: 'Applied image placement must derive from an allowed, admitted plan.' });
+        }
+        if (result.applied) {
+            if (result.transaction.state !== 'verified') {
+                context.addIssue({ code: 'custom', message: 'A placed image must come from a verified transaction.' });
+            }
+            if (result.created.layerItemUuids[0] !== result.created.uuid ||
+                result.created.layerItemUuids.length !== result.plan.layer.itemUuids.length + 1 ||
+                result.created.layerItemUuids.slice(1).some((uuid, index) => uuid !== result.plan.layer.itemUuids[index])) {
+                context.addIssue({ code: 'custom', message: 'A placed image must be the only new item, at the front, with the prior order intact.' });
+            }
+            const admission = result.plan.admission;
+            if (Math.abs(result.created.position[0] - result.plan.position[0]) > PLACE_IMAGE_TOLERANCE_PT ||
+                Math.abs(result.created.position[1] - result.plan.position[1]) > PLACE_IMAGE_TOLERANCE_PT ||
+                (admission.status === 'admitted' && !platform.samePath(result.created.filePath, admission.resolvedPath)) ||
+                (result.plan.name !== null && result.created.name !== result.plan.name) ||
+                (result.plan.size !== null && (Math.abs(result.created.width - result.plan.size.width) > PLACE_IMAGE_TOLERANCE_PT ||
+                    Math.abs(result.created.height - result.plan.size.height) > PLACE_IMAGE_TOLERANCE_PT))) {
+                context.addIssue({ code: 'custom', message: 'A placed image must match the planned position, size, source path, and name.' });
+            }
+        }
+        else if (result.transaction.state === 'verified') {
+            context.addIssue({ code: 'custom', message: 'A verified image placement must report the created item.' });
+        }
+        if (result.transaction.state === 'rolled_back') {
+            const rollback = result.transaction.rollback;
+            if (rollback.createdUuid === null || rollback.restoredItemUuids === null ||
+                canonicalSha256(rollback.restoredItemUuids) !== canonicalSha256(result.plan.layer.itemUuids)) {
+                context.addIssue({ code: 'custom', message: 'A rolled-back image placement must name the removed UUID and prove the exact baseline order.' });
+            }
+        }
+        if (result.transaction.state === 'rollback_failed') {
+            const rollback = result.transaction.rollback;
+            if (rollback.createdUuid === null || rollback.restoredItemUuids === null || !rollback.restoredItemUuids.includes(rollback.createdUuid)) {
+                context.addIssue({ code: 'custom', message: 'A failed image placement rollback must name the UUID that is still present and prove it in the read-back order.' });
+            }
+        }
+    });
+    const placeImageResponseSchema = z.strictObject({
+        outcome: placeImageResultSchema,
+        delivery: z.strictObject({ mode: z.enum(['original', 'replay']), finalizedAt: z.string().datetime({ offset: true }) }),
+    });
+    return {
+        sourceSchema, admissionSchema: placeImageAdmissionSchema, unadmittedInputSchema, internalInputSchema, publicInputSchema: placeImagePublicInputSchema,
+        inputSchema, normalizePublicInput, planSchema, createdSchema, resultSchema: placeImageResultSchema, responseSchema: placeImageResponseSchema,
+    };
+}
+const MACOS_CONTRACT = buildPlaceImageContract(MACOS_PLACE_IMAGE_PLATFORM);
+export const placeImageAdmissionSchema = MACOS_CONTRACT.admissionSchema;
+export const placeImagePublicInputSchema = MACOS_CONTRACT.publicInputSchema;
+export const placeImageResultSchema = MACOS_CONTRACT.resultSchema;
+export const placeImageResponseSchema = MACOS_CONTRACT.responseSchema;
+export async function admitPlaceImageRequest(input, services) {
+    const request = MACOS_CONTRACT.unadmittedInputSchema.parse(input);
+    return { ...request, admission: await admitSource(request.source, services.imageFileInspector) };
+}
+export async function admitSource(source, inspector) {
+    return (await admitSourceWithColorSpace(source, inspector)).admission;
+}
+export async function admitSourceWithColorSpace(source, inspector) {
+    const admission = await admitSourceInspection(source, inspector);
+    return admission.status === 'admitted'
+        ? { admission: admission.value, colorSpace: admission.colorSpace, icc: admission.icc }
+        : { admission: admission.value, colorSpace: null, icc: null };
+}
+async function admitSourceInspection(source, inspector) {
+    const blocked = (value) => ({ status: 'blocked', value });
+    let resolvedPath;
+    try {
+        resolvedPath = await realpath(source.path);
+    }
+    catch (error) {
+        const code = error?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') {
+            return blocked({ status: 'blocked', resolvedPath: null, reason: 'source_file_missing', message: `Source file ${source.path} does not exist.` });
+        }
+        return blocked({ status: 'blocked', resolvedPath: null, reason: 'source_file_unavailable', message: boundedMessage(error) });
+    }
+    if (!MACOS_PLACE_IMAGE_PLATFORM.absolutePathSchema.safeParse(resolvedPath).success) {
+        return blocked({ status: 'blocked', resolvedPath: null, reason: 'source_file_unavailable', message: 'Resolved source path is not an admissible absolute path.' });
+    }
+    const inspection = await inspector.inspect(resolvedPath);
+    if (inspection.status === 'missing') {
+        return blocked({ status: 'blocked', resolvedPath, reason: 'source_file_missing', message: `Source file ${resolvedPath} does not exist.` });
+    }
+    if (inspection.status === 'unavailable') {
+        return blocked({ status: 'blocked', resolvedPath, reason: 'source_file_unavailable', message: `${inspection.reason}: ${inspection.message}` });
+    }
+    if (inspection.file.sha256 !== source.sha256) {
+        return blocked({ status: 'blocked', resolvedPath, reason: 'source_hash_mismatch',
+            message: `Source file SHA-256 ${inspection.file.sha256} does not match the requested ${source.sha256}.` });
+    }
+    const format = inspection.metadata.format;
+    if (format.status !== 'available') {
+        return blocked({ status: 'blocked', resolvedPath, reason: 'source_format_unmeasured', message: format.message });
+    }
+    const pixels = inspection.metadata.pixels;
+    const ppi = inspection.metadata.nativePpi;
+    return { status: 'admitted', colorSpace: inspection.metadata.colorSpace, icc: inspection.metadata.icc, value: {
+            status: 'admitted', resolvedPath, bytes: inspection.file.bytes, modifiedAt: inspection.file.modifiedAt,
+            sha256: inspection.file.sha256, format: format.value,
+            pixels: pixels.status === 'available' ? { width: pixels.value.width, height: pixels.value.height } : null,
+            nativePpi: ppi.status === 'available' ? { x: ppi.value.x, y: ppi.value.y } : null,
+        } };
+}
+function boundedMessage(error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    return (raw.length > 0 ? raw : 'Unknown source admission error.').slice(0, 500);
+}
 export const PLACE_IMAGE_SAFETY = operationSafetyRegistrationSchema.parse({
     operationId: PLACE_IMAGE_OPERATION,
     policy: {
@@ -517,8 +543,8 @@ function safetyResult(result, requestDigest, attestation, plan) {
         resolution: { status: 'failed', terminal: true, recovery: 'not_required', proof: { kind: 'proven_pre_apply', mutationAttempted: false },
             replay: { status: 'durable_terminal', action: 'return_attested_result', reapply: false } } });
 }
-async function assertSafety(value, requestDigest, attestation, resolver) {
-    const result = placeImageResultSchema.parse(value);
+async function assertSafety(contract, value, requestDigest, attestation, resolver) {
+    const result = contract.resultSchema.parse(value);
     const plan = safetyPlan(result, requestDigest, attestation?.documentKey);
     if (result.transaction.state === 'planned')
         return;
@@ -526,8 +552,9 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
         throw new Error('Image placement terminal result requires attestation.');
     await assertOperationSafetyAdapterConformance({ registration: PLACE_IMAGE_SAFETY, plan, result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
-export const PLACE_IMAGE_SCRIPT = `${HOST_FILE_PATH_HELPERS}
-${MUTATION_TRANSACTION_SCRIPT}
+export function placeImageScript(host) {
+    return `${host.pathHelpers}
+${MUTATION_TRANSACTION_SCRIPT}${ACTIVE_LAYER_GUARD_SCRIPT}
 ${PLACE_FIT_SCRIPT}
 var PLACE_IMAGE_MAX_DIRECT_ITEMS = ${PLACE_IMAGE_MAX_DIRECT_ITEMS};
 var PLACE_IMAGE_MAX_LAYER_DEPTH = ${PLACE_IMAGE_MAX_LAYER_DEPTH};
@@ -542,7 +569,7 @@ function placeRound(value) {
 /** Re-checks every plan-side rejection so a caller cannot reach the host with an unadmitted request. */
 function placeValidateRequest() {
   var source = params.source;
-  if (!source || typeof source.path !== "string" || source.path.length < 2 || source.path.charAt(0) !== "/") {
+  if (!source || typeof source.path !== "string" || source.path.length < 2 || ${host.sourcePathInvalid}) {
     throw mutationError("preflight_failed", "Source path must be an absolute path.");
   }
   if (typeof source.sha256 !== "string" || source.sha256.length !== 64) throw mutationError("preflight_failed", "Source SHA-256 is required.");
@@ -551,7 +578,7 @@ function placeValidateRequest() {
     throw mutationError("preflight_failed", "Source admission is missing; the request did not pass Node-side file admission.");
   }
   if (admission.status === "admitted") {
-    if (typeof admission.resolvedPath !== "string" || admission.resolvedPath.charAt(0) !== "/" || admission.sha256 !== source.sha256 ||
+    if (typeof admission.resolvedPath !== "string" || ${host.resolvedPathInvalid} || admission.sha256 !== source.sha256 ||
         typeof admission.bytes !== "number" || admission.bytes <= 0 || typeof admission.format !== "string") {
       throw mutationError("preflight_failed", "Source admission facts are inconsistent with the request.");
     }
@@ -735,7 +762,11 @@ function placeResolve(forApply) {
   if (forApply && blockers.length > 0) {
     throw new Error("MCP_ERROR:" + stringifyJson({ code: "PLACE_IMAGE_APPLY_BLOCKED", reasonCodes: blockers, layerPath: params.expectedLayerPath }));
   }
-  return { context: context, document: document, layer: layer, ancestry: ancestry, order: order, rect: rect, position: position, sizing: sizing, blockers: blockers };
+  // The assignment of file commits the item to the active layer, so the apply path records where it is and what the whole document holds.
+  var activeLayer = forApply ? guardCaptureActiveLayer(document) : null;
+  var counts = forApply ? guardCaptureCounts(document) : null;
+  return { context: context, document: document, layer: layer, ancestry: ancestry, order: order, rect: rect, position: position, sizing: sizing, blockers: blockers,
+    activeLayer: activeLayer, counts: counts };
 }
 
 function placePlan(preflight) {
@@ -767,6 +798,18 @@ function placeRevalidate(preflight, plan) {
       !mutationSameSequence(current.rect, plan.artboardBounds) || !mutationSameSequence(current.position, plan.position)) {
     throw mutationBeforeSideEffectError("Image placement target, layer, or artboard changed before apply.");
   }
+  if (!mutationSameSequence(current.activeLayer.path, preflight.activeLayer.path) || current.activeLayer.name !== preflight.activeLayer.name ||
+      !guardCountsUnchanged(preflight.counts, current.counts)) {
+    throw mutationBeforeSideEffectError("The active layer or the document item counts changed before apply.");
+  }
+  // Linking the file places the item on the active layer, so make the target layer active first (restored after apply, verify, and rollback).
+  try { guardSelectActiveLayer(preflight.document, preflight.layer); }
+  catch (selectError) {
+    if (guardRestoreActiveLayer(preflight.document, preflight.activeLayer)) {
+      throw mutationBeforeSideEffectError(mutationPublicMessage(selectError, "The target layer could not be made the active layer."));
+    }
+    throw mutationError("apply_failed", "The target layer could not be made the active layer and the previous active layer could not be restored.");
+  }
 }
 
 function placeApply(preflight, plan, state) {
@@ -795,6 +838,8 @@ function placeApply(preflight, plan, state) {
     return item;
   } finally {
     app.userInteractionLevel = previousInteractionLevel;
+    // Never throws; placeVerify and placeRollback read the result back and refuse a layer that is not the recorded one.
+    guardRestoreActiveLayer(preflight.document, preflight.activeLayer);
   }
 }
 
@@ -812,6 +857,12 @@ function placeVerify(preflight, plan, state) {
   if (order.length !== plan.layer.itemUuids.length + 1 || order[0] !== createdUuid || !mutationSameSequence(order.slice(1), plan.layer.itemUuids)) {
     throw mutationError("verify_mismatch", "The placed image is not the only new front item of its layer.");
   }
+  if (!guardActiveLayerMatches(preflight.document, preflight.activeLayer)) {
+    throw mutationError("verify_mismatch", "The active layer was not restored to the layer that was active before the placement.");
+  }
+  if (!guardCountsOnlyAdded(preflight.counts, guardCaptureCounts(preflight.document), params.expectedLayerPath)) {
+    throw mutationError("verify_mismatch", "The document item counts show a change other than the one placed image on the target layer.");
+  }
   var read = placeReadItem(item);
   if (!hostFilePathMatches(read.filePath, params.admission.resolvedPath)) throw mutationError("verify_mismatch", "The placed image links a different file than the admitted source.");
   if (Math.abs(read.position[0] - plan.position[0]) > PLACE_IMAGE_TOLERANCE_PT || Math.abs(read.position[1] - plan.position[1]) > PLACE_IMAGE_TOLERANCE_PT) {
@@ -825,7 +876,7 @@ function placeVerify(preflight, plan, state) {
     geometricBounds: read.geometricBounds, width: read.width, height: read.height, matrix: read.matrix, layerItemUuids: order };
 }
 
-function placeRollback(state) {
+function placeRollbackLayer(state) {
   var preflight = state.preflight;
   var createdUuid = state.operationState.createdUuid;
   if (!preflight || app.documents.length === 0 || app.activeDocument !== preflight.document) {
@@ -859,6 +910,22 @@ function placeRollback(state) {
   return mutationSameSequence(restored, preflight.order) ? { status: "verified" } : { status: "indeterminate", message: "Rollback removed the placed image but the layer does not match the baseline." };
 }
 
+/** The layer-local rollback, then the document-wide proof: the active layer is back and no item remains anywhere else. */
+function placeRollback(state) {
+  var outcome = placeRollbackLayer(state);
+  var preflight = state.preflight;
+  if (!preflight || !preflight.activeLayer || !preflight.counts || app.documents.length === 0 || app.activeDocument !== preflight.document) return outcome;
+  var activeRestored = guardRestoreActiveLayer(preflight.document, preflight.activeLayer);
+  if (outcome.status !== "verified") return outcome;
+  if (!activeRestored) return { status: "indeterminate", message: "Rollback removed the placed image but the previous active layer could not be restored." };
+  var counts;
+  try { counts = guardCaptureCounts(preflight.document); } catch (countError) { return { status: "indeterminate", message: "Rollback document item counts are indeterminate." }; }
+  if (!guardCountsUnchanged(preflight.counts, counts)) {
+    return { status: "indeterminate", message: "Rollback refused because the document item counts differ from the baseline; an item may remain outside the target layer." };
+  }
+  return outcome;
+}
+
 var placeExecution = runMutationTransaction({
   apply: params.apply === true,
   editSessionAffected: function (phase, preflight, plan, state) { return (phase === "after") ? [state.operationState.createdUuid] : []; },
@@ -881,58 +948,75 @@ var result = { operation: "place_image", applied: placeExecution.transaction.sta
   document: placeDocument, plan: placeExecution.plan, transaction: placeExecution.transaction };
 if (placeExecution.transaction.state === "verified") result.created = placeExecution.value;
 `;
+}
+export const PLACE_IMAGE_SCRIPT = placeImageScript(MACOS_PLACE_IMAGE_PLATFORM.host);
 export const PLACE_IMAGE_HOST_SCRIPT_DIGEST = canonicalSha256(PLACE_IMAGE_SCRIPT);
-export const PLACE_IMAGE_ADAPTER_IDENTITY = mutationAdapterIdentity({
-    version: 2, contractVersion: 1, operation: PLACE_IMAGE_OPERATION, validator: PLACE_IMAGE_VALIDATOR,
-    canonicalContractVersion: CANONICAL_VERSION, resultSchemaVersion: RESULT_SCHEMA_VERSION, terminalClassifierVersion: CLASSIFIER_VERSION,
-    safetyConformanceVersion: CONFORMANCE_VERSION, errorMappingVersion: ERROR_MAPPING_VERSION,
-    safetyIdentity: PLACE_IMAGE_SAFETY_IDENTITY, hostScriptDigest: PLACE_IMAGE_HOST_SCRIPT_DIGEST,
-});
-function normalizedRequest(input) {
-    const request = internalInputSchema.parse(input);
+export function placeImageAdapterIdentity(hostScriptDigest) {
+    return mutationAdapterIdentity({
+        version: 2, contractVersion: 1, operation: PLACE_IMAGE_OPERATION, validator: PLACE_IMAGE_VALIDATOR,
+        canonicalContractVersion: CANONICAL_VERSION, resultSchemaVersion: RESULT_SCHEMA_VERSION, terminalClassifierVersion: CLASSIFIER_VERSION,
+        safetyConformanceVersion: CONFORMANCE_VERSION, errorMappingVersion: ERROR_MAPPING_VERSION,
+        safetyIdentity: PLACE_IMAGE_SAFETY_IDENTITY, hostScriptDigest,
+    });
+}
+export const PLACE_IMAGE_ADAPTER_IDENTITY = placeImageAdapterIdentity(PLACE_IMAGE_HOST_SCRIPT_DIGEST);
+function normalizedRequestOf(contract, input) {
+    const request = contract.internalInputSchema.parse(input);
     const { commandId: _commandId, admission: _admission, ...digestRequest } = request;
     const digest = canonicalSha256({ operation: PLACE_IMAGE_OPERATION, validator: PLACE_IMAGE_VALIDATOR, request: digestRequest });
     return { intent: request.apply ? 'apply' : 'plan', request, commandId: 'commandId' in request ? request.commandId : null,
         documentKey: request.expectedDocumentKey, digest };
 }
-export const placeImageToolContract = {
-    name: 'illustrator_place_image',
-    title: 'Plan or Place Linked Image',
-    description: `Plan or place one external raster file (TIFF, JPEG, PNG, or PSD; absolute path plus its SHA-256) as a linked PlacedItem on an explicit layer path at an artboard-top-left anchor in points. The file is admitted in Node before any Illustrator call (existence, exact SHA-256, measured format); a missing, changed, or unmeasured source blocks the plan. Optional size: width or height (aspect kept), contain or cover in a width x height box at the anchor (centered by default; cover overflows without clipping), or stretch (non-uniform, only by name). For contain/cover, focal_point selects a normalized source point and align_to selects center, a thirds intersection, or normalized box coordinates; the plan returns requested/effective positions and the right/down clamp, which keeps the whole image inside (contain) or the box covered (cover). The plan returns the size, the X and Y effective PPI, and, with minimum_effective_ppi, which axes fall below it (a warning, not a blocker; no built-in threshold). Apply creates once, verifies the native UUID, layer order, linked path, position, and size, and rolls back only its own created item with absence proven. Relink and embed are not part of this tool.`,
-    inputSchema,
-    publicInputSchema: placeImagePublicInputSchema,
-    outputSchema: placeImageResponseSchema,
-    annotations: operationSafetyPolicyToMcpAnnotations(PLACE_IMAGE_SAFETY.policy),
-    normalizePublicInput,
-};
-export function createPlaceImageAdapter() {
+const PLACE_IMAGE_TOOL_DESCRIPTION = 'Plan or place one external raster file (TIFF, JPEG, PNG or PSD; absolute path plus its SHA-256) as a linked PlacedItem on an explicit layer path at an artboard-top-left anchor in points. The file is checked in Node before any Illustrator call (existence, exact SHA-256, format); a missing, changed or unmeasured-format file blocks the plan. Optional size: width or height (aspect kept), contain or cover in a width x height box at the anchor (centered; cover overflows without clipping), or stretch (non-uniform, by name only). For contain or cover, focal_point and align_to set the position; the plan returns requested and effective positions and the clamp. The plan returns the size and X and Y effective PPI; minimum_effective_ppi only warns per axis. Apply creates the item once, verifies it, and rolls back only its own item. Relink and embed are not part of this tool.';
+function placeImageToolContractOf(contract, description) {
+    return {
+        name: 'illustrator_place_image',
+        title: 'Plan or Place Linked Image',
+        description,
+        inputSchema: contract.inputSchema,
+        publicInputSchema: contract.publicInputSchema,
+        outputSchema: contract.responseSchema,
+        annotations: operationSafetyPolicyToMcpAnnotations(PLACE_IMAGE_SAFETY.policy),
+        normalizePublicInput: contract.normalizePublicInput,
+    };
+}
+export const placeImageToolContract = placeImageToolContractOf(MACOS_CONTRACT, PLACE_IMAGE_TOOL_DESCRIPTION);
+export function assemblePlaceImageAdapter(variant) {
+    const { contract, commands } = variant;
+    const script = commands.read.script;
+    if (commands.mutation.script !== script)
+        throw new Error('The plan and apply commands of an image adapter must run one host script.');
+    const normalizedRequest = (input) => normalizedRequestOf(contract, input);
+    const hostScriptDigest = canonicalSha256(script);
+    const adapterIdentity = placeImageAdapterIdentity(hostScriptDigest);
     return {
         version: 1, operation: PLACE_IMAGE_OPERATION, validator: PLACE_IMAGE_VALIDATOR,
         safety: PLACE_IMAGE_SAFETY, safetyRegistrationIdentity: PLACE_IMAGE_SAFETY_IDENTITY,
-        adapterIdentity: PLACE_IMAGE_ADAPTER_IDENTITY, tool: placeImageToolContract,
+        adapterIdentity, tool: placeImageToolContractOf(contract, variant.toolDescription),
         canonical: { version: CANONICAL_VERSION, normalize: normalizedRequest, safetyDigest: (input) => normalizedRequest(input).digest },
-        resultSchema: placeImageResultSchema, resultSchemaVersion: RESULT_SCHEMA_VERSION,
+        resultSchema: contract.resultSchema, resultSchemaVersion: RESULT_SCHEMA_VERSION,
         terminalClassifierVersion: CLASSIFIER_VERSION, safetyConformanceVersion: CONFORMANCE_VERSION,
-        errorMappingVersion: ERROR_MAPPING_VERSION, hostScriptDigest: PLACE_IMAGE_HOST_SCRIPT_DIGEST,
-        admit: admitPlaceImageRequest,
+        errorMappingVersion: ERROR_MAPPING_VERSION, hostScriptDigest,
+        admit: variant.admit,
+        ...(variant.beforeHost === undefined ? {} : { beforeHost: variant.beforeHost }),
         buildCommand(input) {
             const normalized = normalizedRequest(input);
             const { commandId: _commandId, ...params } = normalized.request;
             if (normalized.intent === 'plan')
-                return { kind: 'read', script: PLACE_IMAGE_SCRIPT, params };
-            return { kind: 'mutation', mutationValidator: PLACE_IMAGE_VALIDATOR,
+                return { ...commands.read, params };
+            return { kind: commands.mutation.kind, mutationValidator: PLACE_IMAGE_VALIDATOR,
                 idempotency: { commandId: normalized.commandId, operation: PLACE_IMAGE_OPERATION, documentKey: normalized.documentKey, requestDigest: normalized.digest },
-                adapterIdentity: PLACE_IMAGE_ADAPTER_IDENTITY, script: PLACE_IMAGE_SCRIPT, params };
+                adapterIdentity, script: commands.mutation.script, params };
         },
         classifyTerminal(value) {
-            const state = placeImageResultSchema.parse(value).transaction.state;
+            const state = contract.resultSchema.parse(value).transaction.state;
             if (state === 'verified' || state === 'apply_failed' || state === 'rolled_back' || state === 'rollback_failed')
                 return { state };
             if (state === 'planned')
                 throw new Error('Image placement plan is not a terminal mutation result.');
             throw new Error('Indeterminate image placement must retain its lock.');
         },
-        assertSafetyConformance: assertSafety,
+        assertSafetyConformance: (value, requestDigest, attestation, resolver) => assertSafety(contract, value, requestDigest, attestation, resolver),
         mapExecutionError(error, detail) {
             if (detail?.code === 'PLACE_IMAGE_APPLY_BLOCKED') {
                 return new Error(`Image placement is blocked: ${(detail.reasonCodes ?? []).join(', ') || 'unknown reason'}.`);
@@ -940,4 +1024,8 @@ export function createPlaceImageAdapter() {
             return error instanceof Error ? error : new Error(String(error));
         },
     };
+}
+export function createPlaceImageAdapter() {
+    return assemblePlaceImageAdapter({ contract: MACOS_CONTRACT, commands: { read: { kind: 'read', script: PLACE_IMAGE_SCRIPT }, mutation: { kind: 'mutation', script: PLACE_IMAGE_SCRIPT } },
+        toolDescription: PLACE_IMAGE_TOOL_DESCRIPTION, admit: admitPlaceImageRequest });
 }

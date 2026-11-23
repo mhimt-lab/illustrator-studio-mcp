@@ -8,7 +8,7 @@
 
 セットアップは [README の「インストール」](../README.ja.md#インストール) を参照してください。
 
-> **Public Beta 0.1.0-beta.6。** 試用版です。制作ファイルのコピーで試してください。Illustratorを前面に表示し、画面ロックを解除した状態で使います。対応範囲は [Betaの範囲](compatibility.md#betaの範囲) を確認してください。
+> **Public Beta 0.1.0-beta.7。** 試用版です。制作ファイルのコピーで試してください。Illustratorを前面に表示し、画面ロックを解除した状態で使います。対応範囲は [Betaの範囲](compatibility.md#betaの範囲) を確認してください。
 
 ## 最初は、データを変えずに試す
 

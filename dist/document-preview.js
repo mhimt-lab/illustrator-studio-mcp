@@ -7,6 +7,7 @@ import { DocumentMismatchError, IndeterminateExecutionError } from './domain.js'
 import { ARTBOARD_INTEGER_TOLERANCE } from './artboard-integer.js';
 import { HOST_VERSION_POLICY_JSX } from './host-version-policy.js';
 import { documentContextSchema } from './mutation-result-schema-core.js';
+import { nonPrintingLayerWarning, NON_PRINTING_LAYER_HELPERS } from './non-printing-layers.js';
 import { ensurePrivateDirectory, ensurePrivateStateRoot, isWindowsPrivateState } from './private-state.js';
 import { decodePng, inspectSupportedPng, privatePreviewReadGate, readStableImage, VISUAL_DIFF_MAX_FILE_BYTES } from './visual-diff.js';
 export const PREVIEW_RESOLUTION_PPI = 72;
@@ -59,6 +60,7 @@ export const previewResultSchema = z.strictObject({
     }),
     timing: z.strictObject({ hostCaptureMs: z.number().int().nonnegative() }),
     staging: z.strictObject({ removed: z.boolean() }),
+    warnings: z.array(z.string()).optional(),
     evidenceClass: z.literal('host_rendered_range_capture'),
 });
 export class PreviewRejectedError extends Error {
@@ -80,7 +82,7 @@ export class PreviewFailedError extends Error {
 const SAVED_REFUSAL_MESSAGE = 'The document is saved (saved=true). Capturing a preview changes saved to false on a saved ' +
     'document, after which every mutation that requires the saved file is refused. Preview is supported only on ' +
     'a document with unsaved changes or a new unsaved document; nothing was captured.';
-export const PREVIEW_CAPTURE_SCRIPT = `${HOST_VERSION_POLICY_JSX}
+export const PREVIEW_CAPTURE_SCRIPT = `${HOST_VERSION_POLICY_JSX}${NON_PRINTING_LAYER_HELPERS}
 var MUTATION_SIDE_EFFECT_ATTEMPTED = false;
 function previewReject(code, message, actual) {
   throw new Error("MCP_ERROR:" + stringifyJson({ code: code, message: message, actual: actual === undefined ? null : actual }));
@@ -112,6 +114,7 @@ if (previewArtboard < 0) previewReject("PREVIEW_RANGE_OUTSIDE_ARTBOARD", "The ra
 var previewFile = new File(params.outputPath);
 if (previewFile.exists) previewReject("PREVIEW_STAGING_UNAVAILABLE", "The private staging file already exists.");
 var previewBefore = previewState(previewDocument);
+var previewLayers = nplScanSafe(previewDocument);
 var previewOptions = new ImageCaptureOptions();
 previewOptions.resolution = params.resolution;
 previewOptions.antiAliasing = true;
@@ -132,7 +135,8 @@ var result = {
   artboardIndex: previewArtboard,
   captureError: previewCaptureError,
   outputExists: new File(params.outputPath).exists === true,
-  captureMs: previewCaptureMs
+  captureMs: previewCaptureMs,
+  nonPrintingLayers: previewLayers
 };
 `;
 function parseHostError(error) {
@@ -291,6 +295,7 @@ export async function capturePreview(deps, input) {
             throw new PreviewFailedError('PREVIEW_OUTPUT_INVALID', error instanceof Error ? error.message : String(error));
         }
         const removed = await removeStaging(staging.directory, stagedPath);
+        const previewWarning = nonPrintingLayerWarning(host.nonPrintingLayers, 'warn_only');
         const result = previewResultSchema.parse({
             document: host.after.context,
             range: { bounds, unit: 'pt', coordinateSpace: 'document', artboardIndex: host.artboardIndex },
@@ -319,6 +324,7 @@ export async function capturePreview(deps, input) {
             focus: { activated, previousFrontmost },
             timing: { hostCaptureMs: Math.max(0, Math.round(host.captureMs)) },
             staging: { removed },
+            ...(previewWarning === null ? {} : { warnings: [previewWarning.message] }),
             evidenceClass: 'host_rendered_range_capture',
         });
         return { result, png: source.bytes };

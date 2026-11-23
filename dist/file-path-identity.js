@@ -1,4 +1,5 @@
 import { lstat, realpath } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { documentKeyPath, pathComparisonParams, sameFilePath } from './file-path.js';
 export async function proveSaveSessionIdentity(record, document) {
     if (record.state !== 'open' || record.sourceFileRevision !== document.fileRevision)
@@ -57,6 +58,53 @@ export async function matchingDocumentPaths(inventory, paths) {
         matches.push(document);
     }
     return matches;
+}
+export async function matchingDocumentScope(inventory, scope) {
+    if (scope.directories.length === 0)
+        return await matchingDocumentPaths(inventory, scope.paths);
+    if (inventory.documents.length !== inventory.documentCount)
+        throw new Error('The raw document inventory is incomplete.');
+    if (inventory.documentCount === 0)
+        return [];
+    const directoryIdentities = [];
+    for (const directory of scope.directories) {
+        const metadata = await lstat(directory, { bigint: true });
+        if (!metadata.isDirectory())
+            throw new Error('The session scope is not a directory; absence cannot be established.');
+        directoryIdentities.push({ dev: metadata.dev, ino: metadata.ino });
+    }
+    const matches = [];
+    for (const document of inventory.documents) {
+        if (document.path === null)
+            throw new Error('An open document path is unavailable; absence cannot be established.');
+        const admitted = scope.paths.filter((path) => sameFilePath(document.path, path));
+        if (admitted.length > 0) {
+            for (const path of admitted)
+                await assertSameFilePathIdentity(document.path, path);
+            matches.push(document);
+            continue;
+        }
+        if (await underAnyDirectory(document.path, scope.directories, directoryIdentities))
+            matches.push(document);
+    }
+    return matches;
+}
+async function underAnyDirectory(documentPath, directories, identities) {
+    const normalizedPath = documentPath.normalize('NFC');
+    if (directories.some((directory) => normalizedPath.startsWith(`${directory.normalize('NFC').replace(/\/+$/u, '')}/`)))
+        return true;
+    let real = await realpath(dirname(documentPath));
+    for (;;) {
+        const metadata = await lstat(real, { bigint: true });
+        if (!metadata.isDirectory())
+            throw new Error('An open document parent is not a directory; absence cannot be established.');
+        if (identities.some((identity) => identity.dev === metadata.dev && identity.ino === metadata.ino))
+            return true;
+        const next = dirname(real);
+        if (next === real)
+            return false;
+        real = next;
+    }
 }
 export function withFilePathComparisons(command) {
     const params = pathComparisonParams(command.params ?? {});

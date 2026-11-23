@@ -8,7 +8,6 @@ import { documentContextSchema, mutationAuditSchema } from '../mutation-result-s
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { CLIPPING_MASK_HOST_SCRIPT, clipAuditMatches, clipBlockerSchema, clipCmykWithinMeasuredScope, clipGroupSnapshotSchema, clipLayerStateSchema, clipParentOrderSchema, sameCanonical, sameGroupAfterRelease, } from './clipping-mask-shared.js';
 import { mapClipExecutionError } from './create-clipping-mask-adapter.js';
-import { describeHostVersionScope } from '../host-version-admission.js';
 export const RELEASE_CLIPPING_MASK_OPERATION = 'release_clipping_mask';
 export const RELEASE_CLIPPING_MASK_VALIDATOR = { kind: RELEASE_CLIPPING_MASK_OPERATION, version: 1 };
 const CANONICAL_VERSION = 2;
@@ -388,7 +387,7 @@ function normalizedRequest(input) {
 export const releaseClippingMaskToolContract = {
     name: 'illustrator_release_clipping_mask',
     title: 'Read or Release Clipping Mask',
-    description: 'Read (apply=false) or release one clip group directly on a top-level layer. The plan is the clip-group read: group, mask, and content UUIDs, child order [mask, content], flags, bounds, lock/hidden state, and one nested clip group as content. Measured profile only: a two-child group [clipping PathItem without paint, PathItem or one such clip group], RGB, Illustrator ' + describeHostVersionScope('clipping_mask') + ' in the foreground; inner (nested) groups, PlacedItem, CompoundPathItem, sublayers, and other shapes are refused. Locked or hidden groups, children, and layers are refused by this tool (Illustrator itself does not refuse them). Apply compares expected_group_before and expected_parent_order, clears group.clipped and mask.clipping, verifies that the group, both children, and the parent order are otherwise unchanged, and on failure sets both flags back and proves the exact before state. The mask stays in the group without fill or stroke.',
+    description: 'Read (apply=false) or release one clip group, identified by group_uuid, directly on a top-level layer. The plan reads the group, mask and content UUIDs, child order, flags and bounds. Admitted profile only: a two-child group of a clipping PathItem without paint and a PathItem (or one such clip group), in an RGB document, in the foreground; other shapes, inner groups, sublayers and compound paths are refused with CLIP_UNSUPPORTED_TARGET. Locked or hidden groups, children and layers are refused by this tool. Apply compares expected_group_before and expected_parent_order, clears the clipping flags, and verifies the group, both children and the parent order; on failure it restores both flags. The mask stays in the group without fill or stroke. Unmeasured stable versions are admitted and reported as host_version; a saved file on one needs a backup_id from illustrator_create_backup.',
     inputSchema,
     publicInputSchema: releaseClippingMaskPublicInputSchema,
     outputSchema: releaseClippingMaskResponseSchema,

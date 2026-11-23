@@ -2,7 +2,13 @@ import { z } from 'zod';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { PLAIN_POINT_TEXT_V1 } from './point-text-host-script.js';
 export const RECORDED_PROFILE_NAME = 'recorded_point_text_v3';
-export const RECORDED_ADMITTED_STYLE_FIELDS = ['size', 'tracking', 'horizontalScale', 'verticalScale', 'fillColor', 'fontPostScriptName'];
+export const RECORDED_ADMITTED_STYLE_FIELDS = ['size', 'tracking', 'horizontalScale', 'verticalScale', 'fillColor', 'fontPostScriptName', 'tsume'];
+export function assertTsumeRepresentable(tsume) {
+    if (tsume !== undefined && !sizeRepresentable(tsume)) {
+        throw new Error(`style_tsume_not_representable: tsume ${tsume} has more than five decimals, the precision this tool verifies; `
+            + `request ${Math.round(tsume * 100_000) / 100_000} or a value with fewer decimals.`);
+    }
+}
 export const RECORDED_PINNED_FRAME_NAMES = ['orientation', 'wrapped'];
 export const RECORDED_FINGERPRINT_CHARACTER_NAMES = ['autoLeading'];
 export const RECORDED_CHARACTER_NAMES = Object.freeze(Object.keys(PLAIN_POINT_TEXT_V1.character)
@@ -104,6 +110,11 @@ function styleV3Refuse(code, message) {
   throw mutationError("preflight_failed", code + ": " + message + " Nothing was written. MCP cannot change this itself and does not work around it with GUI automation or an ad-hoc script.");
 }
 
+/** (#671) A tsume request records the Tsume of every character as an explicit field (so the request can predict and verify it); the table then carries a constant in its place. */
+function styleV3TsumeRequested() {
+  return !!params.style && params.style.tsume !== undefined;
+}
+
 function styleV3Admitted(key) {
   for (var index = 0; index < STYLE_V3_FIELDS.length; index++) if (STYLE_V3_FIELDS[index] === key) return true;
   return false;
@@ -196,10 +207,14 @@ function styleV3Character(character, full) {
     strokeColor: stroke.entry,
     autoLeading: autoLeading
   };
+  var tsumeRequested = styleV3TsumeRequested();
+  if (tsumeRequested) entry.tsume = pointTextCanonicalChannel(pointTextNumber(attributes.Tsume, "characterAttributes.Tsume"), "Tsume");
   var manual = false, kerning;
   if (!full) return { entry: entry, row: null, manual: false };
   var row = [], index;
-  for (index = 0; index < STYLE_V3_CHAR_NAMES.length; index++) row.push(styleV3Value(attributes, STYLE_V3_CHAR_NAMES[index]));
+  for (index = 0; index < STYLE_V3_CHAR_NAMES.length; index++) {
+    row.push(tsumeRequested && STYLE_V3_CHAR_NAMES[index] === "Tsume" ? "explicit" : styleV3Value(attributes, STYLE_V3_CHAR_NAMES[index]));
+  }
   row.push(stroke.text);
   try {
     kerning = character.kerning;
@@ -421,6 +436,7 @@ function styleV3PredictAfter(target, before) {
     if (params.style.tracking !== undefined) next.tracking = params.style.tracking;
     if (params.style.horizontalScale !== undefined) next.horizontalScale = params.style.horizontalScale;
     if (params.style.verticalScale !== undefined) next.verticalScale = params.style.verticalScale;
+    if (params.style.tsume !== undefined) next.tsume = params.style.tsume;
     if (params.style.fillColor !== undefined) next.fillColor = params.style.fillColor;
     if (params.style.fontPostScriptName !== undefined) {
       var font = styleFont();
@@ -445,6 +461,7 @@ function styleV3Restore(target, before) {
     if (params.style.tracking !== undefined) attributes.tracking = source.tracking;
     if (params.style.horizontalScale !== undefined) attributes.horizontalScale = source.horizontalScale;
     if (params.style.verticalScale !== undefined) attributes.verticalScale = source.verticalScale;
+    if (params.style.tsume !== undefined) attributes.Tsume = source.tsume;
     if (params.style.fillColor !== undefined) attributes.fillColor = pointTextNativeFillColor(source.fillColor);
     if (params.style.fontPostScriptName !== undefined) attributes.textFont = app.textFonts.getByName(source.font.postScriptName);
   }

@@ -80,6 +80,46 @@ const RUNNER_LINES = [
 ];
 export const WINDOWS_RUNNER_SOURCE = `${RUNNER_LINES.join('\r\n')}\r\n`;
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+const PREFLIGHT_LINES = [
+    '# MCP_PREFLIGHT read-only attach observation (plain reads only). Node decides; the only Illustrator contact is GetActiveObject.',
+    '$mcpPaths = @()',
+    '$mcpVersions = @()',
+    '$mcpAvailable = $false',
+    "$mcpProcesses = @([Diagnostics.Process]::GetProcessesByName('Illustrator'))",
+    'foreach ($mcpProcess in $mcpProcesses) {',
+    '  $mcpPath = $null',
+    '  try { $mcpPath = [string]$mcpProcess.MainModule.FileName } catch { }',
+    '  $mcpVersion = $null',
+    '  if ($mcpPath) { try { $mcpVersion = [string][Diagnostics.FileVersionInfo]::GetVersionInfo($mcpPath).FileVersion } catch { } }',
+    '  $mcpPaths += , $mcpPath',
+    '  $mcpVersions += , $mcpVersion',
+    '}',
+    'if ($mcpProcesses.Count -eq 1 -and $mcpPaths[0]) {',
+    '  $mcpApplication = $null',
+    "  try { $mcpApplication = [Runtime.InteropServices.Marshal]::GetActiveObject('Illustrator.Application') } catch { }",
+    '  $mcpAvailable = $null -ne $mcpApplication',
+    '  if ($null -ne $mcpApplication) { try { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($mcpApplication) } catch { } }',
+    '  $mcpApplication = $null',
+    '}',
+    '$mcpJson = ConvertTo-Json -Compress -InputObject ([ordered]@{ powerShellVersion = [string]$PSVersionTable.PSVersion;',
+    '  apartmentState = [string][Threading.Thread]::CurrentThread.ApartmentState; processCount = $mcpProcesses.Count;',
+    '  paths = $mcpPaths; fileVersions = $mcpVersions; attachAvailable = $mcpAvailable; version = $null })',
+    "$mcpJson = [Text.RegularExpressions.Regex]::Replace($mcpJson, '[^\\x20-\\x7e]', { param($m) '\\u{0:x4}' -f [int][char]$m.Value })",
+    '[Console]::Out.Write("attach $nonce $mcpJson`n")',
+    '[Console]::Out.Flush()',
+];
+const PREFLIGHT_ANCHOR = '$creationTime = [Diagnostics.Process]::GetCurrentProcess().StartTime.ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture)';
+function insertBeforeOnce(lines, anchor, block) {
+    const at = lines.flatMap((line, index) => line === anchor ? [index] : []);
+    if (at.length !== 1)
+        throw new Error(`The runner preflight anchor must occur exactly once (found ${at.length}).`);
+    return [...lines.slice(0, at[0]), ...block, ...lines.slice(at[0])];
+}
+export const WINDOWS_READ_RUNNER_SOURCE = `${insertBeforeOnce(RUNNER_LINES, PREFLIGHT_ANCHOR, PREFLIGHT_LINES).join('\r\n')}\r\n`;
+export const WINDOWS_READ_RUNNER_PREFLIGHT_SOURCE = `${PREFLIGHT_LINES.join('\r\n')}\r\n`;
+export function windowsReadRunnerFileContents() {
+    return Buffer.concat([UTF8_BOM, Buffer.from(WINDOWS_READ_RUNNER_SOURCE, 'utf8')]);
+}
 export function windowsRunnerFileContents() {
     return Buffer.concat([UTF8_BOM, Buffer.from(WINDOWS_RUNNER_SOURCE, 'utf8')]);
 }

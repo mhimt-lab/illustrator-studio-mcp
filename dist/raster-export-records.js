@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { fileIdentitySchema, hostDocumentIdentitySchema } from './document-backup.js';
 import { canonicalSerialize } from './mutation-canonical.js';
 export const RASTER_EXPORT_RECORD_VERSION = 2;
+export const RASTER_SVG_RECORD_VERSION = 4;
 export const RASTER_EXPORT_KIND = 'raster_vector_export';
 export const RASTER_BATCH_EXPORT_KIND = 'raster_batch_export';
 export const RASTER_EXPORT_SESSION_MAX_BYTES = 16_384;
@@ -177,6 +178,12 @@ export const RASTER_EXACT_RECORD_SCHEMAS = {
     cleanup: rasterExportCleanupSchema.extend(v3Version),
     quarantine: rasterExportQuarantineSchema.extend(v3Version),
 };
+export function isSvgExportRecord(record) {
+    return record.version === 4 || (record.version === 5 && Reflect.get(record, 'renderVersion') === 4);
+}
+export function isExactExportRecord(record) {
+    return record.version === 3 || (record.version === 5 && Reflect.get(record, 'renderVersion') === 3);
+}
 export class ExportSessionFormatError extends Error {
     exportId;
     reason;
@@ -204,10 +211,34 @@ export function classifyExportEntry(text, expected, schemas) {
     if (value === null || typeof value !== 'object' || Array.isArray(value))
         return { format: 'invalid', reason: 'not_an_object' };
     const entry = value;
-    if (entry.version === 3 && entry.kind === 'save_as_session')
+    if (entry.version === 5) {
+        if (schemas.v5 === undefined)
+            return { format: 'invalid', reason: 'unsupported_version' };
+        if (entry.kind !== RASTER_EXPORT_KIND)
+            return { format: 'invalid', reason: 'unknown_kind' };
+        if (entry.recordType !== expected.recordType)
+            return { format: 'invalid', reason: 'record_type_mismatch' };
+        if (entry.exportId !== expected.exportId)
+            return { format: 'invalid', reason: 'export_id_mismatch' };
+        const parsed = schemas.v5.safeParse(entry);
+        return parsed.success ? { format: 'v5', record: parsed.data } : { format: 'invalid', reason: 'schema_invalid' };
+    }
+    if ((entry.version === 3 || entry.version === 4) && entry.kind === 'save_as_session')
         return { format: 'invalid', reason: 'save_as_session' };
     if (entry.version === RASTER_EXPORT_RECORD_VERSION && entry.kind === RASTER_BATCH_EXPORT_KIND)
         return { format: 'invalid', reason: 'raster_batch_export' };
+    if (entry.version === RASTER_SVG_RECORD_VERSION) {
+        if (schemas.v4 === undefined)
+            return { format: 'invalid', reason: 'unsupported_version' };
+        if (entry.kind !== RASTER_EXPORT_KIND)
+            return { format: 'invalid', reason: 'unknown_kind' };
+        if (entry.recordType !== expected.recordType)
+            return { format: 'invalid', reason: 'record_type_mismatch' };
+        if (entry.exportId !== expected.exportId)
+            return { format: 'invalid', reason: 'export_id_mismatch' };
+        const parsed = schemas.v4.safeParse(entry);
+        return parsed.success ? { format: 'v4', record: parsed.data } : { format: 'invalid', reason: 'schema_invalid' };
+    }
     if (entry.version === RASTER_EXACT_PX_RECORD_VERSION) {
         if (schemas.v3 === undefined)
             return { format: 'invalid', reason: 'unsupported_version' };
@@ -259,6 +290,28 @@ export function assessRasterRecordSet(set, planDigest) {
     const versions = new Set(types.flatMap(type => set[type].state === 'v2' && set[type].record.version !== undefined ? [set[type].record.version] : []));
     if (versions.size > 1)
         return { state: 'invalid', reason: 'mixed_record_versions' };
+    if (versions.has(5)) {
+        const raw = set;
+        const prepare = raw.prepare.state === 'v2' && raw.prepare.record.version === 5 ? raw.prepare.record : null;
+        if (prepare === null)
+            return { state: 'invalid', reason: 'overwrite_without_prepare' };
+        const projected = Object.fromEntries(types.map(type => {
+            const read = raw[type];
+            if (read.state !== 'v2')
+                return [type, read];
+            const record = read.record;
+            return [type, { ...read, record: { ...record, version: record.version === 5 ? record.renderVersion : record.version } }];
+        }));
+        for (const type of types) {
+            const read = raw[type];
+            if (read.state === 'v2' && (read.record.version !== 5 || read.record.planDigest !== prepare.planDigest || read.record.renderVersion !== prepare.renderVersion || read.record.requestDigest !== prepare.requestDigest ||
+                canonicalSerialize(read.record.expectedOutput) !== canonicalSerialize(prepare.expectedOutput)))
+                return { state: 'invalid', reason: 'overwrite_intent_mismatch' };
+        }
+        if (prepare.expectedOutput.path !== prepare.outputPath || canonicalSerialize(prepare.expectedOutput.parentIdentity) !== canonicalSerialize(prepare.outputParentIdentity))
+            return { state: 'invalid', reason: 'overwrite_destination_mismatch' };
+        return assessRasterRecordSet(projected, planDigest);
+    }
     if (versions.has(3)) {
         const exact = set;
         const prepare = exact.prepare.state === 'v2' ? exact.prepare.record : null;
@@ -281,6 +334,46 @@ export function assessRasterRecordSet(set, planDigest) {
                 return { state: 'invalid', reason: 'exact_published_binding_mismatch' };
             if (session !== null && (canonicalSerialize(session.options) !== canonicalSerialize(published.options) || session.expected.width !== published.expected.width || session.expected.height !== published.expected.height))
                 return { state: 'invalid', reason: 'exact_published_intent_mismatch' };
+        }
+    }
+    if (versions.has(4)) {
+        const svg = set;
+        const prepare = svg.prepare.state === 'v2' ? svg.prepare.record : null;
+        if (prepare === null)
+            return { state: 'invalid', reason: 'records without prepare' };
+        for (const type of types) {
+            const read = svg[type];
+            if (read.state === 'v2' && (read.record.version !== 4 || read.record.planDigest !== prepare.planDigest))
+                return { state: 'invalid', reason: 'svg_record_intent_mismatch' };
+        }
+        const v4 = (type) => {
+            const read = svg[type];
+            if (read.state !== 'v2')
+                return null;
+            const record = read.record;
+            return record.version === 4 ? record : null;
+        };
+        const session = v4('session');
+        const binding = v4('artifact_binding');
+        const published = v4('published');
+        const near = (actual, expected) => Math.abs(actual - expected) <= 0.0005 + 1e-9;
+        if (session !== null && binding !== null) {
+            if (binding.sessionDigest !== svg.session.digest)
+                return { state: 'invalid', reason: 'svg_binding_session_mismatch' };
+            if (!near(binding.width, session.expected.width) || !near(binding.height, session.expected.height))
+                return { state: 'invalid', reason: 'svg_binding_dimension_mismatch' };
+        }
+        if (published !== null) {
+            if (svg.artifact_binding.state !== 'v2' || published.bindingDigest !== svg.artifact_binding.digest || svg.host_terminal.state !== 'v2' || published.hostTerminalDigest !== svg.host_terminal.digest)
+                return { state: 'invalid', reason: 'svg_published_binding_mismatch' };
+            if (binding !== null && (published.artifact.sha256 !== binding.sha256 || published.artifact.bytes !== binding.bytes || published.artifact.width !== binding.width ||
+                published.artifact.height !== binding.height || published.artifact.viewBox !== binding.viewBox))
+                return { state: 'invalid', reason: 'svg_published_artifact_mismatch' };
+            if (!near(published.artifact.width, published.expected.width) || !near(published.artifact.height, published.expected.height))
+                return { state: 'invalid', reason: 'svg_published_dimension_mismatch' };
+            if (session !== null && (canonicalSerialize(session.options) !== canonicalSerialize(published.options) || canonicalSerialize(session.expected) !== canonicalSerialize(published.expected) ||
+                canonicalSerialize(session.expectedBounds) !== canonicalSerialize(published.expectedBounds) || session.artboardIndex !== published.artboardIndex))
+                return { state: 'invalid', reason: 'svg_published_intent_mismatch' };
         }
     }
     if (planDigest !== undefined) {

@@ -5,17 +5,17 @@ import { DeleteBackupError, deleteBackupFactsSchema, verifyDeleteBackup } from '
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
-import { documentContextSchema, layerPathSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
+import { documentContextSchema, layerPathSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { ANCESTOR_STATE_SCRIPT } from './ancestor-state-host-script.js';
 import { admitSourceWithColorSpace, placeImageAdmissionSchema } from './place-image-adapter.js';
 import { inspectEmbedSourceStructure } from '../embed-source-structure.js';
-import { describeHostVersionScope } from '../host-version-admission.js';
 import { HOST_VERSION_POLICY_JSX } from '../host-version-policy.js';
+import { absolutePathSchema, boundsSchema, colorSpaceAdmissionSchema, documentKeySchema, EMBED_IMAGE_MAX_DIRECT_ITEMS, EMBED_IMAGE_TOLERANCE_PT, embedTransactionSchema, matrixSchema, pixelsSchema, positionSchema, sourceSchema, uuidSchema, } from './embed-image-shared.js';
+import { admitEmbedBatchRequest, assertEmbedBatchPixelAdmission, EMBED_IMAGE_BATCH_HOST_SCRIPT, embedBatchAfterDigest, embedBatchBeforeDigest, embedBatchChangeSetHash, embedBatchInternalInputSchema, embedBatchResultSchema, embedImageBatchPublicApplySchema, embedImageBatchPublicPlanSchema, embedImageBatchPublishedSchema, isEmbedBatchInput, normalizeEmbedBatchPublicInput, } from './embed-image-batch.js';
 export const EMBED_IMAGE_OPERATION = 'embed_image';
 export const EMBED_IMAGE_VALIDATOR = { kind: EMBED_IMAGE_OPERATION, version: 1 };
-export const EMBED_IMAGE_MAX_DIRECT_ITEMS = 128;
-export const EMBED_IMAGE_TOLERANCE_PT = 0.01;
+export { EMBED_IMAGE_MAX_DIRECT_ITEMS, EMBED_IMAGE_TOLERANCE_PT };
 export const EMBED_IMAGE_PRECISION_DIGITS = 6;
 export const EMBED_IMAGE_MEASURED_FORMATS = ['jpeg', 'png'];
 export const EMBED_IMAGE_MEASURED_COLOR_SPACES = ['RGB'];
@@ -29,20 +29,10 @@ export const EMBED_IMAGE_CMYK_EXPECTED = { imageColorSpace: 'ImageColorSpace.CMY
 export const EMBED_IMAGE_CMYK_MATRIX_TOLERANCE = 1e-6;
 export const EMBED_IMAGE_PPI_RELATIVE_TOLERANCE = 1e-4;
 const CANONICAL_VERSION = 2;
-const RESULT_SCHEMA_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 3;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
-const uuidSchema = z.string().min(1).max(255);
-const documentKeySchema = z.string().min(1).max(16_384);
-const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
-const absolutePathSchema = z.string().min(2).max(4_096)
-    .regex(/^\/(?!(?:.*\/)?\.\.(?:\/|$))[^\0]*$/u, 'Source path must be an absolute path without NUL or parent-directory segments.');
-const sourceSchema = z.strictObject({ path: absolutePathSchema, sha256: sha256Schema });
-const boundsSchema = z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]);
-const positionSchema = z.tuple([z.number().finite(), z.number().finite()]);
-const matrixSchema = z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]);
-const pixelsSchema = z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() });
 const commonSnapshotFields = {
     layerPath: layerPathSchema,
     layerIndex: z.number().int().nonnegative().max(EMBED_IMAGE_MAX_DIRECT_ITEMS),
@@ -117,11 +107,6 @@ export function embedAfterWithinTolerance(left, right) {
         left.position.every((value, index) => near(value, right.position[index])) &&
         left.geometricBounds.every((value, index) => near(value, right.geometricBounds[index]));
 }
-const colorSpaceAdmissionSchema = z.strictObject({
-    status: z.enum(['available', 'unavailable']),
-    value: z.enum(['RGB', 'CMYK', 'Gray', 'Lab', 'Indexed', 'unknown']).nullable(),
-    message: z.string().max(500).nullable(),
-});
 export const embedSourceProfileSchema = z.strictObject({
     profile: z.literal(EMBED_IMAGE_CMYK_PROFILE),
     icc: z.enum(['present', 'absent', 'unavailable']),
@@ -188,30 +173,36 @@ const commonPublic = { ...hostVersionPublicFields,
     source: sourceSchema.describe('The linked file: its absolute path (as illustrator_preflight_images reports it) and the SHA-256 of the bytes to embed.'),
     backup_id: z.uuid().describe('backup_id of a verified illustrator_create_backup record of this document\'s current file.'),
 };
-export const embedImagePublicInputSchema = z.discriminatedUnion('apply', [
-    z.strictObject({ ...commonPublic, apply: z.literal(false).default(false) }),
-    z.strictObject({
-        ...commonPublic,
-        expected_before: embedImageBeforeSchema.describe('plan.before, echoed.'),
-        confirmed_after: embedImageAfterSchema.describe('plan.after, echoed (uuid null).'),
-        apply: z.literal(true),
-        command_id: applyCommandIdSchema,
-    }),
-]);
+const embedImageSinglePlanPublicSchema = z.strictObject({ ...commonPublic, apply: z.literal(false).default(false) });
+const embedImageSingleApplyPublicSchema = z.strictObject({
+    ...commonPublic,
+    expected_before: embedImageBeforeSchema.describe('plan.before, echoed.'),
+    confirmed_after: embedImageAfterSchema.describe('plan.after, echoed (uuid null).'),
+    apply: z.literal(true),
+    command_id: applyCommandIdSchema,
+});
+const embedImageSinglePublicInputSchema = z.discriminatedUnion('apply', [embedImageSinglePlanPublicSchema, embedImageSingleApplyPublicSchema]);
+export const embedImagePublicInputSchema = z.union([embedImageSinglePlanPublicSchema, embedImageSingleApplyPublicSchema, embedImageBatchPublicPlanSchema, embedImageBatchPublicApplySchema]);
 const inputSchema = z.strictObject({
-    ...commonPublic, expected_before: embedImageBeforeSchema.optional(), confirmed_after: embedImageAfterSchema.optional(),
+    ...commonPublic, target_uuid: commonPublic.target_uuid.optional(), source: commonPublic.source.optional(),
+    items: z.array(z.unknown()).optional(),
+    expected_before: z.unknown().optional(), confirmed_after: z.unknown().optional(),
     apply: z.boolean().default(false), command_id: applyCommandIdSchema.optional(),
 });
-const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(embedImagePublicInputSchema, { io: 'input' });
+const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(z.union([embedImageSinglePlanPublicSchema, embedImageSingleApplyPublicSchema, embedImageBatchPublishedSchema]), { io: 'input' });
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
 function normalizePublicInput(input) {
-    const value = embedImagePublicInputSchema.parse(input);
+    if (isEmbedBatchInput(input))
+        return normalizeEmbedBatchPublicInput(input);
+    const value = embedImageSinglePublicInputSchema.parse(input);
     const common = { ...normalizeHostVersionConsent(value), expectedDocumentKey: value.expected_document_key, targetUuid: value.target_uuid, source: value.source, backupId: value.backup_id };
     return value.apply
         ? { ...common, expectedBefore: value.expected_before, confirmedAfter: value.confirmed_after, apply: true, commandId: value.command_id }
         : { ...common, apply: false };
 }
 export async function admitEmbedImageRequest(input, services) {
+    if (isEmbedBatchInput(input))
+        return admitEmbedBatchRequest(input, services);
     const request = unadmittedInputSchema.parse(input);
     if (services.backupStore === undefined)
         throw new Error('Embedding requires the backup store; call through the MCP server.');
@@ -238,7 +229,9 @@ export async function admitEmbedImageRequest(input, services) {
         ...(sourceModifiedAtMs === undefined ? {} : { sourceModifiedAtMs }) };
 }
 async function beforeHost(input, services) {
-    const request = internalInputSchema.parse(input);
+    const request = isEmbedBatchInput(input) ? embedBatchInternalInputSchema.parse(input) : internalInputSchema.parse(input);
+    if ('items' in request)
+        assertEmbedBatchPixelAdmission(request.items);
     if (services.backupStore === undefined || request.backup === undefined)
         throw new Error('Embedding requires an admitted backup.');
     const current = await verifyDeleteBackup(services.backupStore, request.backupId);
@@ -285,64 +278,17 @@ const planSchema = z.strictObject({
         context.addIssue({ code: 'custom', message: 'Embed after state must be the before slot, name and frame as a RasterItem of the admitted pixels.' });
     }
 });
-const failureSchema = z.strictObject({
-    phase: z.enum(['apply', 'verify']), reasonCode: z.enum(['apply_failed', 'verify_mismatch']), message: z.string().min(1).max(500),
-}).superRefine((failure, context) => {
-    if ((failure.phase === 'apply') !== (failure.reasonCode === 'apply_failed'))
-        context.addIssue({ code: 'custom', message: 'Embed failure phase and reason code must match.' });
-});
 const rollbackEvidence = {
     targetUuid: uuidSchema,
     afterUuid: uuidSchema.nullable(),
     unchangedSnapshot: embedImageBeforeSchema.nullable(),
 };
-const transactionSchema = z.discriminatedUnion('state', [
-    z.strictObject({ state: z.literal('planned'), audit: mutationAuditSchema }),
-    z.strictObject({ state: z.literal('verified'), audit: mutationAuditSchema }),
-    z.strictObject({ state: z.literal('apply_failed'), failure: failureSchema, rollback: z.strictObject({ status: z.literal('not_required') }), audit: mutationAuditSchema }),
-    z.strictObject({ state: z.literal('rolled_back'), failure: failureSchema, rollback: z.strictObject({ status: z.literal('verified'), ...rollbackEvidence }), audit: mutationAuditSchema }),
-    z.strictObject({ state: z.literal('apply_indeterminate'),
-        failure: z.strictObject({ phase: z.literal('apply'), reasonCode: z.literal('apply_indeterminate'), message: z.string().min(1).max(500) }),
-        rollback: z.strictObject({ status: z.literal('indeterminate'), reasonCode: z.literal('embed_outcome_unknown'), message: z.string().min(1).max(500), ...rollbackEvidence }),
-        audit: mutationAuditSchema }),
-    z.strictObject({ state: z.literal('rollback_indeterminate'), failure: failureSchema,
-        rollback: z.strictObject({ status: z.literal('indeterminate'), reasonCode: z.literal('rollback_indeterminate'), message: z.string().min(1).max(500), ...rollbackEvidence }),
-        audit: mutationAuditSchema }),
-]).superRefine((transaction, context) => {
-    const prefix = ['preflight:started:', 'preflight:succeeded:', 'plan:started:', 'plan:succeeded:'];
-    let expected;
-    if (transaction.state === 'planned')
-        expected = [...prefix, 'apply:skipped:not_requested', 'verify:skipped:not_requested', 'rollback:skipped:not_requested'];
-    else if (transaction.state === 'verified')
-        expected = [...prefix, 'apply:started:', 'apply:attempted:', 'apply:succeeded:', 'verify:started:', 'verify:succeeded:', 'rollback:skipped:not_required'];
-    else if (transaction.state === 'apply_failed')
-        expected = [...prefix, 'apply:started:', 'apply:failed:apply_failed', 'verify:skipped:not_required', 'rollback:skipped:not_required'];
-    else if (transaction.state === 'apply_indeterminate')
-        expected = [...prefix, 'apply:started:', 'apply:attempted:', 'apply:failed:apply_indeterminate'];
-    else {
-        const failure = transaction.failure.phase === 'apply'
-            ? ['apply:started:', 'apply:attempted:', 'apply:failed:apply_failed', 'verify:skipped:not_required']
-            : ['apply:started:', 'apply:attempted:', 'apply:succeeded:', 'verify:started:', 'verify:failed:verify_mismatch'];
-        expected = [...prefix, ...failure, 'rollback:started:', transaction.state === 'rolled_back' ? 'rollback:succeeded:' : 'rollback:failed:rollback_indeterminate'];
-        if (transaction.state === 'rolled_back' && transaction.failure.phase !== 'apply')
-            context.addIssue({ code: 'custom', message: 'Only a refused embed can be rolled back.' });
-    }
-    const actual = transaction.audit.map((event) => `${event.phase}:${event.event}:${'reasonCode' in event ? event.reasonCode : ''}`);
-    if (actual.length !== expected.length || actual.some((value, index) => value !== expected[index]))
-        context.addIssue({ code: 'custom', message: 'Embed audit sequence does not match transaction state.' });
-    transaction.audit.forEach((event, index) => { if (event.sequence !== index)
-        context.addIssue({ code: 'custom', message: 'Embed audit sequence must be contiguous.' }); });
-    if ('failure' in transaction) {
-        const matches = transaction.audit.filter((event) => event.event === 'failed' && event.phase === transaction.failure.phase && event.reasonCode === transaction.failure.reasonCode && event.message === transaction.failure.message);
-        if (matches.length !== 1)
-            context.addIssue({ code: 'custom', message: 'Embed failure must match one audit event.' });
-    }
-});
+const transactionSchema = embedTransactionSchema(rollbackEvidence);
 const postconditionSchema = z.strictObject({ raster: embedImageAfterSchema, evidence: rasterEvidenceSchema });
 function sameBeforeState(left, right) {
     return canonicalDigest(embedBeforeStateOf(left)) === canonicalDigest(embedBeforeStateOf(right));
 }
-export const embedImageResultSchema = z.union([
+const embedImageSingleResultSchema = z.union([
     z.strictObject({ operation: z.literal(EMBED_IMAGE_OPERATION), applied: z.literal(false), document: documentContextSchema, plan: planSchema, transaction: transactionSchema }),
     z.strictObject({ operation: z.literal(EMBED_IMAGE_OPERATION), applied: z.literal(true), document: documentContextSchema, plan: planSchema, postcondition: postconditionSchema, transaction: transactionSchema }),
 ]).superRefine((result, context) => {
@@ -413,6 +359,7 @@ export const embedImageResultSchema = z.union([
         }
     }
 });
+export const embedImageResultSchema = z.union([embedImageSingleResultSchema, embedBatchResultSchema]);
 export const embedImageResponseSchema = z.strictObject({
     outcome: embedImageResultSchema,
     delivery: z.strictObject({ mode: z.enum(['original', 'replay']), finalizedAt: z.string().datetime({ offset: true }) }),
@@ -475,8 +422,57 @@ function safetyResult(result, requestDigest, attestation, plan) {
         executionEvidence: { outcome: 'proven_pre_apply' },
         resolution: { status: 'failed', terminal: true, recovery: 'not_required', proof: { kind: 'proven_pre_apply', mutationAttempted: false }, replay } });
 }
+function batchSafetyPlan(result, requestDigest, admissionDocumentKey = result.document.key) {
+    const beforeStateHash = embedBatchBeforeDigest(result.plan.before);
+    const changeSetHash = embedBatchChangeSetHash(result);
+    return bindOperationSafetyPlan({
+        policyVersion: 1, operationClass: 'update_existing', operationId: EMBED_IMAGE_OPERATION, canonicalRequestDigest: requestDigest,
+        evidence: { documentKey: admissionDocumentKey, targetUuid: result.plan.before.items[0].uuid, beforeStateHash,
+            plannedAfterStateHash: embedBatchAfterDigest(result.plan.after), plannedChangeSetDigest: changeSetHash },
+        preconditions: { status: result.plan.applyBlockedReasonCodes.length === 0 ? 'satisfied' : 'blocked', compareAndSetMatched: result.plan.applyBlockedReasonCodes.length === 0 },
+        confirmation: { kind: 'exact_change_set', canonicalRequestDigest: requestDigest, changeSetHash, status: result.plan.confirmationStatus },
+        applyAllowed: result.plan.applyAllowed,
+    });
+}
+function batchSafetyResult(result, requestDigest, attestation, plan) {
+    const transaction = result.transaction;
+    if (transaction.state === 'planned' || transaction.state === 'apply_indeterminate' || transaction.state === 'rollback_indeterminate') {
+        throw new Error('An indeterminate embed cannot be terminal.');
+    }
+    const common = { policyVersion: 1, operationClass: 'update_existing', operationId: EMBED_IMAGE_OPERATION, canonicalRequestDigest: requestDigest, planDigest: plan.planDigest, attestation };
+    const targetUuid = result.plan.before.items[0].uuid;
+    const beforeStateHash = embedBatchBeforeDigest(result.plan.before);
+    const replay = { status: 'durable_terminal', action: 'return_attested_result', reapply: false };
+    if (transaction.state === 'verified' && result.applied) {
+        return operationSafetyResultSchema.parse({ ...common,
+            evidence: { targetUuid, beforeStateHash, afterStateHash: embedBatchAfterDigest(result.plan.after), restoredStateHash: null, restoredBeforeStateVerified: false },
+            executionEvidence: { outcome: 'completed' },
+            resolution: { status: 'succeeded', terminal: true, recovery: 'not_required', proof: { kind: 'verified_postcondition' }, replay } });
+    }
+    if (transaction.state === 'rolled_back') {
+        return operationSafetyResultSchema.parse({ ...common,
+            evidence: { targetUuid, beforeStateHash, afterStateHash: null, restoredStateHash: beforeStateHash, restoredBeforeStateVerified: true },
+            executionEvidence: { outcome: 'completed' },
+            resolution: { status: 'recovered', terminal: true, recovery: 'verified', proof: { kind: 'verified_recovery' }, replay } });
+    }
+    return operationSafetyResultSchema.parse({ ...common,
+        evidence: { targetUuid, beforeStateHash, afterStateHash: null, restoredStateHash: null, restoredBeforeStateVerified: false },
+        executionEvidence: { outcome: 'proven_pre_apply' },
+        resolution: { status: 'failed', terminal: true, recovery: 'not_required', proof: { kind: 'proven_pre_apply', mutationAttempted: false }, replay } });
+}
 async function assertSafety(value, requestDigest, attestation, resolver) {
-    const result = embedImageResultSchema.parse(value);
+    const parsed = embedImageResultSchema.parse(value);
+    if ('items' in parsed.plan) {
+        const batch = parsed;
+        const batchPlan = batchSafetyPlan(batch, requestDigest, attestation?.documentKey);
+        if (batch.transaction.state === 'planned')
+            return;
+        if (attestation === null || resolver === null)
+            throw new Error('Embed terminal result requires attestation.');
+        await assertOperationSafetyAdapterConformance({ registration: EMBED_IMAGE_SAFETY, plan: batchPlan, result: batchSafetyResult(batch, requestDigest, attestation, batchPlan) }, resolver);
+        return;
+    }
+    const result = parsed;
     const plan = safetyPlan(result, requestDigest, attestation?.documentKey);
     if (result.transaction.state === 'planned')
         return;
@@ -873,7 +869,8 @@ function embedRollback(state) {
   return { status: "verified" };
 }
 
-var embedExecution = runMutationTransaction({
+${EMBED_IMAGE_BATCH_HOST_SCRIPT}
+var embedExecution = runMutationTransaction(params.items !== undefined ? embedBatchDefinition() : {
   apply: params.apply === true,
   initialOperationState: function () { return { embedCalled: false, embedReturned: false, afterUuid: null, counts: null, nameRestored: false,
     rollbackEvidence: { targetUuid: params.targetUuid, afterUuid: null, unchangedSnapshot: null } }; },
@@ -902,7 +899,16 @@ export const EMBED_IMAGE_ADAPTER_IDENTITY = mutationAdapterIdentity({
     safetyIdentity: EMBED_IMAGE_SAFETY_IDENTITY, hostScriptDigest: EMBED_IMAGE_HOST_SCRIPT_DIGEST,
     mutationHostApplicationMode: 'foreground',
 });
+function normalizedBatchRequest(input) {
+    const request = embedBatchInternalInputSchema.parse(input);
+    const { commandId: _commandId, backup: _b, resultTooLarge: _r, items, ...rest } = request;
+    const digestItems = items.map(({ sourceAdmission: _s, sourceColorSpace: _c, sourceModifiedAtMs: _m, ...item }) => item);
+    const digest = canonicalSha256({ operation: EMBED_IMAGE_OPERATION, validator: EMBED_IMAGE_VALIDATOR, request: { ...rest, items: digestItems } });
+    return { intent: request.apply ? 'apply' : 'plan', request, commandId: 'commandId' in request ? request.commandId : null, documentKey: request.expectedDocumentKey, digest };
+}
 function normalizedRequest(input) {
+    if (isEmbedBatchInput(input))
+        return normalizedBatchRequest(input);
     const request = internalInputSchema.parse(input);
     const { commandId: _commandId, sourceAdmission: _s, sourceColorSpace: _c, sourceProfile: _p, sourceModifiedAtMs: _m, backup: _b, ...digestRequest } = request;
     const digest = canonicalSha256({ operation: EMBED_IMAGE_OPERATION, validator: EMBED_IMAGE_VALIDATOR, request: digestRequest });
@@ -911,7 +917,7 @@ function normalizedRequest(input) {
 export const embedImageToolContract = {
     name: 'illustrator_embed_image',
     title: 'Plan or Embed Linked Image',
-    description: `Plan or embed one linked, layer-direct PlacedItem (bound by document key and native UUID) into the document, so illustrator_optimize_images can process it. Irreversible in the document: requires a verified backup (illustrator_create_backup) of the clean saved file and the linked file's absolute path and SHA-256. Measured scope only (Illustrator ${describeHostVersionScope('embed_image')}, foreground, unlocked): RGB document with ${EMBED_IMAGE_MEASURED_FORMATS.join('/').toUpperCase()} RGB sources, or CMYK document with flat 8-bit PSD (RGB/CMYK) or TIFF (CMYK) sources that carry an ICC profile (profile cmyk_flat_raster_v1; Illustrator's one-RasterItem wrapper group is normalised, the result is a layer-direct CMYK RasterItem). The plan returns before (the linked item) and after (a RasterItem in the same slot, name and frame, with the source's pixels); apply echoes both as expected_before and confirmed_after, re-checks them and the link immediately before embedding, and verifies the raster (new UUID, which the result reports). Refused: missing or changed links, other files, locked or hidden items or layers, items in groups, dirty or unsaved documents, backup mismatch or staleness. The document is then unsaved; save it with illustrator_save_document and the same backup_id. There is no in-call undo: a failure after embedding is indeterminate and keeps the Illustrator lock (release with illustrator_reconcile action=release_unverified); the unchanged file equals the backup, so closing without saving and reopening restores the before state.`,
+    description: 'Plan or embed linked, layer-direct PlacedItems (native UUIDs, bound by document key) into the document so illustrator_optimize_images can process them: one item (target_uuid, source) or 1 to 16 in one plan and one apply (items, one backup, one command_id, JPEG/PNG RGB only; batch limits: each source <=4000000 pixels, at most two above 960000 pixels, total <=21440000 pixels, checked from source inspection before Host dispatch on plan and apply; split oversized batches without resizing sources; any blocked item embeds none; a failure after the first embed is indeterminate and never undone). Irreversible: requires a verified backup (illustrator_create_backup) of the clean saved file, plus each linked file\'s absolute path and SHA-256. Supported: RGB documents with JPEG or PNG RGB sources; CMYK documents with flat 8-bit PSD (RGB/CMYK) or TIFF (CMYK) sources carrying an ICC profile. Needs Illustrator in the foreground, screen unlocked. Apply must echo expected_before and confirmed_after from the plan. Refused: missing or changed links, locked or hidden items, items in groups, dirty or unsaved documents, backup mismatch. The document is then unsaved; save it with illustrator_save_document and the same backup_id. No in-call undo: a failure after embedding keeps the Illustrator lock until illustrator_reconcile action=release_unverified; closing without saving restores the before state.',
     inputSchema,
     publicInputSchema: embedImagePublicInputSchema,
     outputSchema: embedImageResponseSchema,
@@ -956,8 +962,11 @@ export function createEmbedImageAdapter() {
                 return new Error(`No PlacedItem with UUID ${JSON.stringify(detail.uuid ?? '')} exists in the bound document.`);
             if (detail?.code === 'EMBED_TARGET_NOT_LINKED')
                 return new Error(`target_already_embedded: the item ${JSON.stringify(detail.uuid ?? '')} is an embedded RasterItem, not a linked PlacedItem.`);
-            if (detail?.code === 'EMBED_IMAGE_APPLY_BLOCKED')
-                return new Error(`Embedding is blocked: ${(detail.reasonCodes ?? []).join(', ') || 'unknown reason'}.`);
+            if (detail?.code === 'EMBED_IMAGE_APPLY_BLOCKED') {
+                const items = Array.isArray(detail.items) ? detail.items : [];
+                const perItem = items.map((item) => `item ${(item.index ?? 0) + 1}: ${(item.codes ?? []).join(', ')}`).join('; ');
+                return new Error(`Embedding is blocked: ${(detail.reasonCodes ?? []).join(', ') || 'unknown reason'}${perItem === '' ? '' : ` (${perItem}). Nothing was embedded`}.`);
+            }
             if (detail?.code === 'DOCUMENT_NOT_SAVED')
                 return new Error(`document_not_saved: ${detail.message ?? 'only a clean saved document can be embedded into'}. Nothing was embedded.`);
             return error instanceof Error ? error : new Error(String(error));

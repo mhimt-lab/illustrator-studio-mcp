@@ -20,7 +20,7 @@ import { StdioProtocolVersionGate } from './stdio-version-gate.js';
 import { CallTimingTransport, callTimingEnabled } from './call-timing.js';
 import { resolveIllustratorApplication, STABLE_ILLUSTRATOR_APPLICATION } from './illustrator-application.js';
 import { buildWindowsReadOperations } from './windows/read-operations.js';
-import { parseWindowsCandidateMutations, WINDOWS_CANDIDATE_MUTATIONS_ENV } from './windows/mutation-publication.js';
+import { parseWindowsCandidateMutations, WINDOWS_CANDIDATE_MUTATIONS_ENV, WINDOWS_CANDIDATE_OPERATIONS } from './windows/mutation-publication.js';
 import { formatSetupCommand, SETUP_USAGE } from './setup-command.js';
 async function runDoctorCommand(args) {
     const unknown = args.filter((argument) => argument !== '--json');
@@ -41,8 +41,8 @@ const USAGE = [
     '"doctor [--json]" prints environment diagnostics without starting the server.',
     '"setup" prints exact-version client commands without reading or changing settings or contacting Illustrator.',
     ...(process.platform === 'win32' ? [
-        'Windows: read tools only; mutations not available on Windows yet.',
-        `Opt-in candidate (live P0 pending, not published by default): ${WINDOWS_CANDIDATE_MUTATIONS_ENV}=create_rectangle.`,
+        'Windows: read tools and the published mutation tools (create_rectangle, the text, object and layer operations, create_document / open_document / close_document, and place_image / relink_image); other mutations are not available on Windows yet.',
+        `${WINDOWS_CANDIDATE_MUTATIONS_ENV} names additional opt-in candidate mutations (${WINDOWS_CANDIDATE_OPERATIONS.length === 0 ? 'none at present' : `live P0 pending: ${WINDOWS_CANDIDATE_OPERATIONS.join(', ')}`}). A published operation is accepted and ignored.`,
         'Illustrator must already be running alone. ILLUSTRATOR_APPLICATION must be Illustrator.Application.',
         'Optional environment: ILLUSTRATOR_STUDIO_MCP_STATE_DIR (attested private local NTFS directory).',
     ] : [

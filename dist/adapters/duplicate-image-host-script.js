@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { HOST_VERSION_POLICY_JSX } from '../host-version-policy.js';
 export const DUPLICATE_IMAGE_MAX_DIMENSION = 512;
 const finite = z.number().finite();
 const matrix = z.tuple([finite, finite, finite, finite, finite, finite]);
@@ -52,7 +53,12 @@ export const duplicateImageWireSnapshotSchema = z.strictObject({
         context.addIssue({ code: 'custom', message: 'Image type and imageState type must match.' });
     }
 });
-export const DUPLICATE_IMAGE_HOST_SCRIPT = `
+export const DUPLICATE_IMAGE_HOST_SCRIPT = `${HOST_VERSION_POLICY_JSX}
+/** Version rule only (the \`duplicate_object\` row admits another major.minor): no params, so it is safe in verification and rollback. */
+function duplicateVersionAdmitted() {
+  var versionStatus = hostVersionEvaluate("duplicate_object", String(app.version)).status;
+  return versionStatus !== "blocked" && versionStatus !== "unreadable";
+}
 function duplicateImageType(type) {
   return type === "PlacedItem" || type === "RasterItem";
 }
@@ -75,7 +81,7 @@ function duplicateImageLookup(document, nativeTarget, uuid, binding) {
     throw mutationError("preflight_failed", "Native image UUID lookup returned an item in a different parent group.");
   }
   var outer = parent.parent;
-  if (String(app.version) !== "30.8.2" || document.documentColorSpace !== DocumentColorSpace.RGB ||
+  if (!duplicateVersionAdmitted() || document.documentColorSpace !== DocumentColorSpace.RGB ||
       document.layers.length !== 1 || document.layers[0].layers.length !== 0 ||
       !outer || outer.typename !== "GroupItem" || outer.parent !== document.layers[0] ||
       !outer.pageItems || outer.pageItems.length !== 1 || document.layers[0].pageItems.length !== 1 ||

@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
+import { HOST_VERSION_POLICY_JSX } from '../host-version-policy.js';
+import { hostVersionBackupPublicFields, hostVersionInternalFields } from '../host-version-consent.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
@@ -220,6 +222,7 @@ export const replaceAreaTextRangeResponseSchema = z.strictObject({
     delivery: z.strictObject({ mode: z.enum(['original', 'replay']), finalizedAt: z.string().datetime({ offset: true }) }),
 });
 const commonInternal = {
+    ...hostVersionInternalFields,
     expectedDocumentKey: z.string().min(1).max(16_384),
     targetUuid: z.string().min(1).max(255),
     start: z.number().int().safe().nonnegative(),
@@ -237,6 +240,7 @@ const internalInputSchema = z.discriminatedUnion('apply', [
     }),
 ]);
 const commonPublic = {
+    ...hostVersionBackupPublicFields,
     expected_document_key: z.string().min(1).max(16_384),
     target_uuid: z.string().min(1).max(255),
     start: z.number().int().safe().nonnegative(),
@@ -265,6 +269,7 @@ inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema
 function normalizePublicInput(input) {
     const value = replaceAreaTextRangePublicInputSchema.parse(input);
     const common = {
+        ...(value.backup_id === undefined ? {} : { backupId: value.backup_id }),
         expectedDocumentKey: value.expected_document_key,
         targetUuid: value.target_uuid,
         start: value.start,
@@ -367,11 +372,15 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
 }
 export const REPLACE_AREA_TEXT_RANGE_SCRIPT = `
 ${MUTATION_TRANSACTION_SCRIPT}
+${HOST_VERSION_POLICY_JSX}
 ${POINT_TEXT_SNAPSHOT_SCRIPT}
 ${AREA_TEXT_SNAPSHOT_SCRIPT}
 ${COMPOSED_AREA_LAYOUT_SCRIPT}
 function need(value, reason) { if (!value) throw mutationError("preflight_failed", reason); }
+// Numbers compare in the form the host prints them: ExtendScript's String(number) keeps 15 significant digits, so a plan
+// read back from the output (expected_before, confirmed_after) equals a fresh read only at that precision.
 function rangeSame(a,b) {
+  if(typeof a==="number"&&typeof b==="number")return String(a)===String(b);
   if(a===b)return true;
   if(a===null||b===null||typeof a!=="object"||typeof b!=="object")return false;
   var ak=[],bk=[],k,i;
@@ -407,8 +416,13 @@ function rangeColor(c) {
   if(t==="GrayColor")return {model:t,gray:c.gray};
   throw mutationError("preflight_failed","unmeasured_color:"+t);
 }
+/** Version rule only (the \`replace_area_text_range\` row admits another major.minor): no params, so it is safe in verification and rollback. */
+function rangeVersionAdmitted() {
+  var versionStatus=hostVersionEvaluate("replace_area_text_range",String(app.version)).status;
+  return versionStatus!=="blocked"&&versionStatus!=="unreadable";
+}
 function rangeSnapshot(document,f,uuid) {
-  need(String(app.version)==="30.8.2","host_version_unmeasured");
+  need(rangeVersionAdmitted(),"host_version_unmeasured");
   need(f.typename==="TextFrame"&&f.kind===TextType.AREATEXT&&String(f.uuid)===uuid,"target_not_area_text");
   need(f.parent===f.layer&&f.story.textFrames.length===1&&f.story.textFrames[0]===f&&f.paragraphs.length===1,"area_shape_unmeasured");
   need(f.orientation===TextOrientation.HORIZONTAL&&f.columnCount===1&&f.rowCount===1&&f.flowLinksHorizontally===true,"area_shape_unmeasured");
@@ -461,6 +475,7 @@ function rangeFind(document,uuid) {
 function rangeResolve(forApply) {
   var context=forApply?requireDocument(params.expectedDocumentKey):requireDocumentForRead(params.expectedDocumentKey);
   var document=app.activeDocument,target=rangeFind(document,params.targetUuid);
+  need(hostVersionAdmitted("replace_area_text_range", String(app.version)),"host_version_unmeasured");
   need(target!==null,"object_not_found");
   var before=rangeRead(document,target,params.targetUuid),s=before.semantic,blockers=[];
   if(!context.mutationAllowed)blockers.push("document_mutation_not_allowed");
@@ -599,7 +614,7 @@ function normalizedRequest(input) {
 export const replaceAreaTextRangeToolContract = {
     name: 'illustrator_replace_area_text_range',
     title: 'Plan or Replace an Area-Text Range',
-    description: 'On Illustrator 30.8.2, plan or replace one non-empty UTF-16 range in a horizontal, unthreaded, layer-direct AREATEXT frame: one paragraph, one column/row, 1–5000 units, initially fully visible. FULLJUSTIFYLASTLINELEFT is measured. Other justifications are refused. Replacement may be empty and cannot contain line breaks. Surrogate-containing contents/replacements, unmeasured clusters, manual kerning, tab/list styles, mixed styles inside the range, and unmeasured style-run edges are refused. Mixed styles outside the range are preserved. Plan returns run-compressed preserve-only semantic state, actual composed lines and a pure semantic prediction. Apply requires exact expected_before (semantic and layout) and confirmed_after (semantic only), inserts at the native insertion point then removes the original span, verifies every preserved attribute and actual lines, and attempts an exact inverse on overset or mismatch. Unknown outcomes remain indeterminate. Line wrapping is read from Illustrator, never predicted.',
+    description: 'Plan or replace one non-empty UTF-16 range in a horizontal, unthreaded, layer-direct AREATEXT frame (measured on Illustrator 30.8.2). The range is 1-5000 units within one paragraph and one column or row, and the frame must be initially fully visible. Only FULLJUSTIFYLASTLINELEFT justification is supported. Replacement may be empty but cannot contain line breaks. Refused: surrogate characters, unmeasured characters or style-run edges, manual kerning, tab or list styles, mixed styles inside the range (mixed styles outside it are preserved). Apply requires exact expected_before (semantic and layout) and confirmed_after (semantic only) from the plan; it inserts, removes the original span and verifies. On overset or mismatch it attempts an exact inverse; unknown outcomes stay indeterminate. Line wrapping is read from Illustrator, never predicted.',
     inputSchema,
     publicInputSchema: replaceAreaTextRangePublicInputSchema,
     outputSchema: replaceAreaTextRangeResponseSchema,
@@ -617,6 +632,7 @@ export function createReplaceAreaTextRangeAdapter() {
         terminalClassifierVersion: CLASSIFIER_VERSION, safetyConformanceVersion: CONFORMANCE_VERSION,
         errorMappingVersion: ERROR_MAPPING_VERSION, hostScriptDigest: REPLACE_AREA_TEXT_RANGE_HOST_SCRIPT_DIGEST,
         mutationHostApplicationMode: 'foreground',
+        hostVersionOperation: () => 'replace_area_text_range',
         buildCommand(input) {
             const normalized = normalizedRequest(input);
             const { commandId: _commandId, ...params } = normalized.request;

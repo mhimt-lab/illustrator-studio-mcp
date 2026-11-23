@@ -369,6 +369,10 @@ var esWalkStop = { esWalkStop: true };
  * members, and the groups held by compound paths) reads every uuid and reaches as many items as doc.pageItems holds,
  * and none is one of uuids; the observed invalid items showed on some of these routes and not others. Returns null
  * when proved, otherwise the reason. Called only where absence decides an outcome, in the same host call.
+ *
+ * A count that agrees with a walk that found nothing does not prove absence (#971: the walk can miss an item while the document length is short by the same
+ * number), so the native lookup stands against it: when getPageItemFromUuid returns an object for one of the uuids after every route came up empty, the
+ * outcome is the reason (esNativeAnswerConflict), never null. A lookup that throws or answers nothing is no evidence either way, as before; that hole is open.
  */
 function esAbsenceUnproved(doc, uuids) {
   var wanted = {};
@@ -398,6 +402,19 @@ function esAbsenceUnproved(doc, uuids) {
     return "collection_unreadable";
   }
   if (scanVisited !== scanTotal) return "collection_unreadable";
+  return esNativeAnswerConflict(doc, uuids);
+}
+
+// The reason when the native lookup returns an object for one of the uuids (its uuid reads back equal, different or not at all), otherwise null.
+function esNativeAnswerConflict(doc, uuids) {
+  for (var nativeIndex = 0; nativeIndex < uuids.length; nativeIndex++) {
+    var answered = null;
+    try { answered = doc.getPageItemFromUuid(uuids[nativeIndex]); } catch (lookupError) { answered = null; }
+    if (answered === undefined || answered === null) continue;
+    var answeredUuid = esEnum(function () { return answered.uuid; });
+    if (answeredUuid[0] === "e") return "native_answer_unreadable";
+    return (answeredUuid[1] === uuids[nativeIndex]) ? "native_uuid_confirmed" : "native_answer_uuid_mismatch";
+  }
   return null;
 }
 

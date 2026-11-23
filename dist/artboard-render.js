@@ -5,7 +5,8 @@ import { z } from 'zod';
 import { copyFileExclusive, inspectSourceFile, sameFileOrSameBytes } from './document-backup.js';
 import { DocumentMismatchError, IndeterminateExecutionError } from './domain.js';
 import { documentKeyPath, HOST_FILE_PATH_HELPERS } from './file-path.js';
-import { HOST_VERSION_PATTERN } from './host-version-policy.js';
+import { evaluateHostVersion } from './host-version-policy.js';
+import { nonPrintingLayerWarning, NON_PRINTING_LAYER_HELPERS } from './non-printing-layers.js';
 import { pruneRenderSets, RENDER_RETENTION_LIMITS } from './render-retention.js';
 import { ensurePrivateDirectory, isWindowsPrivateState } from './private-state.js';
 import { comparePngImages, decodePng, inspectSupportedPng, readStableImage } from './visual-diff.js';
@@ -13,7 +14,6 @@ export const RENDER_RESOLUTIONS = [72, 144];
 export const RENDER_LIMITS = { artboards: 100, pixels: 60_000_000, maxSidePx: 4096, inlineImages: 4 };
 export const RENDER_HOST_TIMEOUT_MS = 60_000;
 export const RENDER_HOST_BUDGET_MS = 40_000;
-export const RENDER_MEASURED_VERSION = '30.8.2';
 const RENDER_SET_PREFIX = 'render-';
 export class RenderSetStore {
     sets = new Map();
@@ -55,7 +55,7 @@ export class RenderFailedError extends Error {
         this.name = 'RenderFailedError';
     }
 }
-export const RENDER_ARTBOARDS_SCRIPT = `${HOST_FILE_PATH_HELPERS}
+export const RENDER_ARTBOARDS_SCRIPT = `${HOST_FILE_PATH_HELPERS}${NON_PRINTING_LAYER_HELPERS}
 var MUTATION_SIDE_EFFECT_ATTEMPTED = false;
 function renderReject(code, message, actual) {
   throw new Error("MCP_ERROR:" + stringifyJson({ code: code, message: message, actual: actual === undefined ? null : actual }));
@@ -119,12 +119,14 @@ if (params.source === "current") {
   var currentRefusal = renderCheck(renderDocument);
   if (currentRefusal !== null) renderReject(currentRefusal.code, currentRefusal.message);
   var currentBefore = renderState(renderDocument);
+  var currentLayers = nplScanSafe(renderDocument);
   var current = renderCapture(renderDocument);
-  result = { before: currentBefore, after: renderState(renderDocument), boards: current.boards, notRendered: current.notRendered, hostMs: current.hostMs, appVersion: String(app.version) };
+  result = { before: currentBefore, after: renderState(renderDocument), boards: current.boards, notRendered: current.notRendered, hostMs: current.hostMs, appVersion: String(app.version),
+    nonPrintingLayers: currentLayers };
 } else {
   if (!renderContext.path) renderReject("RENDER_NO_FILE", "The document has never been saved, so it has no file to render; use source current.");
   if (!new File(params.workCopyPath).exists) renderReject("RENDER_WORK_COPY_MISSING", "The private work copy is missing.");
-  var fileBefore = renderState(renderDocument), fileOutcome = { boards: [], notRendered: [], hostMs: 0 }, fileRefusal = null, workClosed = false;
+  var fileBefore = renderState(renderDocument), fileOutcome = { boards: [], notRendered: [], hostMs: 0 }, fileRefusal = null, workClosed = false, fileLayers = null;
   var previousInteraction = app.userInteractionLevel;
   MUTATION_SIDE_EFFECT_ATTEMPTED = true;
   app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
@@ -134,7 +136,7 @@ if (params.source === "current") {
     if (!hostFilePathMatches(renderPath(work), params.workCopyPath) || app.activeDocument !== work) fileRefusal = { code: "RENDER_WORK_COPY_NOT_OPENED", message: "The work copy did not open as the active document." };
     else {
       fileRefusal = renderCheck(work);
-      if (fileRefusal === null) fileOutcome = renderCapture(work);
+      if (fileRefusal === null) { fileLayers = nplScanSafe(work); fileOutcome = renderCapture(work); }
     }
   } finally {
     if (work !== null) work.close(SaveOptions.DONOTSAVECHANGES);
@@ -146,7 +148,7 @@ if (params.source === "current") {
     if (hostFilePathMatches(renderPath(app.documents[closedIndex]), params.workCopyPath)) workClosed = false;
   }
   result = { before: fileBefore, after: renderState(renderDocument), boards: fileOutcome.boards, notRendered: fileOutcome.notRendered, hostMs: fileOutcome.hostMs,
-    appVersion: String(app.version), workCopyClosed: workClosed, refusal: fileRefusal };
+    appVersion: String(app.version), workCopyClosed: workClosed, refusal: fileRefusal, nonPrintingLayers: fileLayers };
 }
 `;
 function parseHostError(error) {
@@ -179,13 +181,10 @@ export function describeRenderStateChanges(before, after) {
     return changes;
 }
 function hostVersion(app) {
-    if (!HOST_VERSION_PATTERN.test(app))
+    const { status } = evaluateHostVersion('artboard_render', app);
+    if (status === 'unreadable')
         throw new RenderFailedError('RENDER_HOST_VERSION_UNREADABLE', `Illustrator reported version ${app}, which cannot be read.`);
-    if (app === RENDER_MEASURED_VERSION)
-        return `${app} measured`;
-    const [major, minor] = app.split('.');
-    const [measuredMajor, measuredMinor] = RENDER_MEASURED_VERSION.split('.');
-    return `${app} ${major === measuredMajor && minor === measuredMinor ? 'patch_unmeasured' : 'unmeasured'}`;
+    return `${app} ${status}`;
 }
 export function profileRefusal(observation, what = 'Rendering', nothing = 'nothing was rendered') {
     const detail = `(profile ${observation.profile}, frontmost ${observation.frontmostBundleId ?? 'unknown'}); ${nothing}.`;
@@ -421,6 +420,9 @@ async function renderArtboardsIn(deps, input, created) {
         notes.push(`Artboards ${comparison.structureChanged.join(', ')} were not compared: their name, position or size differs from the baseline, or only one render has them.`);
     if (host.notRendered.length > 0)
         notes.push(`Artboards ${host.notRendered.join(', ')} were not rendered within the call budget; render them in another call.`);
+    const layerWarning = nonPrintingLayerWarning(host.nonPrintingLayers ?? undefined, 'warn_only');
+    if (layerWarning !== null)
+        notes.push(layerWarning.message);
     notes.push(...cleanupNotes);
     const result = renderResultSchema.parse({
         documentKey: host.after.context.key,

@@ -1,22 +1,25 @@
 import { z } from 'zod';
 export const FONT_LOOKUP_MAX_NAMES = 32;
-export const fontPostScriptNameSchema = z.string().min(1).max(255);
-export const fontDescriptorSchema = z.strictObject({
-    postScriptName: fontPostScriptNameSchema,
+const makeFontPostScriptNameSchema = () => z.string().min(1).max(255);
+const makeFontDescriptorSchema = () => z.strictObject({
+    postScriptName: makeFontPostScriptNameSchema(),
     family: z.string().max(255),
     style: z.string().max(255),
 });
+export const fontPostScriptNameSchema = makeFontPostScriptNameSchema();
+export const fontDescriptorSchema = makeFontDescriptorSchema();
+const queryFontDescriptorSchema = makeFontDescriptorSchema();
 export const fontLookupEntrySchema = z.discriminatedUnion('status', [
-    z.strictObject({ requested: fontPostScriptNameSchema, status: z.literal('installed'), font: fontDescriptorSchema }),
+    z.strictObject({ requested: makeFontPostScriptNameSchema(), status: z.literal('installed'), font: makeFontDescriptorSchema() }),
     z.strictObject({
-        requested: fontPostScriptNameSchema,
+        requested: makeFontPostScriptNameSchema(),
         status: z.literal('not_installed'),
         reason: z.enum(['no_such_font', 'name_mismatch']),
     }),
     z.strictObject({
-        requested: fontPostScriptNameSchema,
+        requested: makeFontPostScriptNameSchema(),
         status: z.literal('unverified'),
-        font: fontDescriptorSchema,
+        font: makeFontDescriptorSchema(),
         reason: z.literal('not_found_outside_illustrator'),
     }),
 ]).superRefine((entry, context) => {
@@ -62,7 +65,7 @@ export const FONT_SEARCH_PAGE_SIZE = 50;
 export const fontQuerySchema = z.string().min(1).max(FIND_FONTS_QUERY_MAX_LENGTH);
 export const fontCursorSchema = z.string().min(1).max(255);
 export const fontSearchEntrySchema = z.strictObject({
-    postScriptName: fontPostScriptNameSchema,
+    postScriptName: makeFontPostScriptNameSchema(),
     family: z.string().max(255),
     style: z.string().max(255),
     status: z.enum(['installed', 'unverified']),
@@ -79,7 +82,7 @@ export const fontSearchResultSchema = z.strictObject({
     next_cursor: fontCursorSchema.nullable(),
 });
 export const fontQueryHostResultSchema = z.strictObject({
-    fonts: z.array(fontDescriptorSchema),
+    fonts: z.array(queryFontDescriptorSchema),
     truncated: z.boolean(),
     scanned: z.number().int().nonnegative(),
     total: z.number().int().nonnegative(),

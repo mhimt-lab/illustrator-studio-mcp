@@ -8,7 +8,6 @@ import { boundsSchema, documentContextSchema, mutationAuditSchema } from '../mut
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { CLIPPING_MASK_HOST_SCRIPT, clipAuditMatches, clipLayerStateSchema, clipParentOrderSchema, clipPathSnapshotSchema, sameCanonical, } from './clipping-mask-shared.js';
 import { SUPPORTED_PATH_ITEM_MAX_PARENT_ITEMS } from './supported-path-item-host-script.js';
-import { describeHostVersionScope } from '../host-version-admission.js';
 export const MAKE_COMPOUND_PATH_OPERATION = 'make_compound_path';
 export const MAKE_COMPOUND_PATH_VALIDATOR = { kind: MAKE_COMPOUND_PATH_OPERATION, version: 1 };
 const CANONICAL_VERSION = 1;
@@ -900,7 +899,7 @@ function normalizedRequest(input) {
 export const makeCompoundPathToolContract = {
     name: 'illustrator_make_compound_path',
     title: 'Plan or Make Compound Path',
-    description: 'Plan or make one compound path from two paths (source_uuids). Non-destructive: the two sources stay unchanged; the tool duplicates both to the back of their layer and makes the duplicates one CompoundPathItem there (use illustrator_set_stacking_order to move it). Measured profile only: two closed straight-segment paths (corner points without handles) with the same RGB or no paint, directly on the same top-level layer of an RGB document, Illustrator ' + describeHostVersionScope('clipping_mask') + ' in the foreground; curves, open paths, different paint, groups, clip groups, existing compound paths, text, sublayers, and locked or hidden items are refused. Releasing a compound path is not supported; for Pathfinder (unite, minus front, intersect, exclude) use illustrator_apply_pathfinder. The plan shows the member order (front source first), the parent order with the new compound last, and the predicted bounds. Apply compares expected_sources_before and expected_parent_order, runs the menu command with only the duplicates selected, restores the previous selection (reported, never a failure), verifies the compound, both members, the untouched sources, and the parent order by native read-back, and on failure removes only what it created.',
+    description: 'Plan or make one compound path from two closed straight-segment paths (source_uuids) with the same RGB or no paint, directly on the same top-level layer of an RGB document, in the foreground. Curves, open paths, different paint, groups, clip groups, compound paths, text, sublayers, and locked or hidden items are refused. Non-destructive: both sources stay unchanged, and duplicates of them become the compound at the back of their layer (use illustrator_set_stacking_order to move it). Releasing is not supported; for unite, minus front, intersect or exclude use illustrator_apply_pathfinder. On an unmeasured stable version the result reports host_version, and a saved file on such a version needs backup_id.',
     inputSchema,
     publicInputSchema: makeCompoundPathPublicInputSchema,
     outputSchema: makeCompoundPathResponseSchema,

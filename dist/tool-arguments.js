@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { BATCH_STEP_NEXT_CALLS } from './adapters/batch-step-next-call.js';
+export const MISSING_ARGUMENT_MESSAGE = 'Missing required argument.';
+export const MISSING_COMMAND_ID_MESSAGE = 'Missing required argument: a lowercase UUID v4 for this apply, such as the plan\'s next_call.arguments.command_id.';
 function editDistance(left, right) {
     let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
     for (let row = 1; row <= left.length; row += 1) {
@@ -37,10 +39,9 @@ export const toolArgumentIssueMessage = (raw) => {
         return `Unknown argument${names.length === 1 ? '' : 's'} ${names.join(', ')}.`;
     }
     if (issue.code === 'invalid_type' && issue.input === undefined) {
-        if (issue.path?.at(-1) === 'command_id') {
-            return 'Missing required argument: a lowercase UUID v4 for this apply, such as the plan\'s next_call.arguments.command_id.';
-        }
-        return 'Missing required argument.';
+        if (issue.path?.at(-1) === 'command_id')
+            return MISSING_COMMAND_ID_MESSAGE;
+        return MISSING_ARGUMENT_MESSAGE;
     }
     return undefined;
 };
@@ -80,6 +81,9 @@ export const NEXT_CALL_PLAN_ECHOES = Object.freeze({
     illustrator_create_shape: {},
     illustrator_place_image: {},
     illustrator_set_path_appearance: { expected_before: 'before', confirmed_after: 'after' },
+    illustrator_set_text_composition: { expected_before: 'before', confirmed_after: 'after' },
+    illustrator_normalize_stroke_widths: { expected_before: 'before', confirmed_after: 'after', expected_stroke_scene: 'strokeScene' },
+    illustrator_replace_rgb_converted_black: { expected_before: 'before', confirmed_after: 'after' },
     illustrator_set_stroke_style: { expected_before: 'before', confirmed_after: 'after', expected_stroke_scene: 'strokeScene' },
     illustrator_transform_object: { expected_before: 'before', confirmed_after: 'after' },
     illustrator_replace_point_text: { expected_before: 'before', confirmed_after: 'after' },
@@ -91,6 +95,13 @@ export const NEXT_CALL_PLAN_ECHOES = Object.freeze({
     illustrator_relink_image: { expected_before: 'before', confirmed_after: 'after' },
     illustrator_set_area_text_columns: { expected_before: 'before', confirmed_after: 'after' },
     illustrator_update_artboard: { expected_before: 'before', confirmed_after: 'after' },
+    illustrator_duplicate_artboard: { expected_before: 'before', confirmed_after: 'after' },
+    illustrator_insert_vertical_space: { expected_before: 'before', confirmed_after: 'after' },
+    illustrator_scale_artwork: { expected_before: 'before', confirmed_after: 'after' },
+    illustrator_apply_dataset: { expected_digest: 'beforeDigest' },
+    illustrator_bind_variable: { expected_digest: 'beforeDigest' },
+    illustrator_create_dataset: { expected_digest: 'beforeDigest' },
+    illustrator_update_dataset: { expected_digest: 'beforeDigest' },
     illustrator_set_object_state: { expected_before: 'before' },
     illustrator_duplicate_object: { expected_before: 'sourceBefore', expected_parent_order: 'parentOrderBefore' },
     illustrator_group_objects: { expected_targets_before: 'targetsBefore', expected_parent_order: 'parentOrderBefore' },
@@ -188,6 +199,9 @@ export const NEXT_CALL_BUILDERS = Object.freeze({
         ? { ...input, expected_layer_item_uuids: plan.layer.itemUuids } : undefined,
     illustrator_replace_point_text_batch: (input, plan) => batchTargets(input, plan, 'targets', (request, target) => request.replacement === target.replacement),
     illustrator_mutate_batch: (input, plan) => batchTargets(input, plan, 'steps', mixedStepMatches),
+    illustrator_transform_object: (input, plan) => Array.isArray(input.targets)
+        ? batchTargets(input, plan, 'targets', () => true)
+        : copyEchoes(NEXT_CALL_PLAN_ECHOES.illustrator_transform_object)(input, plan),
     illustrator_align_objects: (input, plan) => {
         if (!isRecord(input.layout))
             return undefined;

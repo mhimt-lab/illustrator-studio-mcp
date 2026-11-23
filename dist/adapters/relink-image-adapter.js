@@ -1,4 +1,4 @@
-import { HOST_FILE_PATH_HELPERS, sameFilePath } from '../file-path.js';
+import { sameFilePath } from '../file-path.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
@@ -6,11 +6,19 @@ import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, layerPathSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
+import { ACTIVE_LAYER_GUARD_SCRIPT } from './active-layer-guard-host-script.js';
+import { SELECTION_UNRECORDABLE_NOTE } from '../blocked-guidance.js';
 import { ANCESTOR_STATE_SCRIPT } from './ancestor-state-host-script.js';
-import { admitSource, placeImageAdmissionSchema } from './place-image-adapter.js';
+import { MACOS_PLACE_IMAGE_PLATFORM, admitSource, placeImageAdmissionSchema } from './place-image-adapter.js';
 export const RELINK_IMAGE_OPERATION = 'relink_image';
 export const RELINK_IMAGE_VALIDATOR = { kind: RELINK_IMAGE_OPERATION, version: 1 };
 export const RELINK_IMAGE_MAX_DIRECT_ITEMS = 128;
+export const RELINK_IMAGE_MAX_NOTE_LENGTH = 32_768;
+export const RELINK_IMAGE_MAX_URL_LENGTH = 8_192;
+export const RELINK_IMAGE_MAX_TAGS = 64;
+export const RELINK_IMAGE_MAX_TAG_NAME_LENGTH = 255;
+export const RELINK_IMAGE_MAX_TAG_VALUE_LENGTH = 4_096;
+export const RELINK_IMAGE_MAX_SELECTION = 2000;
 export const RELINK_IMAGE_TOLERANCE_PT = 0.01;
 export const RELINK_IMAGE_PRECISION_DIGITS = 6;
 export const RELINK_IMAGE_MEASURED_FORMATS = ['tiff', 'jpeg', 'png'];
@@ -20,41 +28,23 @@ const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
-const absolutePathSchema = z.string().min(2).max(4_096)
-    .regex(/^\/(?!(?:.*\/)?\.\.(?:\/|$))[^\0]*$/u, 'Source path must be an absolute path without NUL or parent-directory segments.');
-const sourceSchema = z.strictObject({ path: absolutePathSchema, sha256: sha256Schema });
 const boundsSchema = z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]);
 const positionSchema = z.tuple([z.number().finite(), z.number().finite()]);
 const matrixSchema = z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]);
-export const relinkImageSnapshotSchema = z.strictObject({
-    uuid: z.string().min(1).max(255).nullable(),
-    type: z.literal('PlacedItem'),
-    layerPath: layerPathSchema,
-    layerIndex: z.number().int().nonnegative().max(RELINK_IMAGE_MAX_DIRECT_ITEMS),
-    siblingUuids: z.array(z.string().min(1).max(255)).max(RELINK_IMAGE_MAX_DIRECT_ITEMS),
-    name: z.string().max(255),
-    linkPath: absolutePathSchema,
-    position: positionSchema,
-    geometricBounds: boundsSchema,
-    width: z.number().finite().positive(),
-    height: z.number().finite().positive(),
-    matrix: matrixSchema,
-    locked: z.boolean(),
-    hidden: z.boolean(),
-    layerVisible: z.boolean(),
-    layerLocked: z.boolean(),
-    ancestorLocked: z.boolean(),
-    ancestorHidden: z.boolean(),
-});
 export function relinkStateOf(snapshot) {
     const { uuid: _uuid, ...state } = snapshot;
     return state;
 }
-export function relinkSnapshotsWithinTolerance(left, right, compareReportedAfterPath = false) {
+const tagKey = (tag) => `${tag.name.length}:${tag.name}${tag.value}`;
+export function relinkTagsEqual(left, right) {
+    const order = (tags) => tags.map(tagKey).sort();
+    return canonicalDigest(order(left)) === canonicalDigest(order(right));
+}
+export function relinkSnapshotsWithinTolerance(left, right, compareReportedAfterPath = false, samePath = sameFilePath) {
     const near = (a, b) => Math.abs(a - b) <= RELINK_IMAGE_TOLERANCE_PT;
     return left.type === right.type && canonicalDigest(left.layerPath) === canonicalDigest(right.layerPath) &&
         left.layerIndex === right.layerIndex && canonicalDigest(left.siblingUuids) === canonicalDigest(right.siblingUuids) &&
-        left.name === right.name && (left.linkPath === right.linkPath || (compareReportedAfterPath && left.linkPath !== null && right.linkPath !== null && sameFilePath(left.linkPath, right.linkPath))) &&
+        left.name === right.name && left.note === right.note && left.url === right.url && relinkTagsEqual(left.tags, right.tags) && (left.linkPath === right.linkPath || (compareReportedAfterPath && left.linkPath !== null && right.linkPath !== null && samePath(left.linkPath, right.linkPath))) &&
         left.locked === right.locked && left.hidden === right.hidden && left.layerVisible === right.layerVisible && left.layerLocked === right.layerLocked &&
         left.ancestorLocked === right.ancestorLocked && left.ancestorHidden === right.ancestorHidden &&
         left.position.every((value, index) => near(value, right.position[index])) &&
@@ -62,23 +52,6 @@ export function relinkSnapshotsWithinTolerance(left, right, compareReportedAfter
         near(left.width, right.width) && near(left.height, right.height) &&
         left.matrix.every((value, index) => near(value, right.matrix[index]));
 }
-export const currentLinkAdmissionSchema = z.discriminatedUnion('status', [
-    z.strictObject({ status: z.literal('admitted'), resolvedPath: absolutePathSchema, bytes: z.number().int().positive(), modifiedAtMs: z.number().int().nonnegative(), sha256: sha256Schema,
-        format: z.enum(['tiff', 'jpeg', 'png', 'psd']), pixels: z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() }).nullable() }),
-    z.strictObject({ status: z.literal('blocked'), resolvedPath: absolutePathSchema.nullable(),
-        reason: z.enum(['current_link_missing', 'current_link_unavailable', 'current_link_format_unmeasured']), message: z.string().min(1).max(500) }),
-]);
-const commonRequest = {
-    expectedDocumentKey: z.string().min(1).max(16_384),
-    targetUuid: z.string().min(1).max(255),
-    source: sourceSchema,
-};
-const admissionFields = {
-    sourceAdmission: placeImageAdmissionSchema.optional(),
-    sourceModifiedAtMs: z.number().int().nonnegative().optional(),
-    currentAdmission: currentLinkAdmissionSchema.optional(),
-    pixelDimensionsEqual: z.boolean().optional(),
-};
 function pixelEqualityConsistent(value) {
     if (value.pixelDimensionsEqual !== true)
         return true;
@@ -87,46 +60,250 @@ function pixelEqualityConsistent(value) {
     return source?.status === 'admitted' && current?.status === 'admitted' && source.pixels !== null && current.pixels !== null &&
         source.pixels.width === current.pixels.width && source.pixels.height === current.pixels.height;
 }
-const unadmittedInputSchema = z.discriminatedUnion('apply', [
-    z.strictObject({ ...commonRequest, apply: z.literal(false) }),
-    z.strictObject({ ...commonRequest, expectedBefore: relinkImageSnapshotSchema, confirmedAfter: relinkImageSnapshotSchema, apply: z.literal(true), commandId: canonicalCommandIdSchema }),
+const blockerSchema = z.enum([
+    'document_mutation_not_allowed', 'target_locked', 'target_hidden', 'layer_hidden', 'layer_locked', 'ancestor_hidden', 'ancestor_locked',
+    'current_link_missing', 'current_link_unavailable', 'current_link_format_unmeasured',
+    'source_file_missing', 'source_file_unavailable', 'source_hash_mismatch', 'source_format_unmeasured', 'source_file_changed',
+    'source_pixel_dimensions_differ', 'selection_unrecordable',
 ]);
-const internalInputSchema = z.discriminatedUnion('apply', [
-    z.strictObject({ ...commonRequest, ...admissionFields, apply: z.literal(false) }),
-    z.strictObject({ ...commonRequest, ...admissionFields, expectedBefore: relinkImageSnapshotSchema, confirmedAfter: relinkImageSnapshotSchema, apply: z.literal(true), commandId: canonicalCommandIdSchema }),
-]).superRefine((request, context) => {
-    if (request.sourceAdmission?.status === 'admitted' && request.sourceAdmission.sha256 !== request.source.sha256) {
-        context.addIssue({ code: 'custom', message: 'An admitted source must carry the requested SHA-256.' });
+const currentLinkBlockerSchema = z.enum(['current_link_missing', 'current_link_unavailable', 'current_link_format_unmeasured']);
+export const MACOS_RELINK_IMAGE_PLATFORM = Object.freeze({
+    ...MACOS_PLACE_IMAGE_PLATFORM,
+    unavailableLinkPath: '"/unavailable"',
+    currentLinkBlockerSchema,
+});
+export function buildRelinkImageContract(platform, placeImageAdmissionSchema) {
+    const absolutePathSchema = platform.absolutePathSchema;
+    const sourceSchema = z.strictObject({ path: platform.requestPathSchema, sha256: sha256Schema });
+    const relinkImageSnapshotSchema = z.strictObject({
+        uuid: z.string().min(1).max(255).nullable(),
+        type: z.literal('PlacedItem'),
+        layerPath: layerPathSchema,
+        layerIndex: z.number().int().nonnegative().max(RELINK_IMAGE_MAX_DIRECT_ITEMS),
+        siblingUuids: z.array(z.string().min(1).max(255)).max(RELINK_IMAGE_MAX_DIRECT_ITEMS),
+        name: z.string().max(255),
+        note: z.string().max(RELINK_IMAGE_MAX_NOTE_LENGTH),
+        url: z.string().max(RELINK_IMAGE_MAX_URL_LENGTH),
+        tags: z.array(z.strictObject({ name: z.string().max(RELINK_IMAGE_MAX_TAG_NAME_LENGTH), value: z.string().max(RELINK_IMAGE_MAX_TAG_VALUE_LENGTH) })).max(RELINK_IMAGE_MAX_TAGS),
+        linkPath: absolutePathSchema,
+        position: positionSchema,
+        geometricBounds: boundsSchema,
+        width: z.number().finite().positive(),
+        height: z.number().finite().positive(),
+        matrix: matrixSchema,
+        locked: z.boolean(),
+        hidden: z.boolean(),
+        layerVisible: z.boolean(),
+        layerLocked: z.boolean(),
+        ancestorLocked: z.boolean(),
+        ancestorHidden: z.boolean(),
+    });
+    const currentLinkAdmissionSchema = z.discriminatedUnion('status', [
+        z.strictObject({ status: z.literal('admitted'), resolvedPath: absolutePathSchema, bytes: z.number().int().positive(), modifiedAtMs: z.number().int().nonnegative(), sha256: sha256Schema,
+            format: z.enum(['tiff', 'jpeg', 'png', 'psd']), pixels: z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() }).nullable() }),
+        z.strictObject({ status: z.literal('blocked'), resolvedPath: absolutePathSchema.nullable(),
+            reason: platform.currentLinkBlockerSchema, message: z.string().min(1).max(500) }),
+    ]);
+    const commonRequest = {
+        expectedDocumentKey: z.string().min(1).max(16_384),
+        targetUuid: z.string().min(1).max(255),
+        source: sourceSchema,
+    };
+    const admissionFields = {
+        sourceAdmission: placeImageAdmissionSchema.optional(),
+        sourceModifiedAtMs: z.number().int().nonnegative().optional(),
+        currentAdmission: currentLinkAdmissionSchema.optional(),
+        pixelDimensionsEqual: z.boolean().optional(),
+    };
+    const unadmittedInputSchema = z.discriminatedUnion('apply', [
+        z.strictObject({ ...commonRequest, apply: z.literal(false) }),
+        z.strictObject({ ...commonRequest, expectedBefore: relinkImageSnapshotSchema, confirmedAfter: relinkImageSnapshotSchema, apply: z.literal(true), commandId: canonicalCommandIdSchema }),
+    ]);
+    const internalInputSchema = z.discriminatedUnion('apply', [
+        z.strictObject({ ...commonRequest, ...admissionFields, apply: z.literal(false) }),
+        z.strictObject({ ...commonRequest, ...admissionFields, expectedBefore: relinkImageSnapshotSchema, confirmedAfter: relinkImageSnapshotSchema, apply: z.literal(true), commandId: canonicalCommandIdSchema }),
+    ]).superRefine((request, context) => {
+        if (request.sourceAdmission?.status === 'admitted' && request.sourceAdmission.sha256 !== request.source.sha256) {
+            context.addIssue({ code: 'custom', message: 'An admitted source must carry the requested SHA-256.' });
+        }
+        if (!pixelEqualityConsistent(request))
+            context.addIssue({ code: 'custom', message: 'pixelDimensionsEqual must follow from equal admitted pixel dimensions.' });
+        if (request.apply && request.confirmedAfter.uuid !== null)
+            context.addIssue({ code: 'custom', message: 'confirmed_after must leave the UUID unknown (null).' });
+    });
+    const commonPublic = {
+        expected_document_key: z.string().min(1).max(16_384),
+        target_uuid: z.string().min(1).max(255),
+        source: sourceSchema,
+    };
+    const relinkImagePublicInputSchema = z.discriminatedUnion('apply', [
+        z.strictObject({ ...commonPublic, apply: z.literal(false).default(false) }),
+        z.strictObject({ ...commonPublic, expected_before: relinkImageSnapshotSchema, confirmed_after: relinkImageSnapshotSchema, apply: z.literal(true), command_id: applyCommandIdSchema }),
+    ]);
+    const inputSchema = z.strictObject({
+        ...commonPublic, expected_before: relinkImageSnapshotSchema.optional(), confirmed_after: relinkImageSnapshotSchema.optional(),
+        apply: z.boolean().default(false), command_id: applyCommandIdSchema.optional(),
+    });
+    const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(relinkImagePublicInputSchema, { io: 'input' });
+    inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
+    function normalizePublicInput(input) {
+        const value = relinkImagePublicInputSchema.parse(input);
+        const common = { expectedDocumentKey: value.expected_document_key, targetUuid: value.target_uuid, source: value.source };
+        return value.apply
+            ? { ...common, expectedBefore: value.expected_before, confirmedAfter: value.confirmed_after, apply: true, commandId: value.command_id }
+            : { ...common, apply: false };
     }
-    if (!pixelEqualityConsistent(request))
-        context.addIssue({ code: 'custom', message: 'pixelDimensionsEqual must follow from equal admitted pixel dimensions.' });
-    if (request.apply && request.confirmedAfter.uuid !== null)
-        context.addIssue({ code: 'custom', message: 'confirmed_after must leave the UUID unknown (null).' });
-});
-const commonPublic = {
-    expected_document_key: z.string().min(1).max(16_384),
-    target_uuid: z.string().min(1).max(255),
-    source: sourceSchema,
-};
-export const relinkImagePublicInputSchema = z.discriminatedUnion('apply', [
-    z.strictObject({ ...commonPublic, apply: z.literal(false).default(false) }),
-    z.strictObject({ ...commonPublic, expected_before: relinkImageSnapshotSchema, confirmed_after: relinkImageSnapshotSchema, apply: z.literal(true), command_id: applyCommandIdSchema }),
-]);
-const inputSchema = z.strictObject({
-    ...commonPublic, expected_before: relinkImageSnapshotSchema.optional(), confirmed_after: relinkImageSnapshotSchema.optional(),
-    apply: z.boolean().default(false), command_id: applyCommandIdSchema.optional(),
-});
-const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(relinkImagePublicInputSchema, { io: 'input' });
-inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
-function normalizePublicInput(input) {
-    const value = relinkImagePublicInputSchema.parse(input);
-    const common = { expectedDocumentKey: value.expected_document_key, targetUuid: value.target_uuid, source: value.source };
-    return value.apply
-        ? { ...common, expectedBefore: value.expected_before, confirmedAfter: value.confirmed_after, apply: true, commandId: value.command_id }
-        : { ...common, apply: false };
+    const planSchema = z.strictObject({
+        operation: z.literal(RELINK_IMAGE_OPERATION),
+        documentKey: z.string().min(1).max(16_384),
+        source: sourceSchema,
+        sourceAdmission: placeImageAdmissionSchema,
+        currentAdmission: currentLinkAdmissionSchema.nullable(),
+        pixelDimensionsEqual: z.boolean().nullable(),
+        before: relinkImageSnapshotSchema,
+        after: relinkImageSnapshotSchema,
+        applyBlockedReasonCodes: z.array(blockerSchema),
+        confirmationStatus: z.enum(['required', 'confirmed']),
+        applyAllowed: z.boolean(),
+    }).superRefine((plan, context) => {
+        const confirmedAndClear = plan.confirmationStatus === 'confirmed' && plan.applyBlockedReasonCodes.length === 0;
+        if (plan.applyAllowed !== confirmedAndClear)
+            context.addIssue({ code: 'custom', message: 'Relink applyAllowed must require confirmation and no blockers.' });
+        if (plan.before.uuid === null || plan.after.uuid !== null)
+            context.addIssue({ code: 'custom', message: 'Relink before must carry the target UUID and after must leave it unknown.' });
+        const expectedAfter = plan.sourceAdmission.status === 'admitted' ? { ...relinkStateOf(plan.before), linkPath: plan.sourceAdmission.resolvedPath } : relinkStateOf(plan.before);
+        if (canonicalDigest(relinkStateOf(plan.after)) !== canonicalDigest(expectedAfter)) {
+            context.addIssue({ code: 'custom', message: 'Relink after state must equal the before state with only the link path replaced.' });
+        }
+        if (plan.sourceAdmission.status === 'admitted' && plan.sourceAdmission.sha256 !== plan.source.sha256) {
+            context.addIssue({ code: 'custom', message: 'Relink source admission must carry the requested SHA-256.' });
+        }
+        if (!pixelEqualityConsistent(plan))
+            context.addIssue({ code: 'custom', message: 'Relink pixelDimensionsEqual must follow from equal admitted pixel dimensions.' });
+    });
+    const failureSchema = z.strictObject({
+        phase: z.enum(['apply', 'verify']), reasonCode: z.enum(['apply_failed', 'verify_mismatch']), message: z.string().min(1).max(500),
+    }).superRefine((failure, context) => {
+        if ((failure.phase === 'apply') !== (failure.reasonCode === 'apply_failed'))
+            context.addIssue({ code: 'custom', message: 'Relink failure phase and reason code must match.' });
+    });
+    const indeterminateFailureSchema = z.strictObject({ phase: z.literal('apply'), reasonCode: z.literal('apply_indeterminate'), message: z.string().min(1).max(500) });
+    const rollbackEvidence = {
+        targetUuid: z.string().min(1).max(255),
+        afterUuid: z.string().min(1).max(255).nullable(),
+        restoredSnapshot: relinkImageSnapshotSchema.nullable(),
+    };
+    const transactionSchema = z.discriminatedUnion('state', [
+        z.strictObject({ state: z.literal('planned'), audit: mutationAuditSchema }),
+        z.strictObject({ state: z.literal('verified'), audit: mutationAuditSchema }),
+        z.strictObject({ state: z.literal('apply_failed'), failure: failureSchema, rollback: z.strictObject({ status: z.literal('not_required') }), audit: mutationAuditSchema }),
+        z.strictObject({ state: z.literal('rolled_back'), failure: failureSchema, rollback: z.strictObject({ status: z.literal('verified'), ...rollbackEvidence }), audit: mutationAuditSchema }),
+        z.strictObject({ state: z.literal('rollback_failed'), failure: failureSchema,
+            rollback: z.strictObject({ status: z.literal('failed'), reasonCode: z.literal('rollback_failed'), message: z.string().min(1).max(500), ...rollbackEvidence }), audit: mutationAuditSchema }),
+        z.strictObject({ state: z.literal('apply_indeterminate'), failure: indeterminateFailureSchema,
+            rollback: z.strictObject({ status: z.literal('indeterminate'), reasonCode: z.literal('relink_state_unknown'), message: z.string().min(1).max(500),
+                targetUuid: z.string().min(1).max(255), afterUuid: z.null(), restoredSnapshot: z.null() }), audit: mutationAuditSchema }),
+        z.strictObject({ state: z.literal('rollback_indeterminate'), failure: failureSchema,
+            rollback: z.strictObject({ status: z.literal('indeterminate'), reasonCode: z.literal('rollback_indeterminate'), message: z.string().min(1).max(500), ...rollbackEvidence }), audit: mutationAuditSchema }),
+    ]).superRefine((transaction, context) => {
+        const prefix = ['preflight:started:', 'preflight:succeeded:', 'plan:started:', 'plan:succeeded:'];
+        let expected;
+        if (transaction.state === 'planned')
+            expected = [...prefix, 'apply:skipped:not_requested', 'verify:skipped:not_requested', 'rollback:skipped:not_requested'];
+        else if (transaction.state === 'verified')
+            expected = [...prefix, 'apply:started:', 'apply:attempted:', 'apply:succeeded:', 'verify:started:', 'verify:succeeded:', 'rollback:skipped:not_required'];
+        else if (transaction.state === 'apply_failed')
+            expected = [...prefix, 'apply:started:', 'apply:failed:apply_failed', 'verify:skipped:not_required', 'rollback:skipped:not_required'];
+        else if (transaction.state === 'apply_indeterminate')
+            expected = [...prefix, 'apply:started:', 'apply:attempted:', 'apply:failed:apply_indeterminate'];
+        else {
+            const failure = transaction.failure.phase === 'apply'
+                ? ['apply:started:', 'apply:attempted:', 'apply:failed:apply_failed', 'verify:skipped:not_required']
+                : ['apply:started:', 'apply:attempted:', 'apply:succeeded:', 'verify:started:', 'verify:failed:verify_mismatch'];
+            expected = [...prefix, ...failure, 'rollback:started:', transaction.state === 'rolled_back' ? 'rollback:succeeded:'
+                    : `rollback:failed:${transaction.state === 'rollback_failed' ? 'rollback_failed' : 'rollback_indeterminate'}`];
+        }
+        const actual = transaction.audit.map((event) => `${event.phase}:${event.event}:${'reasonCode' in event ? event.reasonCode : ''}`);
+        if (actual.length !== expected.length || actual.some((value, index) => value !== expected[index]))
+            context.addIssue({ code: 'custom', message: 'Relink audit sequence does not match transaction state.' });
+        transaction.audit.forEach((event, index) => { if (event.sequence !== index)
+            context.addIssue({ code: 'custom', message: 'Relink audit sequence must be contiguous.' }); });
+        if ('failure' in transaction) {
+            const matches = transaction.audit.filter((event) => event.event === 'failed' && event.phase === transaction.failure.phase && event.reasonCode === transaction.failure.reasonCode && event.message === transaction.failure.message);
+            if (matches.length !== 1)
+                context.addIssue({ code: 'custom', message: 'Relink failure must match one audit event.' });
+        }
+    });
+    const relinkImageResultSchema = z.union([
+        z.strictObject({ operation: z.literal(RELINK_IMAGE_OPERATION), applied: z.literal(false), document: documentContextSchema, plan: planSchema, transaction: transactionSchema }),
+        z.strictObject({ operation: z.literal(RELINK_IMAGE_OPERATION), applied: z.literal(true), document: documentContextSchema, plan: planSchema, postcondition: relinkImageSnapshotSchema, transaction: transactionSchema }),
+    ]).superRefine((result, context) => {
+        const derived = new Set();
+        if (result.transaction.state === 'planned' && !result.document.mutationAllowed)
+            derived.add('document_mutation_not_allowed');
+        if (result.plan.before.locked)
+            derived.add('target_locked');
+        if (result.plan.before.hidden)
+            derived.add('target_hidden');
+        if (!result.plan.before.layerVisible)
+            derived.add('layer_hidden');
+        if (result.plan.before.layerLocked)
+            derived.add('layer_locked');
+        if (result.plan.before.ancestorHidden)
+            derived.add('ancestor_hidden');
+        if (result.plan.before.ancestorLocked)
+            derived.add('ancestor_locked');
+        if (result.plan.sourceAdmission.status === 'blocked')
+            derived.add(result.plan.sourceAdmission.reason);
+        if (result.plan.currentAdmission?.status === 'blocked')
+            derived.add(result.plan.currentAdmission.reason);
+        if (result.plan.confirmationStatus === 'confirmed' && result.plan.pixelDimensionsEqual !== true)
+            derived.add('source_pixel_dimensions_differ');
+        const reported = new Set(result.plan.applyBlockedReasonCodes);
+        for (const blocker of derived)
+            if (!reported.has(blocker))
+                context.addIssue({ code: 'custom', message: `Relink plan must expose blocker ${blocker}.` });
+        for (const blocker of reported)
+            if (!derived.has(blocker) && blocker !== 'source_file_changed' && blocker !== 'source_file_missing' && blocker !== 'current_link_missing' && blocker !== 'selection_unrecordable')
+                context.addIssue({ code: 'custom', message: `Relink plan reports an underivable blocker ${blocker}.` });
+        if (result.transaction.state !== 'planned' && (reported.size !== 0 || !result.plan.applyAllowed || result.plan.sourceAdmission.status !== 'admitted' || result.plan.currentAdmission?.status !== 'admitted')) {
+            context.addIssue({ code: 'custom', message: 'A relink mutation must derive from an allowed, admitted plan.' });
+        }
+        if (result.applied) {
+            if (result.transaction.state !== 'verified')
+                context.addIssue({ code: 'custom', message: 'An applied relink requires a verified transaction.' });
+            if (result.postcondition.uuid === null || result.postcondition.uuid === result.plan.before.uuid || !relinkSnapshotsWithinTolerance(result.postcondition, result.plan.after, true, platform.samePath)) {
+                context.addIssue({ code: 'custom', message: 'Relink postcondition must carry a new UUID and match the planned after state.' });
+            }
+        }
+        else if (result.transaction.state === 'verified')
+            context.addIssue({ code: 'custom', message: 'A verified relink must be applied.' });
+        if (result.transaction.state === 'rolled_back') {
+            const rollback = result.transaction.rollback;
+            if (rollback.targetUuid !== result.plan.before.uuid || rollback.restoredSnapshot === null || rollback.restoredSnapshot.uuid === null ||
+                !relinkSnapshotsWithinTolerance(rollback.restoredSnapshot, result.plan.before, false, platform.samePath)) {
+                context.addIssue({ code: 'custom', message: 'A rolled-back relink must prove the before state (with a new UUID) was restored.' });
+            }
+        }
+    });
+    const relinkImageResponseSchema = z.strictObject({
+        outcome: relinkImageResultSchema,
+        delivery: z.strictObject({ mode: z.enum(['original', 'replay']), finalizedAt: z.string().datetime({ offset: true }) }),
+    });
+    return {
+        sourceSchema, snapshotSchema: relinkImageSnapshotSchema, currentLinkAdmissionSchema, unadmittedInputSchema, internalInputSchema,
+        publicInputSchema: relinkImagePublicInputSchema, inputSchema, normalizePublicInput, planSchema, resultSchema: relinkImageResultSchema,
+        responseSchema: relinkImageResponseSchema,
+    };
 }
+const MACOS_CONTRACT = buildRelinkImageContract(MACOS_RELINK_IMAGE_PLATFORM, placeImageAdmissionSchema);
+export const relinkImageSnapshotSchema = MACOS_CONTRACT.snapshotSchema;
+export const currentLinkAdmissionSchema = MACOS_CONTRACT.currentLinkAdmissionSchema;
+export const relinkImagePublicInputSchema = MACOS_CONTRACT.publicInputSchema;
+export const relinkImageResultSchema = MACOS_CONTRACT.resultSchema;
+export const relinkImageResponseSchema = MACOS_CONTRACT.responseSchema;
 export async function admitRelinkImageRequest(input, services) {
-    const request = unadmittedInputSchema.parse(input);
+    const request = MACOS_CONTRACT.unadmittedInputSchema.parse(input);
     let sourceAdmission = await admitSource(request.source, services.imageFileInspector);
     if (sourceAdmission.status === 'admitted' && !RELINK_IMAGE_MEASURED_FORMATS.includes(sourceAdmission.format)) {
         sourceAdmission = { status: 'blocked', resolvedPath: sourceAdmission.resolvedPath, reason: 'source_format_unmeasured',
@@ -155,149 +332,6 @@ async function admitCurrentLink(path, services) {
     return { status: 'admitted', resolvedPath: path, bytes: inspection.file.bytes, modifiedAtMs: Date.parse(inspection.file.modifiedAt), sha256: inspection.file.sha256, format: format.value,
         pixels: pixels.status === 'available' ? { width: pixels.value.width, height: pixels.value.height } : null };
 }
-const blockerSchema = z.enum([
-    'document_mutation_not_allowed', 'target_locked', 'target_hidden', 'layer_hidden', 'layer_locked', 'ancestor_hidden', 'ancestor_locked',
-    'current_link_missing', 'current_link_unavailable', 'current_link_format_unmeasured',
-    'source_file_missing', 'source_file_unavailable', 'source_hash_mismatch', 'source_format_unmeasured', 'source_file_changed',
-    'source_pixel_dimensions_differ',
-]);
-const planSchema = z.strictObject({
-    operation: z.literal(RELINK_IMAGE_OPERATION),
-    documentKey: z.string().min(1).max(16_384),
-    source: sourceSchema,
-    sourceAdmission: placeImageAdmissionSchema,
-    currentAdmission: currentLinkAdmissionSchema.nullable(),
-    pixelDimensionsEqual: z.boolean().nullable(),
-    before: relinkImageSnapshotSchema,
-    after: relinkImageSnapshotSchema,
-    applyBlockedReasonCodes: z.array(blockerSchema),
-    confirmationStatus: z.enum(['required', 'confirmed']),
-    applyAllowed: z.boolean(),
-}).superRefine((plan, context) => {
-    const confirmedAndClear = plan.confirmationStatus === 'confirmed' && plan.applyBlockedReasonCodes.length === 0;
-    if (plan.applyAllowed !== confirmedAndClear)
-        context.addIssue({ code: 'custom', message: 'Relink applyAllowed must require confirmation and no blockers.' });
-    if (plan.before.uuid === null || plan.after.uuid !== null)
-        context.addIssue({ code: 'custom', message: 'Relink before must carry the target UUID and after must leave it unknown.' });
-    const expectedAfter = plan.sourceAdmission.status === 'admitted' ? { ...relinkStateOf(plan.before), linkPath: plan.sourceAdmission.resolvedPath } : relinkStateOf(plan.before);
-    if (canonicalDigest(relinkStateOf(plan.after)) !== canonicalDigest(expectedAfter)) {
-        context.addIssue({ code: 'custom', message: 'Relink after state must equal the before state with only the link path replaced.' });
-    }
-    if (plan.sourceAdmission.status === 'admitted' && plan.sourceAdmission.sha256 !== plan.source.sha256) {
-        context.addIssue({ code: 'custom', message: 'Relink source admission must carry the requested SHA-256.' });
-    }
-    if (!pixelEqualityConsistent(plan))
-        context.addIssue({ code: 'custom', message: 'Relink pixelDimensionsEqual must follow from equal admitted pixel dimensions.' });
-});
-const failureSchema = z.strictObject({
-    phase: z.enum(['apply', 'verify']), reasonCode: z.enum(['apply_failed', 'verify_mismatch']), message: z.string().min(1).max(500),
-}).superRefine((failure, context) => {
-    if ((failure.phase === 'apply') !== (failure.reasonCode === 'apply_failed'))
-        context.addIssue({ code: 'custom', message: 'Relink failure phase and reason code must match.' });
-});
-const indeterminateFailureSchema = z.strictObject({ phase: z.literal('apply'), reasonCode: z.literal('apply_indeterminate'), message: z.string().min(1).max(500) });
-const rollbackEvidence = {
-    targetUuid: z.string().min(1).max(255),
-    afterUuid: z.string().min(1).max(255).nullable(),
-    restoredSnapshot: relinkImageSnapshotSchema.nullable(),
-};
-const transactionSchema = z.discriminatedUnion('state', [
-    z.strictObject({ state: z.literal('planned'), audit: mutationAuditSchema }),
-    z.strictObject({ state: z.literal('verified'), audit: mutationAuditSchema }),
-    z.strictObject({ state: z.literal('apply_failed'), failure: failureSchema, rollback: z.strictObject({ status: z.literal('not_required') }), audit: mutationAuditSchema }),
-    z.strictObject({ state: z.literal('rolled_back'), failure: failureSchema, rollback: z.strictObject({ status: z.literal('verified'), ...rollbackEvidence }), audit: mutationAuditSchema }),
-    z.strictObject({ state: z.literal('rollback_failed'), failure: failureSchema,
-        rollback: z.strictObject({ status: z.literal('failed'), reasonCode: z.literal('rollback_failed'), message: z.string().min(1).max(500), ...rollbackEvidence }), audit: mutationAuditSchema }),
-    z.strictObject({ state: z.literal('apply_indeterminate'), failure: indeterminateFailureSchema,
-        rollback: z.strictObject({ status: z.literal('indeterminate'), reasonCode: z.literal('relink_state_unknown'), message: z.string().min(1).max(500),
-            targetUuid: z.string().min(1).max(255), afterUuid: z.null(), restoredSnapshot: z.null() }), audit: mutationAuditSchema }),
-    z.strictObject({ state: z.literal('rollback_indeterminate'), failure: failureSchema,
-        rollback: z.strictObject({ status: z.literal('indeterminate'), reasonCode: z.literal('rollback_indeterminate'), message: z.string().min(1).max(500), ...rollbackEvidence }), audit: mutationAuditSchema }),
-]).superRefine((transaction, context) => {
-    const prefix = ['preflight:started:', 'preflight:succeeded:', 'plan:started:', 'plan:succeeded:'];
-    let expected;
-    if (transaction.state === 'planned')
-        expected = [...prefix, 'apply:skipped:not_requested', 'verify:skipped:not_requested', 'rollback:skipped:not_requested'];
-    else if (transaction.state === 'verified')
-        expected = [...prefix, 'apply:started:', 'apply:attempted:', 'apply:succeeded:', 'verify:started:', 'verify:succeeded:', 'rollback:skipped:not_required'];
-    else if (transaction.state === 'apply_failed')
-        expected = [...prefix, 'apply:started:', 'apply:failed:apply_failed', 'verify:skipped:not_required', 'rollback:skipped:not_required'];
-    else if (transaction.state === 'apply_indeterminate')
-        expected = [...prefix, 'apply:started:', 'apply:attempted:', 'apply:failed:apply_indeterminate'];
-    else {
-        const failure = transaction.failure.phase === 'apply'
-            ? ['apply:started:', 'apply:attempted:', 'apply:failed:apply_failed', 'verify:skipped:not_required']
-            : ['apply:started:', 'apply:attempted:', 'apply:succeeded:', 'verify:started:', 'verify:failed:verify_mismatch'];
-        expected = [...prefix, ...failure, 'rollback:started:', transaction.state === 'rolled_back' ? 'rollback:succeeded:'
-                : `rollback:failed:${transaction.state === 'rollback_failed' ? 'rollback_failed' : 'rollback_indeterminate'}`];
-    }
-    const actual = transaction.audit.map((event) => `${event.phase}:${event.event}:${'reasonCode' in event ? event.reasonCode : ''}`);
-    if (actual.length !== expected.length || actual.some((value, index) => value !== expected[index]))
-        context.addIssue({ code: 'custom', message: 'Relink audit sequence does not match transaction state.' });
-    transaction.audit.forEach((event, index) => { if (event.sequence !== index)
-        context.addIssue({ code: 'custom', message: 'Relink audit sequence must be contiguous.' }); });
-    if ('failure' in transaction) {
-        const matches = transaction.audit.filter((event) => event.event === 'failed' && event.phase === transaction.failure.phase && event.reasonCode === transaction.failure.reasonCode && event.message === transaction.failure.message);
-        if (matches.length !== 1)
-            context.addIssue({ code: 'custom', message: 'Relink failure must match one audit event.' });
-    }
-});
-export const relinkImageResultSchema = z.union([
-    z.strictObject({ operation: z.literal(RELINK_IMAGE_OPERATION), applied: z.literal(false), document: documentContextSchema, plan: planSchema, transaction: transactionSchema }),
-    z.strictObject({ operation: z.literal(RELINK_IMAGE_OPERATION), applied: z.literal(true), document: documentContextSchema, plan: planSchema, postcondition: relinkImageSnapshotSchema, transaction: transactionSchema }),
-]).superRefine((result, context) => {
-    const derived = new Set();
-    if (result.transaction.state === 'planned' && !result.document.mutationAllowed)
-        derived.add('document_mutation_not_allowed');
-    if (result.plan.before.locked)
-        derived.add('target_locked');
-    if (result.plan.before.hidden)
-        derived.add('target_hidden');
-    if (!result.plan.before.layerVisible)
-        derived.add('layer_hidden');
-    if (result.plan.before.layerLocked)
-        derived.add('layer_locked');
-    if (result.plan.before.ancestorHidden)
-        derived.add('ancestor_hidden');
-    if (result.plan.before.ancestorLocked)
-        derived.add('ancestor_locked');
-    if (result.plan.sourceAdmission.status === 'blocked')
-        derived.add(result.plan.sourceAdmission.reason);
-    if (result.plan.currentAdmission?.status === 'blocked')
-        derived.add(result.plan.currentAdmission.reason);
-    if (result.plan.confirmationStatus === 'confirmed' && result.plan.pixelDimensionsEqual !== true)
-        derived.add('source_pixel_dimensions_differ');
-    const reported = new Set(result.plan.applyBlockedReasonCodes);
-    for (const blocker of derived)
-        if (!reported.has(blocker))
-            context.addIssue({ code: 'custom', message: `Relink plan must expose blocker ${blocker}.` });
-    for (const blocker of reported)
-        if (!derived.has(blocker) && blocker !== 'source_file_changed' && blocker !== 'source_file_missing' && blocker !== 'current_link_missing')
-            context.addIssue({ code: 'custom', message: `Relink plan reports an underivable blocker ${blocker}.` });
-    if (result.transaction.state !== 'planned' && (reported.size !== 0 || !result.plan.applyAllowed || result.plan.sourceAdmission.status !== 'admitted' || result.plan.currentAdmission?.status !== 'admitted')) {
-        context.addIssue({ code: 'custom', message: 'A relink mutation must derive from an allowed, admitted plan.' });
-    }
-    if (result.applied) {
-        if (result.transaction.state !== 'verified')
-            context.addIssue({ code: 'custom', message: 'An applied relink requires a verified transaction.' });
-        if (result.postcondition.uuid === null || result.postcondition.uuid === result.plan.before.uuid || !relinkSnapshotsWithinTolerance(result.postcondition, result.plan.after, true)) {
-            context.addIssue({ code: 'custom', message: 'Relink postcondition must carry a new UUID and match the planned after state.' });
-        }
-    }
-    else if (result.transaction.state === 'verified')
-        context.addIssue({ code: 'custom', message: 'A verified relink must be applied.' });
-    if (result.transaction.state === 'rolled_back') {
-        const rollback = result.transaction.rollback;
-        if (rollback.targetUuid !== result.plan.before.uuid || rollback.restoredSnapshot === null || rollback.restoredSnapshot.uuid === null ||
-            !relinkSnapshotsWithinTolerance(rollback.restoredSnapshot, result.plan.before)) {
-            context.addIssue({ code: 'custom', message: 'A rolled-back relink must prove the before state (with a new UUID) was restored.' });
-        }
-    }
-});
-export const relinkImageResponseSchema = z.strictObject({
-    outcome: relinkImageResultSchema,
-    delivery: z.strictObject({ mode: z.enum(['original', 'replay']), finalizedAt: z.string().datetime({ offset: true }) }),
-});
 export const RELINK_IMAGE_SAFETY = operationSafetyRegistrationSchema.parse({
     operationId: RELINK_IMAGE_OPERATION,
     policy: {
@@ -353,8 +387,8 @@ function safetyResult(result, requestDigest, attestation, plan) {
         executionEvidence: { outcome: 'proven_pre_apply' },
         resolution: { status: 'failed', terminal: true, recovery: 'not_required', proof: { kind: 'proven_pre_apply', mutationAttempted: false }, replay: { status: 'durable_terminal', action: 'return_attested_result', reapply: false } } });
 }
-async function assertSafety(value, requestDigest, attestation, resolver) {
-    const result = relinkImageResultSchema.parse(value);
+async function assertSafety(contract, value, requestDigest, attestation, resolver) {
+    const result = contract.resultSchema.parse(value);
     const plan = safetyPlan(result, requestDigest, attestation?.documentKey);
     if (result.transaction.state === 'planned')
         return;
@@ -362,9 +396,16 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
         throw new Error('Relink terminal result requires attestation.');
     await assertOperationSafetyAdapterConformance({ registration: RELINK_IMAGE_SAFETY, plan, result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
-export const RELINK_IMAGE_SCRIPT = `${HOST_FILE_PATH_HELPERS}
-${MUTATION_TRANSACTION_SCRIPT}${ANCESTOR_STATE_SCRIPT}
+export function relinkImageScript(platform) {
+    return `${platform.host.pathHelpers}
+${MUTATION_TRANSACTION_SCRIPT}${ANCESTOR_STATE_SCRIPT}${ACTIVE_LAYER_GUARD_SCRIPT}
 var RELINK_IMAGE_MAX_DIRECT_ITEMS = ${RELINK_IMAGE_MAX_DIRECT_ITEMS};
+var RELINK_IMAGE_MAX_NOTE_LENGTH = ${RELINK_IMAGE_MAX_NOTE_LENGTH};
+var RELINK_IMAGE_MAX_URL_LENGTH = ${RELINK_IMAGE_MAX_URL_LENGTH};
+var RELINK_IMAGE_MAX_TAGS = ${RELINK_IMAGE_MAX_TAGS};
+var RELINK_IMAGE_MAX_TAG_NAME_LENGTH = ${RELINK_IMAGE_MAX_TAG_NAME_LENGTH};
+var RELINK_IMAGE_MAX_TAG_VALUE_LENGTH = ${RELINK_IMAGE_MAX_TAG_VALUE_LENGTH};
+var RELINK_IMAGE_MAX_SELECTION = ${RELINK_IMAGE_MAX_SELECTION};
 var RELINK_IMAGE_TOLERANCE_PT = ${RELINK_IMAGE_TOLERANCE_PT};
 var RELINK_IMAGE_PRECISION_DIGITS = ${RELINK_IMAGE_PRECISION_DIGITS};
 
@@ -395,14 +436,87 @@ function relinkLayerPath(document, targetLayer) {
 
 function relinkValidateRequest() {
   var source = params.source;
-  if (!source || typeof source.path !== "string" || source.path.length < 2 || source.path.charAt(0) !== "/") throw mutationError("preflight_failed", "Source path must be an absolute path.");
+  if (!source || typeof source.path !== "string" || source.path.length < 2 || ${platform.host.sourcePathInvalid}) throw mutationError("preflight_failed", "Source path must be an absolute path.");
   if (typeof source.sha256 !== "string" || source.sha256.length !== 64) throw mutationError("preflight_failed", "Source SHA-256 is required.");
   var admission = params.sourceAdmission;
   if (!admission || (admission.status !== "admitted" && admission.status !== "blocked")) throw mutationError("preflight_failed", "Source admission is missing; the request did not pass Node-side file admission.");
-  if (admission.status === "admitted" && (typeof admission.resolvedPath !== "string" || admission.resolvedPath.charAt(0) !== "/" || admission.sha256 !== source.sha256)) {
+  if (admission.status === "admitted" && (typeof admission.resolvedPath !== "string" || ${platform.host.resolvedPathInvalid} || admission.sha256 !== source.sha256)) {
     throw mutationError("preflight_failed", "Source admission facts are inconsistent with the request.");
   }
   if (typeof params.targetUuid !== "string" || params.targetUuid.length === 0) throw mutationError("preflight_failed", "A target UUID is required.");
+}
+
+/** A text attribute read as a string; it is restored after the file assignment rebuilds the item, so an unreadable or oversized value refuses before any write. */
+function relinkReadText(target, key, limit, what) {
+  var value;
+  try { value = target[key]; } catch (readError) { value = undefined; }
+  if (typeof value !== "string" || value.length > limit) throw mutationError("preflight_failed", "Target " + what + " is unreadable or longer than " + limit + " characters (the limit keeps the durable record small). Shorten it, or relink with your own script outside this server.");
+  return value;
+}
+function relinkReadNote(target) { return relinkReadText(target, "note", RELINK_IMAGE_MAX_NOTE_LENGTH, "note"); }
+
+function relinkTagLess(a, b) {
+  if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+  if (a.value !== b.value) return a.value < b.value ? -1 : 1;
+  return 0;
+}
+/** The item's tags as {name, value} pairs sorted by name then value; the host's own tags are read like any other (never recognised by name). */
+function relinkReadTags(target) {
+  var tags, count, out = [], index, name, value;
+  try { tags = target.tags; count = tags.length; } catch (countError) { count = -1; }
+  if (typeof count !== "number" || count < 0 || count > RELINK_IMAGE_MAX_TAGS) throw mutationError("preflight_failed", "Target tags are unreadable or more than " + RELINK_IMAGE_MAX_TAGS + " (the limit keeps the durable record small). Remove tags, or relink with your own script outside this server.");
+  for (index = 0; index < count; index++) {
+    try { name = tags[index].name; value = tags[index].value; } catch (tagError) { name = undefined; }
+    if (typeof name !== "string" || typeof value !== "string" || name.length > RELINK_IMAGE_MAX_TAG_NAME_LENGTH || value.length > RELINK_IMAGE_MAX_TAG_VALUE_LENGTH) {
+      throw mutationError("preflight_failed", "A target tag is unreadable or longer than " + RELINK_IMAGE_MAX_TAG_NAME_LENGTH + " (name) / " + RELINK_IMAGE_MAX_TAG_VALUE_LENGTH + " (value) characters. Shorten it, or relink with your own script outside this server.");
+    }
+    out.push({ name: name, value: value });
+  }
+  out.sort(relinkTagLess);
+  return out;
+}
+function relinkSameTags(left, right) {
+  var a = left.slice(0).sort(relinkTagLess), b = right.slice(0).sort(relinkTagLess), index;
+  if (a.length !== b.length) return false;
+  for (index = 0; index < a.length; index++) if (a[index].name !== b[index].name || a[index].value !== b[index].value) return false;
+  return true;
+}
+
+/** Puts back the recorded tags the rebuild dropped or changed. Tags that are still there as recorded (the host's own included) are not touched; none is created that was not recorded. */
+function relinkRestoreTags(target, recorded) {
+  var current = [], index, tags, found, missing = [], item;
+  try {
+    tags = target.tags;
+    for (index = 0; index < tags.length; index++) current.push({ item: tags[index], name: String(tags[index].name), value: String(tags[index].value), used: false });
+  } catch (readError) { return; }
+  function take(name, value) {
+    var k;
+    for (k = 0; k < current.length; k++) if (!current[k].used && current[k].name === name && (value === null || current[k].value === value)) { current[k].used = true; return current[k]; }
+    return null;
+  }
+  for (index = 0; index < recorded.length; index++) if (take(recorded[index].name, recorded[index].value) === null) missing.push(recorded[index]);
+  for (index = 0; index < missing.length; index++) {
+    found = take(missing[index].name, null);
+    try {
+      if (found !== null) found.item.value = missing[index].value;
+      else { item = target.tags.add(); item.name = missing[index].name; item.value = missing[index].value; }
+    } catch (writeError) { /* left to the comparison */ }
+  }
+}
+
+/**
+ * Re-applies the attributes the file assignment drops from the rebuilt item (note on Windows 30.8.2; note, URL and the user's tags on Mac 30.8.2), keeping the recorded before values.
+ * It runs after the write, so it never throws: a value that cannot be read or written stays different, and the snapshot comparison that follows
+ * refuses a verified result (verify) or reports the rollback as indeterminate or failed.
+ */
+function relinkRestoreRebuiltAttributes(target, before) {
+  var current;
+  try { if (String(target.name || "") !== before.name) target.name = before.name; } catch (nameError) { /* left to the comparison */ }
+  try { current = target.note; } catch (readError) { current = null; }
+  if (current !== before.note) { try { target.note = before.note; } catch (writeError) { /* left to the comparison */ } }
+  try { current = target.uRL; } catch (urlReadError) { current = null; }
+  if (current !== before.url) { try { target.uRL = before.url; } catch (urlWriteError) { /* left to the comparison */ } }
+  relinkRestoreTags(target, before.tags);
 }
 
 /** The complete bound state of the target; uuid is read but excluded from state comparison. */
@@ -428,7 +542,7 @@ function relinkSnapshot(document, target) {
   if (!position || position.length !== 2 || !bounds || bounds.length !== 4 || !matrix) throw mutationError("preflight_failed", "Target geometry is unavailable.");
   return {
     uuid: String(target.uuid), type: "PlacedItem", layerPath: layerPath, layerIndex: layerIndex, siblingUuids: siblings,
-    name: String(target.name || ""), linkPath: linkPath,
+    name: String(target.name || ""), note: relinkReadNote(target), url: relinkReadText(target, "uRL", RELINK_IMAGE_MAX_URL_LENGTH, "URL"), tags: relinkReadTags(target), linkPath: linkPath,
     position: [relinkRound(position[0]), relinkRound(position[1])],
     geometricBounds: [relinkRound(bounds[0]), relinkRound(bounds[1]), relinkRound(bounds[2]), relinkRound(bounds[3])],
     width: relinkRound(target.width), height: relinkRound(target.height),
@@ -439,9 +553,9 @@ function relinkSnapshot(document, target) {
 }
 
 /** State equality without the replaceable UUID. */
-function relinkStateMatches(left, right, compareReportedAfterPath) {
+function relinkStateMatches(left, right, compareReportedAfterPath, ignoreRestorable) {
   if (!left || !right || left.type !== right.type || !mutationSameSequence(left.layerPath, right.layerPath) || left.layerIndex !== right.layerIndex ||
-      !mutationSameSequence(left.siblingUuids, right.siblingUuids) || left.name !== right.name || (left.linkPath !== right.linkPath && !(compareReportedAfterPath && hostFilePathMatches(left.linkPath, right.linkPath))) ||
+      !mutationSameSequence(left.siblingUuids, right.siblingUuids) || left.name !== right.name || (ignoreRestorable !== true && (left.note !== right.note || left.url !== right.url || !relinkSameTags(left.tags, right.tags))) || (left.linkPath !== right.linkPath && !(compareReportedAfterPath && hostFilePathMatches(left.linkPath, right.linkPath))) ||
       left.locked !== right.locked || left.hidden !== right.hidden || left.layerVisible !== right.layerVisible || left.layerLocked !== right.layerLocked ||
       left.ancestorLocked !== right.ancestorLocked || left.ancestorHidden !== right.ancestorHidden) return false;
   for (var p = 0; p < 2; p++) if (!relinkNear(left.position[p], right.position[p])) return false;
@@ -484,6 +598,66 @@ function relinkSourceBlockers(admission) {
   return blockers;
 }
 
+/**
+ * The document selection as recorded before the call: the item objects (to set it again), their UUIDs, and whether the target is one of them.
+ * Measured (30.8.2, #817): assigning the file makes Illustrator select the relinked item when its layer is the active layer, and empties the selection
+ * when the target was selected and its layer was not the active layer. The relink never switches the active layer, so the selection is recorded
+ * and set back to the original (the target replaced by its new UUID) after the assignment, and read back.
+ */
+function relinkSelectionUuids(document, collectRefs) {
+  var refs = [], uuids = [], list, index, item, uuid;
+  // Null when the selection cannot be recorded: a text range (an array has no typename), an item without a readable UUID, a read that throws, or too many items.
+  try {
+    list = document.selection;
+    if (list === null || list === undefined) return { refs: refs, uuids: uuids };
+    if (typeof list.typename === "string" || typeof list.length !== "number" || list.length > RELINK_IMAGE_MAX_SELECTION) return null;
+    for (index = 0; index < list.length; index++) {
+      item = list[index];
+      if (item === null || item === undefined) return null;
+      uuid = item.uuid;
+      if (typeof uuid !== "string" || uuid.length === 0) return null;
+      uuids.push(uuid);
+      if (collectRefs) refs.push(item);
+    }
+  } catch (selectionError) { return null; }
+  return { refs: refs, uuids: uuids };
+}
+
+/** The UUIDs the selection must have after the relink: the original ones with the target's old UUID replaced by its current one. */
+function relinkExpectedSelection(preflight, currentTargetUuid) {
+  var expected = [], index;
+  for (index = 0; index < preflight.selection.uuids.length; index++) {
+    expected.push(preflight.selection.uuids[index] === preflight.before.uuid ? currentTargetUuid : preflight.selection.uuids[index]);
+  }
+  return expected;
+}
+
+function relinkSameUuidSet(left, right) {
+  if (left.length !== right.length) return false;
+  var a = left.slice(0).sort(), b = right.slice(0).sort();
+  return mutationSameSequence(a, b);
+}
+
+function relinkSelectionMatches(preflight) {
+  try {
+    var current = relinkSelectionUuids(preflight.document, false);
+    return current !== null && relinkSameUuidSet(current.uuids, relinkExpectedSelection(preflight, String(preflight.target.uuid)));
+  } catch (readError) { return false; }
+}
+
+/** Sets the recorded selection again when it differs; never throws (verify and rollback read the result back). */
+function relinkRestoreSelection(preflight) {
+  if (relinkSelectionMatches(preflight)) return true;
+  try {
+    var items = [], index;
+    for (index = 0; index < preflight.selection.refs.length; index++) {
+      items.push(preflight.selection.uuids[index] === preflight.before.uuid ? preflight.target : preflight.selection.refs[index]);
+    }
+    preflight.document.selection = items.length === 0 ? null : items;
+  } catch (selectError) { return false; }
+  return relinkSelectionMatches(preflight);
+}
+
 function relinkResolve(forApply) {
   var context = forApply ? requireDocument(params.expectedDocumentKey) : requireDocumentForRead(params.expectedDocumentKey);
   var document = app.activeDocument;
@@ -509,11 +683,17 @@ function relinkResolve(forApply) {
     else if (before.linkPath !== null && relinkFileChanged(before.linkPath, params.currentAdmission.bytes, params.currentAdmission.modifiedAtMs) !== null) blockers.push("current_link_unavailable");
     if (params.pixelDimensionsEqual !== true) blockers.push("source_pixel_dimensions_differ");
   }
-  if (before.linkPath === null) before.linkPath = "/unavailable";
+  // The plan and the apply reach the same conclusion: a selection that cannot be recorded (or set back) blocks both.
+  var selection = relinkSelectionUuids(document, forApply);
+  if (selection === null) blockers.push("selection_unrecordable");
+  if (before.linkPath === null) before.linkPath = ${platform.unavailableLinkPath};
   if (forApply && blockers.length > 0) {
     throw new Error("MCP_ERROR:" + stringifyJson({ code: "RELINK_IMAGE_APPLY_BLOCKED", reasonCodes: blockers, uuid: params.targetUuid }));
   }
-  return { context: context, document: document, target: target, before: before, after: relinkAfter(before), blockers: blockers };
+  // The apply path records the active layer, the item counts of the whole document and the selection; the relink does not switch the active layer.
+  var activeLayer = forApply ? guardCaptureActiveLayer(document) : null;
+  var counts = forApply ? guardCaptureCounts(document) : null;
+  return { context: context, document: document, target: target, before: before, after: relinkAfter(before), blockers: blockers, activeLayer: activeLayer, counts: counts, selection: selection };
 }
 
 function relinkPreflight(forApply) {
@@ -545,6 +725,11 @@ function relinkRevalidate(preflight, plan) {
       !relinkStateMatches(current.before, plan.before) || !relinkStateMatches(current.after, plan.after)) {
     throw mutationBeforeSideEffectError("Relink target or link state changed before apply.");
   }
+  if (!mutationSameSequence(current.activeLayer.path, preflight.activeLayer.path) || current.activeLayer.name !== preflight.activeLayer.name ||
+      !guardCountsUnchanged(preflight.counts, current.counts)) {
+    throw mutationBeforeSideEffectError("The active layer or the document item counts changed before apply.");
+  }
+  if (!relinkSameUuidSet(current.selection.uuids, preflight.selection.uuids)) throw mutationBeforeSideEffectError("The selection changed before apply.");
 }
 
 function relinkAssign(target, path) {
@@ -563,11 +748,14 @@ function relinkApply(preflight, plan, state) {
     try { state.operationState.afterUuid = relinkAssign(target, params.sourceAdmission.resolvedPath); }
     catch (fileError) { throw mutationError("apply_failed", "Illustrator refused the source file: " + mutationPublicMessage(fileError, String(fileError && fileError.message))); }
     state.operationState.rollbackEvidence.afterUuid = state.operationState.afterUuid;
-    // Measured: relinking to some formats renames the item after the file; the bound state keeps the before name.
-    if (String(target.name || "") !== plan.before.name) target.name = plan.before.name;
+    // Measured: relinking to some formats renames the item after the file (the bound state keeps the before name), and the rebuilt item loses its note (Windows 30.8.2, #825).
+    relinkRestoreRebuiltAttributes(target, plan.before);
+    // Never throw here; relinkVerify reads the active layer and the selection back and refuses a state that is not the recorded one.
+    relinkRestoreSelection(preflight);
     return target;
   } finally {
     app.userInteractionLevel = previousInteractionLevel;
+    guardRestoreActiveLayer(preflight.document, preflight.activeLayer);
   }
 }
 
@@ -578,12 +766,19 @@ function relinkVerify(preflight, plan, state) {
   var target = relinkFind(preflight.document, afterUuid);
   if (target === null || target !== preflight.target) throw mutationError("verify_mismatch", "The new native UUID does not resolve to the relinked item.");
   if (relinkFind(preflight.document, plan.before.uuid) !== null) throw mutationError("verify_mismatch", "The previous native UUID still resolves after relink.");
+  if (!guardActiveLayerMatches(preflight.document, preflight.activeLayer)) {
+    throw mutationError("verify_mismatch", "The active layer was not restored to the layer that was active before the relink.");
+  }
+  if (!guardCountsUnchanged(preflight.counts, guardCaptureCounts(preflight.document))) {
+    throw mutationError("verify_mismatch", "The document item counts changed during the relink.");
+  }
+  if (!relinkSelectionMatches(preflight)) throw mutationError("verify_mismatch", "The selection is not the original selection with the relinked item in place of the target.");
   var actual = relinkSnapshot(preflight.document, target);
   if (!relinkStateMatches(actual, plan.after, true)) throw mutationError("verify_mismatch", "Relink postcondition does not match the planned after state.");
   return actual;
 }
 
-function relinkRollback(state) {
+function relinkRollbackTarget(state) {
   var preflight = state.preflight;
   if (!preflight || app.documents.length === 0 || app.activeDocument !== preflight.document) return { status: "indeterminate", message: "Rollback document identity is indeterminate." };
   var target = preflight.target;
@@ -595,13 +790,14 @@ function relinkRollback(state) {
     state.operationState.rollbackEvidence.restoredSnapshot = current;
     return { status: "verified" };
   }
-  if (!relinkStateMatches(current, preflight.after, true)) return { status: "indeterminate", message: "Rollback refused because the target is neither the before nor the planned after state." };
+  // The note, URL and tags are what the rebuild drops and the inverse restores, so losing them must not make the planned after state unrecognizable.
+  if (!relinkStateMatches(current, preflight.after, true, true)) return { status: "indeterminate", message: "Rollback refused because the target is neither the before nor the planned after state." };
   var previousInteractionLevel = app.userInteractionLevel;
   try {
     app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
     try { relinkAssign(target, preflight.before.linkPath); }
     catch (assignError) { return { status: "failed", message: "Rollback could not reassign the original link: " + mutationPublicMessage(assignError, String(assignError && assignError.message)) }; }
-    if (String(target.name || "") !== preflight.before.name) target.name = preflight.before.name;
+    relinkRestoreRebuiltAttributes(target, preflight.before);
   } finally {
     app.userInteractionLevel = previousInteractionLevel;
   }
@@ -609,6 +805,24 @@ function relinkRollback(state) {
   try { restored = relinkSnapshot(preflight.document, target); } catch (error) { return { status: "indeterminate", message: "Rollback verification is indeterminate." }; }
   state.operationState.rollbackEvidence.restoredSnapshot = restored;
   return relinkStateMatches(restored, preflight.before) ? { status: "verified" } : { status: "failed", message: "Rollback did not restore the before link state." };
+}
+
+/** The target rollback, then the document-wide proof: the active layer and the selection are the recorded ones and no item count moved. */
+function relinkRollback(state) {
+  var preflight = state.preflight;
+  if (!preflight || !preflight.activeLayer || !preflight.counts || !preflight.selection || app.documents.length === 0 || app.activeDocument !== preflight.document) return relinkRollbackTarget(state);
+  var outcome = relinkRollbackTarget(state);
+  var activeRestored = guardRestoreActiveLayer(preflight.document, preflight.activeLayer);
+  var selectionRestored = relinkRestoreSelection(preflight);
+  if (outcome.status !== "verified") return outcome;
+  if (!activeRestored) return { status: "indeterminate", message: "Rollback restored the link but the previous active layer could not be restored." };
+  if (!selectionRestored) return { status: "indeterminate", message: "Rollback restored the link but the original selection could not be restored." };
+  var counts;
+  try { counts = guardCaptureCounts(preflight.document); } catch (countError) { return { status: "indeterminate", message: "Rollback document item counts are indeterminate." }; }
+  if (!guardCountsUnchanged(preflight.counts, counts)) {
+    return { status: "indeterminate", message: "Rollback refused because the document item counts differ from the baseline." };
+  }
+  return outcome;
 }
 
 var relinkExecution = runMutationTransaction({
@@ -632,63 +846,86 @@ if (app.documents.length > 0 && app.activeDocument === relinkExecution.preflight
 var result = { operation: "relink_image", applied: relinkExecution.transaction.state === "verified", document: relinkDocument, plan: relinkExecution.plan, transaction: relinkExecution.transaction };
 if (relinkExecution.transaction.state === "verified") result.postcondition = relinkExecution.value;
 `;
+}
+export const RELINK_IMAGE_SCRIPT = relinkImageScript(MACOS_RELINK_IMAGE_PLATFORM);
 export const RELINK_IMAGE_HOST_SCRIPT_DIGEST = canonicalSha256(RELINK_IMAGE_SCRIPT);
-export const RELINK_IMAGE_ADAPTER_IDENTITY = mutationAdapterIdentity({
-    version: 2, contractVersion: 1, operation: RELINK_IMAGE_OPERATION, validator: RELINK_IMAGE_VALIDATOR,
-    canonicalContractVersion: CANONICAL_VERSION, resultSchemaVersion: RESULT_SCHEMA_VERSION, terminalClassifierVersion: CLASSIFIER_VERSION,
-    safetyConformanceVersion: CONFORMANCE_VERSION, errorMappingVersion: ERROR_MAPPING_VERSION,
-    safetyIdentity: RELINK_IMAGE_SAFETY_IDENTITY, hostScriptDigest: RELINK_IMAGE_HOST_SCRIPT_DIGEST,
-});
-function normalizedRequest(input) {
-    const request = internalInputSchema.parse(input);
+export function relinkImageAdapterIdentity(hostScriptDigest) {
+    return mutationAdapterIdentity({
+        version: 2, contractVersion: 1, operation: RELINK_IMAGE_OPERATION, validator: RELINK_IMAGE_VALIDATOR,
+        canonicalContractVersion: CANONICAL_VERSION, resultSchemaVersion: RESULT_SCHEMA_VERSION, terminalClassifierVersion: CLASSIFIER_VERSION,
+        safetyConformanceVersion: CONFORMANCE_VERSION, errorMappingVersion: ERROR_MAPPING_VERSION,
+        safetyIdentity: RELINK_IMAGE_SAFETY_IDENTITY, hostScriptDigest,
+    });
+}
+export const RELINK_IMAGE_ADAPTER_IDENTITY = relinkImageAdapterIdentity(RELINK_IMAGE_HOST_SCRIPT_DIGEST);
+function normalizedRequestOf(contract, input) {
+    const request = contract.internalInputSchema.parse(input);
     const { commandId: _commandId, sourceAdmission: _s, sourceModifiedAtMs: _m, currentAdmission: _c, pixelDimensionsEqual: _p, ...digestRequest } = request;
     const digest = canonicalSha256({ operation: RELINK_IMAGE_OPERATION, validator: RELINK_IMAGE_VALIDATOR, request: digestRequest });
     return { intent: request.apply ? 'apply' : 'plan', request, commandId: 'commandId' in request ? request.commandId : null, documentKey: request.expectedDocumentKey, digest };
 }
-export const relinkImageToolContract = {
-    name: 'illustrator_relink_image',
-    title: 'Plan or Relink Linked Image',
-    description: 'Plan or relink one existing linked PlacedItem (bound by document key and native UUID) to another TIFF, JPEG, or PNG file given by absolute path and SHA-256 whose pixel dimensions equal the current link. The frame, layer, sibling position, and name are kept; Illustrator replaces the native UUID, which the result reports. Apply requires the echoed expected_before and confirmed_after snapshots, verifies the read-back, and recovers by reassigning the original link. Missing current links, PSD, and different pixel dimensions are blocked.',
-    inputSchema,
-    publicInputSchema: relinkImagePublicInputSchema,
-    outputSchema: relinkImageResponseSchema,
-    annotations: operationSafetyPolicyToMcpAnnotations(RELINK_IMAGE_SAFETY.policy),
-    normalizePublicInput,
-};
-export function createRelinkImageAdapter() {
+const RELINK_IMAGE_TOOL_DESCRIPTION = 'Plan or relink one existing linked PlacedItem (bound by document key and native UUID) to another TIFF, JPEG, or PNG file given by absolute path and SHA-256 whose pixel dimensions equal the current link. The frame, layer, sibling position, and name are kept; Illustrator replaces the native UUID, which the result reports. Apply requires the echoed expected_before and confirmed_after snapshots, verifies the read-back, and recovers by reassigning the original link. Missing current links, PSD, and different pixel dimensions are blocked.';
+function relinkImageToolContractOf(contract, description) {
+    return {
+        name: 'illustrator_relink_image',
+        title: 'Plan or Relink Linked Image',
+        description,
+        inputSchema: contract.inputSchema,
+        publicInputSchema: contract.publicInputSchema,
+        outputSchema: contract.responseSchema,
+        annotations: operationSafetyPolicyToMcpAnnotations(RELINK_IMAGE_SAFETY.policy),
+        normalizePublicInput: contract.normalizePublicInput,
+    };
+}
+export const relinkImageToolContract = relinkImageToolContractOf(MACOS_CONTRACT, RELINK_IMAGE_TOOL_DESCRIPTION);
+export function assembleRelinkImageAdapter(variant) {
+    const { contract, commands } = variant;
+    const script = commands.read.script;
+    if (commands.mutation.script !== script)
+        throw new Error('The plan and apply commands of an image adapter must run one host script.');
+    const normalizedRequest = (input) => normalizedRequestOf(contract, input);
+    const hostScriptDigest = canonicalSha256(script);
+    const adapterIdentity = relinkImageAdapterIdentity(hostScriptDigest);
     return {
         version: 1, operation: RELINK_IMAGE_OPERATION, validator: RELINK_IMAGE_VALIDATOR,
         safety: RELINK_IMAGE_SAFETY, safetyRegistrationIdentity: RELINK_IMAGE_SAFETY_IDENTITY,
-        adapterIdentity: RELINK_IMAGE_ADAPTER_IDENTITY, tool: relinkImageToolContract,
+        adapterIdentity, tool: relinkImageToolContractOf(contract, variant.toolDescription),
         canonical: { version: CANONICAL_VERSION, normalize: normalizedRequest, safetyDigest: (input) => normalizedRequest(input).digest },
-        resultSchema: relinkImageResultSchema, resultSchemaVersion: RESULT_SCHEMA_VERSION,
+        resultSchema: contract.resultSchema, resultSchemaVersion: RESULT_SCHEMA_VERSION,
         terminalClassifierVersion: CLASSIFIER_VERSION, safetyConformanceVersion: CONFORMANCE_VERSION,
-        errorMappingVersion: ERROR_MAPPING_VERSION, hostScriptDigest: RELINK_IMAGE_HOST_SCRIPT_DIGEST,
-        admit: admitRelinkImageRequest,
+        errorMappingVersion: ERROR_MAPPING_VERSION, hostScriptDigest,
+        admit: variant.admit,
+        ...(variant.beforeHost === undefined ? {} : { beforeHost: variant.beforeHost }),
         buildCommand(input) {
             const normalized = normalizedRequest(input);
             const { commandId: _commandId, ...params } = normalized.request;
             if (normalized.intent === 'plan')
-                return { kind: 'read', script: RELINK_IMAGE_SCRIPT, params };
-            return { kind: 'mutation', mutationValidator: RELINK_IMAGE_VALIDATOR,
+                return { ...commands.read, params };
+            return { kind: commands.mutation.kind, mutationValidator: RELINK_IMAGE_VALIDATOR,
                 idempotency: { commandId: normalized.commandId, operation: RELINK_IMAGE_OPERATION, documentKey: normalized.documentKey, requestDigest: normalized.digest },
-                adapterIdentity: RELINK_IMAGE_ADAPTER_IDENTITY, script: RELINK_IMAGE_SCRIPT, params };
+                adapterIdentity, script: commands.mutation.script, params };
         },
         classifyTerminal(value) {
-            const state = relinkImageResultSchema.parse(value).transaction.state;
+            const state = contract.resultSchema.parse(value).transaction.state;
             if (state === 'verified' || state === 'apply_failed' || state === 'rolled_back')
                 return { state };
             if (state === 'planned')
                 throw new Error('Relink plan is not a terminal mutation result.');
             throw new Error('Unverified relink recovery must remain indeterminate and retain its lock.');
         },
-        assertSafetyConformance: assertSafety,
+        assertSafetyConformance: (value, requestDigest, attestation, resolver) => assertSafety(contract, value, requestDigest, attestation, resolver),
         mapExecutionError(error, detail) {
             if (detail?.code === 'OBJECT_NOT_FOUND')
                 return new Error(`No PlacedItem with UUID ${JSON.stringify(detail.uuid ?? '')} exists in the bound document.`);
-            if (detail?.code === 'RELINK_IMAGE_APPLY_BLOCKED')
-                return new Error(`Relink is blocked: ${(detail.reasonCodes ?? []).join(', ') || 'unknown reason'}.`);
+            if (detail?.code === 'RELINK_IMAGE_APPLY_BLOCKED') {
+                const codes = detail.reasonCodes ?? [];
+                return new Error(`Relink is blocked: ${codes.join(', ') || 'unknown reason'}.${codes.includes('selection_unrecordable') ? ' ' + SELECTION_UNRECORDABLE_NOTE : ''}`);
+            }
             return error instanceof Error ? error : new Error(String(error));
         },
     };
+}
+export function createRelinkImageAdapter() {
+    return assembleRelinkImageAdapter({ contract: MACOS_CONTRACT, commands: { read: { kind: 'read', script: RELINK_IMAGE_SCRIPT }, mutation: { kind: 'mutation', script: RELINK_IMAGE_SCRIPT } },
+        toolDescription: RELINK_IMAGE_TOOL_DESCRIPTION, admit: admitRelinkImageRequest });
 }

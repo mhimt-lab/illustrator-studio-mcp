@@ -1,10 +1,12 @@
 import { DIRTY_FILE_BARRIER_REASON, DIRTY_FILE_BLOCKED_REASON, DIRTY_FILE_GLOBAL_BARRIER_REASON, DIRTY_FILE_SESSION_REASON, DIRTY_FILE_STORE_INVALID_REASON, } from './unsaved-document-guidance.js';
 export const JSX_RUNTIME = String.raw `
+// #931: a string with no quote, backslash or control character is written in one concatenation (the same text as the loop).
 function stringifyJson(value) {
   if (value === null || value === undefined) return "null";
   var type = typeof value;
   if (type === "number" || type === "boolean") return String(value);
   if (type === "string") {
+    if (!/["\\\x00-\x1f]/.test(value)) return '"' + value + '"';
     var escaped = "";
     var hex = "0123456789abcdef";
     for (var stringIndex = 0; stringIndex < value.length; stringIndex++) {
@@ -392,6 +394,14 @@ function dirtyFileBlockedReason(path, pathOnly) {
     }
   }
   return null;
+}
+
+/**
+ * True while the text tool holds a range: document.selection is then one TextRange (it has a typename), not an array (it has none).
+ * Index and length reads on it are not item reads; never write such a value back to the selection (#847).
+ */
+function isTextRangeSelection(selection) {
+  return selection !== null && selection !== undefined && typeof selection === "object" && typeof selection.typename === "string";
 }
 
 function getDocumentContext() {

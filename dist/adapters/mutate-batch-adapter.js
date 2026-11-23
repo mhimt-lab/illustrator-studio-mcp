@@ -1,4 +1,6 @@
-import { assertSnapshotResultFits, mixedSnapshotResultPairs, snapshotResultBytes, SNAPSHOT_RESULT_ADMISSION_BYTES, SNAPSHOT_RESULT_SIZE_SCRIPT } from './snapshot-result-size.js';
+import { assertSnapshotResultFits, snapshotResultBytes, SNAPSHOT_RESULT_ADMISSION_BYTES, SNAPSHOT_RESULT_SIZE_SCRIPT } from './snapshot-result-size.js';
+import { mixedSnapshotResultPairs } from './batch-result-fit.js';
+import { snapshotUnitCount } from './text-recorded-runs.js';
 import { z } from 'zod';
 import { nestedTranslateRows, translateNestedEvidence } from './transform-nested-snapshot.js';
 import { TRANSFORM_GROUP_SCRIPT } from './transform-group-snapshot.js';
@@ -14,9 +16,11 @@ import { REPLACE_POINT_TEXT_MODULE_SCRIPT, REPLACE_POINT_TEXT_OPERATION, } from 
 import { assembleHostFragments, emitBatchHostDispatchRow, emitBatchHostParamsBranch, inPinnedOrder, reportedStepBlockers, stepPlanBinding, stepSnapshotUuid } from './batch-step-contract.js';
 import { BATCH_STEP_REGISTRY, BATCH_STEPS, registeredBatchStep, requireBatchStep } from './batch-step-registry.js';
 import { SET_TEXT_STYLE_BATCH_MODULE_SCRIPT, SET_TEXT_STYLE_OPERATION, } from './set-text-style-adapter.js';
-import { SET_PATH_APPEARANCE_MODULE_SCRIPT, SET_PATH_APPEARANCE_OPERATION, } from './set-path-appearance-adapter.js';
+import { SET_PATH_APPEARANCE_MODULE_SCRIPT, SET_PATH_APPEARANCE_ECHO_SCRIPT, SET_PATH_APPEARANCE_ANGLE_SCRIPT, SET_PATH_APPEARANCE_FREEFORM_GUARD_SCRIPT, SET_PATH_APPEARANCE_OPERATION, } from './set-path-appearance-adapter.js';
 import { TRANSFORM_OBJECT_MODULE_SCRIPT, TRANSFORM_OBJECT_OPERATION, } from './transform-object-adapter.js';
 import { TRANSFORM_TEXT_SCRIPT } from './transform-text-snapshot.js';
+import { HOST_VERSION_POLICY_JSX } from '../host-version-policy.js';
+import { hostVersionBackupPublicFields, hostVersionInternalFields } from '../host-version-consent.js';
 import { SET_OBJECT_STATE_BATCH_SCRIPT, SET_OBJECT_STATE_MODULE_SCRIPT, SET_OBJECT_STATE_OPERATION } from './set-object-state-adapter.js';
 import { SET_LAYER_STATE_OPERATION } from './set-layer-state-adapter.js';
 import { LAYER_OPS_HOST_SCRIPT } from './layer-ops-host-script.js';
@@ -36,8 +40,8 @@ export const OBJECT_STATE_BATCH_MAX_STEPS = 3;
 export const MIXED_BATCH_MAX_TEXT_CODE_UNITS = 4_000;
 export const MIXED_BATCH_MAX_STYLE_CHARACTERS = 200;
 export const MIXED_BATCH_MAX_TRANSFORM_TEXT_EVIDENCE_UNITS = 4_096;
-const CANONICAL_VERSION = 11;
-const RESULT_SCHEMA_VERSION = 12;
+const CANONICAL_VERSION = 13;
+const RESULT_SCHEMA_VERSION = 13;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
@@ -123,7 +127,7 @@ function refineSteps(steps, context) {
                 context.addIssue({ code: 'custom', message: 'A set_text_style step needs a non-empty range.' });
             }
             if ('expectedBefore' in step)
-                styleCharacters += step.expectedBefore.characters.length;
+                styleCharacters += snapshotUnitCount(step.expectedBefore);
         }
         if (step.operation === BATCH_CHARSTYLE_OPERATION && 'expectedBefore' in step)
             styleCharacters += step.expectedBefore.characters.length;
@@ -143,11 +147,13 @@ function refineSteps(steps, context) {
 }
 const internalInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({
+        ...hostVersionInternalFields,
         expectedDocumentKey: documentKeySchema,
         steps: z.array(internalPlanStepSchema).min(MIXED_BATCH_MIN_STEPS).max(MIXED_BATCH_MAX_STEPS).superRefine(refineSteps),
         apply: z.literal(false),
     }),
     z.strictObject({
+        ...hostVersionInternalFields,
         expectedDocumentKey: documentKeySchema,
         steps: z.array(internalApplyStepSchema).min(MIXED_BATCH_MIN_STEPS).max(MIXED_BATCH_MAX_STEPS).superRefine(refineSteps),
         apply: z.literal(true),
@@ -181,12 +187,14 @@ function createPublicInputSchema(includeLayerState, snapshotRefs = false) {
     const applySteps = snapshotRefs ? publicApplyStepWithRefsSchema : includeLayerState ? publicApplyStepSchema : z.discriminatedUnion('operation', [publicApplyStepSchema.options[0], ...publicApplyStepSchema.options.slice(1).filter(step => !PUBLIC_ONLY_OPERATIONS.includes(step.shape.operation.value))]);
     return z.discriminatedUnion('apply', [
         z.strictObject({
+            ...hostVersionBackupPublicFields,
             expected_document_key: documentKeySchema,
             steps: z.array(planSteps).min(MIXED_BATCH_MIN_STEPS).max(MIXED_BATCH_MAX_STEPS)
                 .superRefine((steps, context) => refineSteps(steps.map(normalizeStep), context)),
             apply: z.literal(false).default(false),
         }),
         z.strictObject({
+            ...hostVersionBackupPublicFields,
             expected_document_key: documentKeySchema,
             steps: z.array(applySteps).min(MIXED_BATCH_MIN_STEPS).max(MIXED_BATCH_MAX_STEPS)
                 .superRefine((steps, context) => {
@@ -215,6 +223,7 @@ function looseStepFields() {
     return Object.fromEntries([...fields].map(([key, schemas]) => [key, (schemas.length === 1 ? schemas[0] : z.union(schemas)).optional()]));
 }
 const inputSchema = z.strictObject({
+    ...hostVersionBackupPublicFields,
     expected_document_key: documentKeySchema,
     steps: z.array(z.strictObject({
         operation: z.enum(MIXED_OPERATIONS),
@@ -235,8 +244,8 @@ function normalizePublicInput(input) {
     }
     const steps = value.steps.map(normalizeStep);
     return value.apply
-        ? { expectedDocumentKey: value.expected_document_key, steps, apply: true, commandId: value.command_id }
-        : { expectedDocumentKey: value.expected_document_key, steps, apply: false };
+        ? { ...(value.backup_id === undefined ? {} : { backupId: value.backup_id }), expectedDocumentKey: value.expected_document_key, steps, apply: true, commandId: value.command_id }
+        : { ...(value.backup_id === undefined ? {} : { backupId: value.backup_id }), expectedDocumentKey: value.expected_document_key, steps, apply: false };
 }
 const LEGACY_BLOCKERS = [...POINT_TEXT_APPLY_BLOCKERS, 'ancestor_hidden', 'ancestor_locked', 'result_too_large'];
 const MIXED_BLOCKERS = [...LEGACY_BLOCKERS, ...BATCH_MOVE_BLOCKERS];
@@ -364,7 +373,7 @@ const planSchema = z.strictObject({
     const textBefore = plan.steps.reduce((sum, step) => sum + (step.operation === REPLACE_POINT_TEXT_OPERATION ? step.plan.before.contents.length : 0), 0);
     const textAfter = plan.steps.reduce((sum, step) => sum + (step.operation === REPLACE_POINT_TEXT_OPERATION ? step.plan.after.contents.length : 0), 0);
     const styleCharacters = plan.steps.reduce((sum, step) => sum +
-        (step.operation === SET_TEXT_STYLE_OPERATION || step.operation === BATCH_CHARSTYLE_OPERATION ? step.plan.before.characters.length : 0), 0);
+        (step.operation === SET_TEXT_STYLE_OPERATION || step.operation === BATCH_CHARSTYLE_OPERATION ? snapshotUnitCount(step.plan.before) : 0), 0);
     const transformTextBytes = plan.steps.reduce((sum, step) => sum +
         (step.operation === TRANSFORM_OBJECT_OPERATION ? step.plan.before.textFrame?.attributes.length ?? 0 : 0), 0);
     const nestedBytes = plan.steps.reduce((sum, step) => sum +
@@ -652,6 +661,9 @@ const MUTATE_BATCH_HOST_FRAGMENTS = [
     { id: 'transform.text', source: TRANSFORM_TEXT_SCRIPT },
     { id: 'transform.group', source: TRANSFORM_GROUP_SCRIPT },
     { id: 'set-path-appearance.module', source: SET_PATH_APPEARANCE_MODULE_SCRIPT },
+    { id: 'set-path-appearance.echo', source: SET_PATH_APPEARANCE_ECHO_SCRIPT },
+    { id: 'set-path-appearance.angle', source: SET_PATH_APPEARANCE_ANGLE_SCRIPT },
+    { id: 'set-path-appearance.freeform-guard', source: SET_PATH_APPEARANCE_FREEFORM_GUARD_SCRIPT },
     { id: 'supported-path-item', source: SUPPORTED_PATH_ITEM_HOST_SCRIPT },
     { id: 'set-object-state.module', source: SET_OBJECT_STATE_MODULE_SCRIPT },
     { id: 'layer-ops', source: LAYER_OPS_HOST_SCRIPT },
@@ -668,6 +680,7 @@ const HOST_PARAMS_ORDER = [REPLACE_POINT_TEXT_OPERATION, SET_TEXT_STYLE_OPERATIO
 const MUTATE_BATCH_RUNNER_FRAGMENTS = [{ id: 'set-object-state.batch', source: SET_OBJECT_STATE_BATCH_SCRIPT }];
 const MUTATE_BATCH_HOST_REGIONS = assembleHostFragments([MUTATE_BATCH_HOST_FRAGMENTS, MUTATE_BATCH_RUNNER_FRAGMENTS], BATCH_STEP_REGISTRY);
 export const MUTATE_BATCH_SCRIPT = `${SNAPSHOT_RESULT_SIZE_SCRIPT}
+${HOST_VERSION_POLICY_JSX}
 ${MUTATE_BATCH_HOST_REGIONS[0]}
 var OBJECT_STATE_BATCH_MAX_STEPS = ${OBJECT_STATE_BATCH_MAX_STEPS};
 var MIXED_BATCH_MIN_STEPS = ${MIXED_BATCH_MIN_STEPS};
@@ -782,6 +795,13 @@ function mixedResolve(forApply) {
     if (charStyleCount !== requested.length || charStyleCount !== BATCH_CHARSTYLE_STEP_COUNT) throw mutationError("preflight_failed", "Character-style batch requires exactly two homogeneous steps.");
     batchCharStyleProfile(document, context);
   }
+  // The version rule is the policy table's (mutate_batch row), checked once here with the batch's own params (the step modules run
+  // under synthetic params that carry no channel or backup). Every step kind with a measured F0 profile shares this row.
+  if (layerCount > 0 || stateCount > 0 || moveCount > 0 || charStyleCount > 0) {
+    if (!hostVersionAdmitted("mutate_batch", String(app.version))) {
+      throw mutationError("preflight_failed", "The host version policy does not admit Illustrator " + String(app.version) + " for this batch.");
+    }
+  }
   var seen = {};
   var entries = [];
   var perStepBlockers = [];
@@ -881,8 +901,35 @@ function mixedPlan(preflight) {
     confirmationStatus: params.apply === true ? "confirmed" : "required",
     applyAllowed: params.apply === true && preflight.blockers.length === 0
   };
-  var pairs = mixedSnapshotResultPairs(plan.documentKey, steps, false);
+  var pairs = mixedResultPairs(plan.documentKey, steps);
   return snapshotResultAdmitPlan(plan, pairs);
+}
+
+/** #1033: a recorded set_text_style step travels as runs; the host works on the full snapshots and converts at the result boundary. */
+function mixedWireSteps(steps) {
+  var wire = [];
+  for (var index = 0; index < steps.length; index++) {
+    var step = steps[index];
+    wire.push(step.operation === "set_text_style"
+      ? { operation: step.operation, targetUuid: step.targetUuid, plan: styleRunsPlan(step.plan) } : step);
+  }
+  return wire;
+}
+
+function mixedWirePlan(plan) {
+  var wire = {};
+  for (var key in plan) if (plan.hasOwnProperty(key)) wire[key] = plan[key];
+  wire.steps = mixedWireSteps(plan.steps);
+  return wire;
+}
+
+/** The pairs the stored-result estimate counts: the plan as written (runs), the terminal snapshot at its per-character size. */
+function mixedResultPairs(documentKey, steps) {
+  var pairs = mixedSnapshotResultPairs(documentKey, mixedWireSteps(steps), false);
+  for (var index = 0; index < steps.length; index++) if (steps[index].operation === "set_text_style") {
+    pairs[index].terminalBytes = Math.max(snapshotJsonBytes(steps[index].plan.before), snapshotJsonBytes(steps[index].plan.after));
+  }
+  return pairs;
 }
 
 function mixedRevalidate(preflight, plan) {
@@ -973,7 +1020,7 @@ function mixedVerify(preflight, plan, state) {
     }
     try { snapshot = withStepParams(entry.step, function () { return operation.verify(entry.resolved, verifyPlan, state.operationState.stepStates[index]); }); }
     catch (verifyError) { throw mixedStepError(entry.step, verifyError); }
-    actual.push(snapshot);
+    actual.push(entry.step.request.operation === "set_text_style" ? styleRunsEncode(snapshot) : snapshot);
   }
   return actual;
 }
@@ -1076,7 +1123,7 @@ var mixedExecution = runMutationTransaction({
 var mixedDocument = mixedExecution.preflight.context;
 if (app.documents.length > 0 && app.activeDocument === mixedExecution.preflight.document) mixedDocument = getDocumentContext();
 var result = { operation: "mutate_batch", applied: mixedExecution.transaction.state === "verified",
-  document: mixedDocument, plan: mixedExecution.plan, transaction: mixedExecution.transaction };
+  document: mixedDocument, plan: mixedWirePlan(mixedExecution.plan), transaction: mixedExecution.transaction };
 if (mixedExecution.transaction.state === "verified") result.postcondition = mixedExecution.value;
 `;
 export const MUTATE_BATCH_HOST_SCRIPT_DIGEST = canonicalSha256(MUTATE_BATCH_SCRIPT);
@@ -1102,13 +1149,19 @@ function normalizedRequest(input) {
 export const mutateBatchToolContract = {
     name: 'illustrator_mutate_batch',
     title: 'Plan or Apply a Mixed Mutation Batch',
-    description: `2-16 distinct-UUID edits, one command/host call: all-step preflight, CAS, verify, reverse inverse, attestation. Mixed: point text<=4000 units, one style attribute per step (size, tracking, horizontal/vertical scale or RGB fill; tracking/scales F0 pending)<=200 chars, PathItem/TextFrame translate, appearance. Nested/object-state profiles: docs/tools.md; effects unmeasured. Layer-state: exactly2 paths [0]/[1]/[1,0], RGB root2+child1, direct rectangle each, initially visible/unlocked; name/visible/locked only; target_uuid=sentinel native UUID. Full tree/prefix/effective evidence<=8192 units. Measured orders only; no mixing. Layer F0 passed, public P0 pending. Layer move: exactly 2 steps, root layers, front/back; F0/P0 passed. Char style: exactly 2 steps, one size+tracking style, RGB black layer-direct KozGoPr6N POINTTEXT; F0/P0 passed. Stored result estimate<=209715 UTF-8 bytes including group child lists; result_too_large requires a smaller batch or group evidence. Full contracts: docs/tools.md.`,
+    description: 'Plan or apply 2-16 edits with distinct target_uuid values in one command and one host call: all-step preflight, compare-and-set, verification and reverse inverse on failure. Steps: replace_point_text (up to 4000 UTF-16 units in total); set_text_style (one attribute per step: size, tracking, scale or RGB/CMYK fill; up to 200 characters in total); transform_object (translate only, PathItem or TextFrame); set_path_appearance; set_object_state (two or three PathItems, homogeneous only); set_layer_state (exactly two homogeneous steps on distinct layer paths; name, visible, locked); move_object_to_layer (exactly two homogeneous steps to one destination layer); apply_character_style (exactly two homogeneous steps applying one named style; RGB documents only). Effects on targets are unmeasured. Results are limited to 209715 UTF-8 bytes; result_too_large needs a smaller batch.',
     inputSchema,
     publicInputSchema: mutateBatchPublicInputSchema,
     outputSchema: mutateBatchResponseSchema,
     annotations: operationSafetyPolicyToMcpAnnotations(MUTATE_BATCH_SAFETY.policy),
     normalizePublicInput,
 };
+const VERSION_GATED_STEP_OPERATIONS = new Set([BATCH_CHARSTYLE_OPERATION, BATCH_MOVE_OPERATION, SET_LAYER_STATE_OPERATION, SET_OBJECT_STATE_OPERATION]);
+export function mutateBatchHostVersionOperation(outcome) {
+    const holder = outcome;
+    const steps = holder?.request?.steps ?? holder?.plan?.steps;
+    return Array.isArray(steps) && steps.some((step) => VERSION_GATED_STEP_OPERATIONS.has(step?.operation)) ? 'mutate_batch' : null;
+}
 export function createMutateBatchAdapter() {
     return {
         version: 1, operation: MUTATE_BATCH_OPERATION, validator: MUTATE_BATCH_VALIDATOR,
@@ -1116,9 +1169,11 @@ export function createMutateBatchAdapter() {
         adapterIdentity: MUTATE_BATCH_ADAPTER_IDENTITY, tool: mutateBatchToolContract,
         canonical: { version: CANONICAL_VERSION, normalize: normalizedRequest, safetyDigest: (input) => normalizedRequest(input).digest },
         resultSchema: mutateBatchResultSchema, resultSchemaVersion: RESULT_SCHEMA_VERSION,
+        privateValidationSchemas: [internalInputSchema],
         terminalClassifierVersion: CLASSIFIER_VERSION, safetyConformanceVersion: CONFORMANCE_VERSION,
         errorMappingVersion: ERROR_MAPPING_VERSION, hostScriptDigest: MUTATE_BATCH_HOST_SCRIPT_DIGEST,
         mutationHostApplicationMode: 'foreground',
+        hostVersionOperation: (outcome) => mutateBatchHostVersionOperation(outcome),
         buildCommand(input) {
             const normalized = normalizedRequest(input);
             const { commandId: _commandId, ...params } = normalized.request;

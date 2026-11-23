@@ -1,6 +1,6 @@
 {
   "name": "illustrator-studio-mcp",
-  "version": "0.1.0-beta.6",
+  "version": "0.1.0-beta.7",
   "description": "Mac の Adobe Illustrator を、変更前の確認と結果の検証を伴って操作します。Public Beta です。",
   "author": {
     "name": "mhimt"

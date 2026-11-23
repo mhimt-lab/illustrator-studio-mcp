@@ -20,6 +20,15 @@ export function backupTooLargeMessage(error) {
         : error.message;
     return `${detail} Nothing was copied or opened. ${LARGE_DOCUMENT_WORKAROUND}`;
 }
+export function backupLimitWithoutStreamMessage(total) {
+    const limit = BACKUP_MAX_PAGE_ITEMS.toLocaleString('en-US');
+    return `The document has ${total} items. On Windows, illustrator_create_backup accepts documents of up to ${limit} items: a larger document needs the structure stream, which is not available on Windows yet (tracked in #911). ` +
+        `Nothing was copied or opened. Workarounds: remove items until at most ${limit} remain and save that document under another name (illustrator_save_document_as, or Save As in Illustrator), then back up the new file; or create the backup on macOS. ` +
+        'An unsaved document needs no backup, so the part to edit can also be copied into a new document (illustrator_create_document). / ' +
+        `Windows では illustrator_create_backup が扱える文書は ${limit} 項目までです。それを超える文書には構造 stream が必要で、Windows ではまだ使えません（#911 で扱います）。コピーも open もしていません。` +
+        `対処: 項目を減らして ${limit} 項目以下にした文書を別名で保存し（illustrator_save_document_as、または Illustrator の「別名で保存」）、その新しいファイルの backup を取るか、macOS で backup を取ってください。` +
+        '保存していない文書は backup が要らないので、編集する部分を新しい文書（illustrator_create_document）へ写して編集することもできます。';
+}
 export const BACKUP_STRUCTURE_TOLERANCE_PT = 0.001;
 export const BACKUP_NUMERIC_TOLERANCE = 0.0001;
 const COPY_CHUNK_BYTES = 1024 * 1024;

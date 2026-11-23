@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { canonicalSha256 } from './mutation-canonical.js';
 import { pathAppearanceMutationSchema } from './adapters/set-path-appearance-adapter.js';
+import { pointTextCanonicalChannel } from './adapters/point-text-host-script.js';
 import { documentContextSchema } from './mutation-result-schema-core.js';
+import { isPossibleFreeformFill } from './freeform-gradient-ambiguity.js';
 const finite = z.number().finite();
 const rgbSchema = z.strictObject({ model: z.literal('rgb'), red: finite.min(0).max(255), green: finite.min(0).max(255), blue: finite.min(0).max(255) });
 const cmykSchema = z.strictObject({ model: z.literal('cmyk'), cyan: finite.min(0).max(100), magenta: finite.min(0).max(100), yellow: finite.min(0).max(100), black: finite.min(0).max(100) });
@@ -38,6 +40,8 @@ const pageFields = {
     limit: z.number().int().positive(),
     usages: z.array(colorUsageSchema),
     matched_usage_count: z.number().int().nonnegative(),
+    possible_freeform_gradient_fills: z.number().int().nonnegative(),
+    possible_freeform_gradient_note: z.string().min(1).nullable(),
 };
 export const colorUsagePageSchema = z.discriminatedUnion('has_more', [
     z.strictObject({ document: documentContextSchema, ...pageFields, has_more: z.literal(true), next_cursor: z.string().min(1), complete: z.literal(false), absence_conclusive: z.literal(false) }),
@@ -49,7 +53,7 @@ export const unsupportedReplacementSchema = z.strictObject({
         'gradient_resource_adapter_unavailable', 'swatch_resource_adapter_unavailable',
         'text_style_scan_incomplete', 'text_fill_requires_complete_uniform_frame',
         'text_stroke_adapter_unavailable', 'replacement_color_space_mismatch',
-        'replacement_model_not_supported_by_target', 'path_appearance_unavailable',
+        'replacement_model_not_supported_by_target', 'path_appearance_unavailable', 'fill_may_be_freeform_gradient',
     ]),
 });
 export const colorReplacementPlanSchema = z.strictObject({
@@ -64,6 +68,20 @@ export const colorReplacementPlanSchema = z.strictObject({
     unsupported: z.array(unsupportedReplacementSchema),
     notes: z.array(z.string().min(1)),
 });
+function canonicalColor(color) {
+    if (typeof color !== 'object' || color === null || !('model' in color))
+        return color;
+    const typed = color;
+    if (typed.model === 'cmyk') {
+        return { ...typed, cyan: pointTextCanonicalChannel(Number(typed.cyan)), magenta: pointTextCanonicalChannel(Number(typed.magenta)),
+            yellow: pointTextCanonicalChannel(Number(typed.yellow)), black: pointTextCanonicalChannel(Number(typed.black)) };
+    }
+    if (typed.model === 'gradient' && Array.isArray(typed.stops)) {
+        return { ...typed, stops: typed.stops.map((stop) => typeof stop === 'object' && stop !== null && 'color' in stop
+                ? { ...stop, color: canonicalColor(stop.color) } : stop) };
+    }
+    return color;
+}
 function channels(color) {
     if (color.model === 'rgb')
         return [Number(color.red), Number(color.green), Number(color.blue)];
@@ -101,7 +119,9 @@ function lab(color) {
 function sameColorSpace(left, right) {
     return left.model === right.model;
 }
-function matchesColor(actual, query, tolerance) {
+function matchesColor(rawActual, rawQuery, tolerance) {
+    const actual = canonicalColor(rawActual);
+    const query = canonicalColor(rawQuery);
     if (!sameColorSpace(actual, query))
         return false;
     if (query.model === 'spot') {
@@ -142,12 +162,12 @@ function colorMatches(actual, match, swatches) {
         return color.model === 'gradient' && color.name === resolved.name;
     if (resolved.model === 'pattern')
         return color.model === 'pattern' && color.name === resolved.name;
-    return canonicalSha256(color) === canonicalSha256(resolved);
+    return canonicalSha256(canonicalColor(color)) === canonicalSha256(canonicalColor(resolved));
 }
 function usage(base) {
     const location = [base.kind, base.paint_slot ?? '-', base.target_uuid ?? '-', base.swatch_index ?? '-', base.gradient_name ?? '-',
         base.stop_index ?? '-', base.text_range === null ? '-' : `${base.text_range.start}-${base.text_range.end}`].join(':');
-    return { usage_id: location, ...base };
+    return { usage_id: location, ...base, color: canonicalColor(base.color) };
 }
 function scanPaint(item, kind, color, match, swatches, output) {
     if (typeof color !== 'object' || color === null || !('model' in color))
@@ -230,24 +250,25 @@ export function findColorUsages(snapshot, swatches, match, textDetails = null) {
 function sourceModel(match, swatches) {
     return match.kind === 'color' ? match.color.model : resolvedSwatchColor(match, swatches).model;
 }
-function pathMutation(item, matched, replacement) {
+function pathMutation(item, matched, replacement, confirmGray0Fill) {
     const appearance = item.appearance;
     if (appearance.opacity?.status !== 'available' || !appearance.fill || !appearance.stroke)
         return null;
     const replaceFill = matched.some((entry) => entry.kind === 'path_fill');
     const replaceStroke = matched.some((entry) => entry.kind === 'path_stroke');
     const fill = appearance.fill.status === 'available'
-        ? { kind: 'solid', color: replaceFill ? replacement : appearance.fill.value }
+        ? { kind: 'solid', color: replaceFill ? replacement : canonicalColor(appearance.fill.value),
+            ...(replaceFill && confirmGray0Fill && isPossibleFreeformFill(item) ? { confirm_gray0_fill_is_solid: true } : {}) }
         : appearance.fill.status === 'not_applicable' ? { kind: 'none' } : null;
     const stroke = appearance.stroke.status === 'available'
-        ? { kind: 'solid', color: replaceStroke ? replacement : appearance.stroke.value.color, width: appearance.stroke.value.width }
+        ? { kind: 'solid', color: replaceStroke ? replacement : canonicalColor(appearance.stroke.value.color) }
         : appearance.stroke.status === 'not_applicable' ? { kind: 'none' } : null;
     if (fill === null || stroke === null)
         return null;
     const candidate = { opacity: appearance.opacity.value, fill, stroke };
     return pathAppearanceMutationSchema.safeParse(candidate).success ? candidate : null;
 }
-export function buildReplacementPlanEntries(snapshot, swatches, match, replacement, usages, textDetails) {
+export function buildReplacementPlanEntries(snapshot, swatches, match, replacement, usages, textDetails, treatGray0FillsAsSolid = false) {
     const byTarget = new Map();
     const resourceEntries = [];
     for (const found of usages) {
@@ -270,7 +291,11 @@ export function buildReplacementPlanEntries(snapshot, swatches, match, replaceme
         }
         const item = snapshot.items.find((candidate) => candidate.uuid === uuid);
         if (item.type === 'PathItem') {
-            const mutation = pathMutation(item, targetUsages, replacement);
+            if (!treatGray0FillsAsSolid && isPossibleFreeformFill(item)) {
+                entries.push({ key: uuid, step: null, unsupported: targetUsages.map((found) => ({ usage_id: found.usage_id, reason: 'fill_may_be_freeform_gradient' })) });
+                continue;
+            }
+            const mutation = pathMutation(item, targetUsages, replacement, treatGray0FillsAsSolid);
             entries.push(mutation === null
                 ? { key: uuid, step: null, unsupported: targetUsages.map((found) => ({ usage_id: found.usage_id, reason: 'path_appearance_unavailable' })) }
                 : { key: uuid, step: { operation: 'set_path_appearance', target_uuid: uuid, appearance: mutation }, unsupported: [] });
@@ -283,7 +308,7 @@ export function buildReplacementPlanEntries(snapshot, swatches, match, replaceme
             entries.push({ key: uuid, step: null, unsupported });
             continue;
         }
-        if (replacement.model !== 'rgb') {
+        if (replacement.model !== 'rgb' && replacement.model !== 'cmyk') {
             unsupported.push(...fills.map((found) => ({ usage_id: found.usage_id, reason: 'replacement_model_not_supported_by_target' })));
             entries.push({ key: uuid, step: null, unsupported });
             continue;
@@ -304,8 +329,11 @@ export function buildReplacementPlanEntries(snapshot, swatches, match, replaceme
             entries.push({ key: uuid, step: null, unsupported });
             continue;
         }
+        const fillColor = replacement.model === 'cmyk'
+            ? { model: 'cmyk', cyan: replacement.cyan, magenta: replacement.magenta, yellow: replacement.yellow, black: replacement.black }
+            : { red: replacement.red, green: replacement.green, blue: replacement.blue };
         entries.push({ key: uuid, step: { operation: 'set_text_style', target_uuid: uuid, start: 0, end: completeLength,
-                style: { fill_color: { red: replacement.red, green: replacement.green, blue: replacement.blue } } }, unsupported });
+                style: { fill_color: fillColor } }, unsupported });
     }
     return [...entries, ...resourceEntries];
 }

@@ -124,6 +124,8 @@ export const designTokensResultSchema = z.strictObject({
         'fonts_truncated', 'font_sizes_truncated', 'stroke_widths_truncated', 'attribute_unavailable', 'text_frame_unreadable',
     ])).max(9),
     limitations: z.array(z.enum(['line_height_css_value_unavailable', 'cmyk_css_not_color_managed'])).max(2),
+    possible_freeform_gradient_fills: count,
+    possible_freeform_gradient_note: message.nullable(),
     css: z.string().nullable(),
 }).superRefine((value, context) => {
     if (value.complete !== (value.incompleteReasons.length === 0)) {
@@ -298,6 +300,7 @@ const overlapOutcomeSchema = z.discriminatedUnion('status', [
         background: resolvedColorSchema,
         ratio: finiteNumberSchema.min(1).max(21),
         levels: z.strictObject({ aa: levelPairSchema, aaa: levelPairSchema }),
+        caveat: z.literal('background_may_be_freeform_gradient').optional(),
     }),
     z.strictObject({ status: z.literal('no_background') }),
     z.strictObject({ status: z.literal('indeterminate'), reason: overlapIndeterminateReason }),
@@ -333,6 +336,8 @@ const contrastAutoDetectResultSchema = z.strictObject({
         'frame_level_text_fill_only', 'text_size_not_read', 'stroke_and_effects_ignored', 'path_backgrounds_only',
         'cmyk_conversion_naive',
     ])).max(8),
+    possible_freeform_gradient_fills: count,
+    possible_freeform_gradient_note: message.nullable(),
 }).superRefine((value, context) => {
     if (value.complete !== (value.incompleteReasons.length === 0)) {
         context.addIssue({ code: 'custom', message: 'complete must equal incompleteReasons.length === 0.', path: ['complete'] });

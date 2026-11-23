@@ -1015,18 +1015,7 @@ function normalizedRequest(input) {
 export const updateCharacterStyleToolContract = {
     name: 'illustrator_update_character_style',
     title: 'Plan or Update a Named Character Style in Use',
-    description: 'Plan or update `tracking`, `horizontal_scale`, or both on one existing named character style, '
-        + 'which changes every character that uses the style anywhere in the bound document. Those are the only '
-        + 'attributes whose in-use inverse is measured; everything else is refused. The plan reports how many '
-        + 'characters and frames currently use the style; apply requires echoing that count as `expected_usage`, '
-        + 'plus `expected_style` and `expected_collections` exactly as planned. Refused: a name that does not '
-        + 'resolve to exactly one style, the default style, an attribute the style does not define, an unchanged '
-        + 'value, a document whose default styles are not the canonical profile, text whose applied style cannot '
-        + 'be read, dependent characters with local overrides, dependent frames that are locked, hidden, threaded, '
-        + 'multi-paragraph, overflowing or not point/area text, and documents beyond 128 text frames or 4096 '
-        + 'characters. The style is never renamed or removed. Verification requires exactly the reported '
-        + 'dependents to take the new value and every other character to stay unchanged; rollback writes back '
-        + 'the value read before the update and proves the exact before state.',
+    description: 'Plan or update `tracking`, `horizontal_scale`, or both on one existing named character style, which changes every character that uses the style in the bound document. These are the only attributes allowed. Apply requires echoing the planned `expected_usage`, `expected_style` and `expected_collections` exactly. Refused: a name that does not resolve to exactly one style, the default style, an unchanged value, dependent characters with local overrides, dependent frames that are locked, hidden, threaded, multi-paragraph, overflowing or not point/area text, and documents beyond 128 text frames or 4,096 characters. The style is never renamed or removed. Rollback restores the values read before the update.',
     inputSchema,
     publicInputSchema: updateCharacterStylePublicInputSchema,
     outputSchema: updateCharacterStyleResponseSchema,

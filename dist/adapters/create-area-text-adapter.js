@@ -920,21 +920,7 @@ function normalizedRequest(input) {
 export const createAreaTextToolContract = {
     name: 'illustrator_create_area_text',
     title: 'Plan or Create Area Text',
-    description: 'Plan or create one AREATEXT frame from an artboard-relative rectangle on an explicit layer path, '
-        + 'bound by explicit document key, and flow multi-paragraph body text into it with automatic wrapping. '
-        + 'Paragraphs are separated by a newline. Every character, paragraph and frame property outside the requested '
-        + 'font, size, tracking, alignment, fill and optional leading is explicitly pinned rather than inherited. '
-        + 'Omitting style.leading preserves plain_area_text_v1 automatic leading. Explicit leading uses '
-        + 'plain_area_text_explicit_leading_v1: positive points with at most five decimals, autoLeading=false on every '
-        + 'character, readback compared at five decimals; the snapshot reports the actual native value. Explicit leading '
-        + 'currently supports one paragraph; a newline produces an unsupported plan and the existing custom_script handoff '
-        + '(backup a saved document first, verify with read tools, report the external change, re-read the document key). Overset is never a '
-        + 'success: apply verifies that the concatenated visible lines equal the whole requested text and otherwise rolls '
-        + 'the frame back and reports how many characters were visible. Columns, rows, threading and inset spacing are '
-        + 'unsupported. fill_color follows the document color space: RGB in RGB documents, {model: "cmyk", …} in CMYK '
-        + 'documents, {model: "gray", gray} in either; any other combination is refused at plan, before any write. '
-        + 'The returned native UUID identifies the item until the document is next saved; Illustrator '
-        + 'renumbers UUIDs across that save.',
+    description: 'Plan or create one AREATEXT frame from an artboard-relative rectangle on an explicit layer path, bound by document key, and flow multi-paragraph body text into it with automatic wrapping (paragraphs separated by a newline). Font, size, tracking, alignment, fill and optional leading are set; other character, paragraph and frame properties are pinned. Omitting style.leading keeps automatic leading. Explicit leading (positive points, at most five decimals) supports one paragraph; a newline with it gives an unsupported plan and the custom_script handoff (backup a saved document first, verify with read tools, report the external change, re-read the key). Overset is never a success: apply rolls the frame back and reports how many characters were visible. Columns, rows, threading and inset spacing are unsupported. fill_color follows the document color space (RGB, CMYK or Gray; other combinations are refused at plan). The returned UUID is valid only until the document is next saved.',
     inputSchema,
     publicInputSchema: createAreaTextPublicInputSchema,
     outputSchema: createAreaTextResponseSchema,

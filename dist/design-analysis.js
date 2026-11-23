@@ -1,4 +1,5 @@
 import { PREFLIGHT_SCOPE_NOTE } from './preflight-scope-note.js';
+import { countPossibleFreeformFills, freeformGradientFields, isPossibleFreeformFill } from './freeform-gradient-ambiguity.js';
 export const DESIGN_ANALYSIS_LIMITS = {
     textFrameDetailReads: 200,
     lineHeightLines: 100,
@@ -351,6 +352,7 @@ export function createDesignTokens(input) {
         complete: incomplete.size === 0,
         incompleteReasons: [...incomplete].sort(compareStrings),
         limitations,
+        ...freeformGradientFields(countPossibleFreeformFills(snapshot.items)),
         css: null,
     };
     if (format === 'css')
@@ -950,6 +952,7 @@ export function detectContrastOverlaps(input) {
                     aa: { normal: exactRatio >= CONTRAST_THRESHOLDS.aaNormal, large: exactRatio >= CONTRAST_THRESHOLDS.aaLarge },
                     aaa: { normal: exactRatio >= CONTRAST_THRESHOLDS.aaaNormal, large: exactRatio >= CONTRAST_THRESHOLDS.aaaLarge },
                 },
+                ...(isPossibleFreeformFill(nearest.item) ? { caveat: 'background_may_be_freeform_gradient' } : {}),
             },
         });
     }
@@ -979,5 +982,6 @@ export function detectContrastOverlaps(input) {
         complete: incomplete.size === 0,
         incompleteReasons: [...incomplete].sort(compareStrings),
         limitations: CONTRAST_OVERLAP_LIMITATIONS,
+        ...freeformGradientFields(countPossibleFreeformFills(snapshot.items)),
     };
 }

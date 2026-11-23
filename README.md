@@ -4,13 +4,13 @@
 
 Create, revise, verify, and prepare artwork for print — by asking your AI app.
 
-![Status: beta](https://img.shields.io/badge/status-beta-orange.svg) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg) ![Illustrator: 2026 (30.8)](https://img.shields.io/badge/Illustrator-2026%20%2830.8%29-FF9A00.svg) [![npm beta version](https://img.shields.io/npm/v/illustrator-studio-mcp/beta)](https://www.npmjs.com/package/illustrator-studio-mcp) [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE)
+![Status: beta](https://img.shields.io/badge/status-beta-orange.svg) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg) ![Illustrator: 2026 (30.8) / 2027 (31.0)](https://img.shields.io/badge/Illustrator-2026%20%2830.8%29%20%7C%202027%20%2831.0%29-FF9A00.svg) [![npm beta version](https://img.shields.io/npm/v/illustrator-studio-mcp/beta)](https://www.npmjs.com/package/illustrator-studio-mcp) [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE)
 
 **English** | [日本語](README.ja.md)
 
 Claude Desktop · ChatGPT Work · Claude Code · Codex CLI
 
-[96 functions](docs/tools.en.md) · Plan before apply · Read-back verification
+[111 functions](docs/tools.en.md) · Plan before apply · Read-back verification
 
 <!-- demo-video:start -->
 <!-- npm: [![Promo video: what Illustrator Studio MCP can do for designers (opens the video)](https://raw.githubusercontent.com/mhimt-lab/illustrator-studio-mcp/main/docs/images/demo-poster-en.webp)](https://github.com/user-attachments/assets/9a85306a-acb6-4467-8297-d4fb63d8d001) -->
@@ -32,7 +32,7 @@ Ask in plain words. For example:
 2. **Apply** — it checks the target again immediately before writing. If someone changed it after the plan, it stops instead of overwriting.
 3. **Verify** — it reads the result back from Illustrator. If a response is lost and the outcome is unclear, it stops further edits instead of guessing. Check the final look and print readiness in Illustrator yourself.
 
-This is a Public Beta (0.1.0-beta.6), [checked operation by operation on Illustrator 2026 (30.8)](docs/compatibility.en.md).
+This is a Public Beta (0.1.0-beta.7), [checked operation by operation on Illustrator 2026 (30.8) and, for the checked operations, 2027 (31.0)](docs/compatibility.en.md).
 
 ## How it differs from Adobe's Illustrator MCP (Beta)
 
@@ -40,16 +40,16 @@ Adobe's Illustrator (Beta) has a built-in MCP server. Illustrator Studio MCP is 
 
 | | Adobe's built-in MCP | Illustrator Studio MCP |
 |---|---|---|
-| Illustrator version | Illustrator (Beta) | Stable Illustrator 2026, checked on 30.8 (Beta is not checked) |
+| Illustrator version | Illustrator (Beta) | Stable Illustrator 2026 and 2027, checked on 30.8 and 31.0 (Beta is not checked) |
 | OS | The Help pages describe steps for macOS and Windows | Mac only |
 | Scope and count | Tools and actions (the Help lists 40): documents and artboards, inspecting objects, layers and groups, selecting and transforming, simple text edits and appearance, export as PNG, JPEG, SVG or PDF | Functions in the tool catalog: creating shapes and text, batch text and font changes, colors, barcodes and QR codes, Japanese line-break check, print check, PDF and image export, backups. Counting methods differ, so compare coverage rather than numbers |
 | Reviewing a change | Your AI tool asks you to accept or reject the suggested changes; undo in Illustrator with Command + Z (macOS) or Ctrl + Z (Windows) | Shows the target and change as a plan first, and checks the target again right before writing |
 | Checking the result | Not described in the Help pages | Reads the result back from Illustrator; stops further edits if the outcome is unclear |
 | Edits you made by hand | Not described in the Help pages | Stops instead of overwriting |
 | Print | Export as PDF, PNG, JPEG or SVG | Print check, PDF with trim marks and bleed, and an explicit PDF/X request with a check that the file carries the PDF/X marking (not a conformance check) |
-| Japanese typesetting | Not described in the Help pages | Line-break check; replacing font pairs |
+| Japanese typesetting | Not described in the Help pages | Line-break check (large documents are read page by page to the end); replacing font pairs |
 
-“Not described” means the Help pages do not say either way. It does not mean the feature is absent. The Adobe column reflects three Adobe Help pages ([About](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/about-using-ai-tools-with-illustrator.html), [Connect](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/connect-illustrator-to-ai-tools.html), [Work with documents](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/work-with-illustrator-documents-from-ai-tools.html)), last updated by Adobe on Aug 18, 2026 and read on Oct 1, 2026. The Beta may change. Choose the one that fits your Illustrator version and your work.
+“Not described” means the Help pages do not say either way. It does not mean the feature is absent. The Adobe column reflects three Adobe Help pages ([About](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/about-using-ai-tools-with-illustrator.html), [Connect](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/connect-illustrator-to-ai-tools.html), [Work with documents](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/work-with-illustrator-documents-from-ai-tools.html)), last updated by Adobe on Aug 18, 2026 and read on Nov 23, 2026. The Beta may change. Choose the one that fits your Illustrator version and your work.
 
 ## Install
 
@@ -59,24 +59,24 @@ Use a Mac with Node.js 20+, bring stable Illustrator to the foreground, unlock t
 
 ```bash
 npx -y illustrator-studio-mcp@beta --version
-npx -y illustrator-studio-mcp@0.1.0-beta.6 doctor
+npx -y illustrator-studio-mcp@0.1.0-beta.7 doctor
 ```
 
-`@beta` discovers a version; saved registration pins the reviewed exact version. If the display differs from beta.6, stop and review that version's instructions. [Install](docs/install.en.md) covers Node/npm/npx PATH, registry failure, explicit update, and rollback. The read-only `setup` also displays a registration command pinned to the version it runs from. Fresh-cache version startup was measured on an existing Mac; a new Mac, doctor, and client reconnection remain separate checks.
+`@beta` discovers a version; saved registration pins the reviewed exact version. If the display differs from beta.7, stop and review that version's instructions. [Install](docs/install.en.md) covers Node/npm/npx PATH, registry failure, explicit update, and rollback. The read-only `setup` also displays a registration command pinned to the version it runs from. Fresh-cache version startup was measured on an existing Mac; a new Mac, doctor, and client reconnection remain separate checks.
 
 ### Claude Desktop (easiest, no Node.js needed)
 
-1. [Download illustrator-studio-mcp-0.1.0-beta.6.mcpb](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.6/illustrator-studio-mcp-0.1.0-beta.6.mcpb), double-click it, then click Install.
+1. [Download illustrator-studio-mcp-0.1.0-beta.7.mcpb](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.7/illustrator-studio-mcp-0.1.0-beta.7.mcpb), double-click it, then click Install.
 2. Check that the extension is enabled, then start using it in a new chat.
 
-To check the downloaded file, compare it with `SHA256SUMS` on the [GitHub release page](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.6) (steps in [Install](docs/install.en.md#desktop-extension-mcpb-main-method)).
+To check the downloaded file, compare it with `SHA256SUMS` on the [GitHub release page](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.7) (steps in [Install](docs/install.en.md#desktop-extension-mcpb-main-method)).
 
 ### ChatGPT
 
 You need: Node.js 20 or newer (install it with the installer from the [official website](https://nodejs.org/))
 
 1. In the ChatGPT sidebar, open Plugins, then choose Add (top right) → Add a marketplace.
-2. Enter `mhimt-lab/illustrator-studio-mcp` as the Source and `v0.1.0-beta.6` as the Git ref, then click Add marketplace. The Git ref pins the version.
+2. Enter `mhimt-lab/illustrator-studio-mcp` as the Source and `v0.1.0-beta.7` as the Git ref, then click Add marketplace. The Git ref pins the version.
 3. On the same screen, search for "Illustrator" and click the "+" next to Illustrator Studio MCP. It is done when "plugin installed" appears.
 4. Choose Work at the top, check that the computer icon at the lower right of the message box is set to On your computer, then start using it in a new chat.
 
@@ -85,7 +85,7 @@ To remove it, choose "…" → Uninstall on Illustrator Studio MCP under Plugins
 If you are comfortable with Terminal, you can also add it with two Codex CLI commands (restart ChatGPT afterwards):
 
 ```bash
-codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.6
+codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.7
 codex plugin add illustrator-studio-mcp@illustrator-studio-mcp
 ```
 
@@ -94,7 +94,7 @@ codex plugin add illustrator-studio-mcp@illustrator-studio-mcp
 Requires Node.js 20 or newer. Run this in Terminal, then restart Claude Code:
 
 ```bash
-claude mcp add --transport stdio --scope user illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.6
+claude mcp add --transport stdio --scope user illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.7
 ```
 
 ### Codex CLI
@@ -102,7 +102,7 @@ claude mcp add --transport stdio --scope user illustrator-studio -- npx -y illus
 Requires Node.js 20 or newer. Run this in Terminal, then restart Codex CLI:
 
 ```bash
-codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.6
+codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.7
 ```
 
 For checking the download, updating, uninstalling, and other ways to register, see [Install](docs/install.en.md).
@@ -163,8 +163,9 @@ The small pictures are cut from the same promo video. See all functions in the [
 
 ## Before you use it
 
-- **Mac only.** Use it with stable Adobe Illustrator (checked with Illustrator 2026, version 30.8).
+- **Mac only.** Use it with stable Adobe Illustrator (checked with Illustrator 2026, version 30.8, and Illustrator 2027, version 31.0, for the checked operations).
 - **Windows support is in preparation.** If you have Windows and Illustrator, we are looking for collaborators to help verify it. The steps and the kit are in the [Windows verification kit](https://github.com/mhimt-lab/illustrator-studio-mcp/blob/main/windows-probe/README.en.md) (results are submitted through a public issue).
+- **Windows guarantees and limits.** Process crashes and exceptions are covered by the existing atomic rename and file fsync guarantees. If the first-use parent-directory flush returns EPERM, creation proceeds using NTFS metadata journaling and existing file fsyncs without claiming power-loss durability for the new directory entry. State-root loss or rollback after power loss or a forced restart, and concurrent use with older builds, are outside the Windows guarantee: opt-in mutations may then be applied twice. Reads remain document-preserving, and Windows remains read-only by default. Before mutations become available by default, each mutation must use effect-side compare-and-set (CAS): checking document preconditions to reject a repeated application.
 - **Keep Illustrator in the foreground and the screen unlocked.** In the background or with the screen locked, operations stop or fail with an unclear reason.
 - **Try it on a copy of your artwork first.** This is a trial release, not production-ready.
 
@@ -210,7 +211,7 @@ Illustrator Studio MCP is an independent project, not an Adobe product. It is no
 <details>
 <summary>Connection reference: tool identifiers (not needed for everyday requests)</summary>
 
-`illustrator_align_objects`, `illustrator_analyze_display_spacing`, `illustrator_apply_character_style`, `illustrator_apply_pathfinder`, `illustrator_audit_typography`, `illustrator_capture_preview`, `illustrator_capture_structure_snapshot`, `illustrator_check_contrast`, `illustrator_check_text_consistency`, `illustrator_close_document`, `illustrator_close_edit_session`, `illustrator_compare_images`, `illustrator_create_area_text`, `illustrator_create_backup`, `illustrator_create_barcode`, `illustrator_create_batch`, `illustrator_create_character_style`, `illustrator_create_clipping_mask`, `illustrator_create_document`, `illustrator_create_layer`, `illustrator_create_point_text`, `illustrator_create_qr_code`, `illustrator_create_rectangle`, `illustrator_create_shape`, `illustrator_create_swatch_resource`, `illustrator_create_trim_marks`, `illustrator_delete_objects`, `illustrator_diff_structure`, `illustrator_duplicate_object`, `illustrator_edit_path_points`, `illustrator_embed_image`, `illustrator_export`, `illustrator_export_outlined`, `illustrator_export_pdf`, `illustrator_extract_design_tokens`, `illustrator_extract_text`, `illustrator_find_color_usages`, `illustrator_find_fonts`, `illustrator_get_area_text_options`, `illustrator_get_context`, `illustrator_get_edit_session`, `illustrator_get_object`, `illustrator_get_path_points`, `illustrator_group_objects`, `illustrator_import_vector_artwork`, `illustrator_list_documents`, `illustrator_list_layers`, `illustrator_list_objects`, `illustrator_list_recipes`, `illustrator_list_selection`, `illustrator_list_swatches`, `illustrator_list_text_styles`, `illustrator_make_compound_path`, `illustrator_move_object_to_layer`, `illustrator_mutate_batch`, `illustrator_open_document`, `illustrator_open_edit_session`, `illustrator_optimize_images`, `illustrator_place_image`, `illustrator_plan_color_replacement`, `illustrator_plan_recipe`, `illustrator_preflight_images`, `illustrator_preflight_print`, `illustrator_read_structure_diff`, `illustrator_reconcile`, `illustrator_reconcile_backup`, `illustrator_reconcile_delete`, `illustrator_reconcile_export`, `illustrator_reconcile_save_as`, `illustrator_release_clipping_mask`, `illustrator_relink_image`, `illustrator_render_artboards`, `illustrator_reorder_layer`, `illustrator_replace_area_text_range`, `illustrator_replace_font`, `illustrator_replace_point_text`, `illustrator_replace_point_text_batch`, `illustrator_replace_text_range`, `illustrator_run_m6_appearance_preview_recipe`, `illustrator_run_recipe`, `illustrator_save_document`, `illustrator_save_document_as`, `illustrator_save_recipe`, `illustrator_set_area_text_columns`, `illustrator_set_layer_state`, `illustrator_set_no_break`, `illustrator_set_object_state`, `illustrator_set_path_appearance`, `illustrator_set_stacking_order`, `illustrator_set_stroke_style`, `illustrator_set_text_orientation`, `illustrator_set_text_style`, `illustrator_transform_object`, `illustrator_transform_path_anchors`, `illustrator_update_artboard`, `illustrator_update_character_style`
+`illustrator_activate_document`, `illustrator_align_objects`, `illustrator_analyze_display_spacing`, `illustrator_apply_character_style`, `illustrator_apply_dataset`, `illustrator_apply_pathfinder`, `illustrator_audit_typography`, `illustrator_bind_variable`, `illustrator_capture_preview`, `illustrator_capture_structure_snapshot`, `illustrator_check_contrast`, `illustrator_check_text_consistency`, `illustrator_close_document`, `illustrator_close_edit_session`, `illustrator_compare_images`, `illustrator_create_area_text`, `illustrator_create_backup`, `illustrator_create_barcode`, `illustrator_create_batch`, `illustrator_create_character_style`, `illustrator_create_clipping_mask`, `illustrator_create_dataset`, `illustrator_create_document`, `illustrator_create_layer`, `illustrator_create_point_text`, `illustrator_create_qr_code`, `illustrator_create_rectangle`, `illustrator_create_shape`, `illustrator_create_swatch_resource`, `illustrator_create_trim_marks`, `illustrator_delete_objects`, `illustrator_diff_structure`, `illustrator_duplicate_artboard`, `illustrator_duplicate_object`, `illustrator_edit_path_points`, `illustrator_embed_image`, `illustrator_export`, `illustrator_export_outlined`, `illustrator_export_pdf`, `illustrator_extract_design_tokens`, `illustrator_extract_text`, `illustrator_find_color_usages`, `illustrator_find_fonts`, `illustrator_get_area_text_options`, `illustrator_get_context`, `illustrator_get_edit_session`, `illustrator_get_object`, `illustrator_get_path_points`, `illustrator_group_objects`, `illustrator_import_vector_artwork`, `illustrator_insert_vertical_space`, `illustrator_list_documents`, `illustrator_list_layers`, `illustrator_list_objects`, `illustrator_list_recipes`, `illustrator_list_selection`, `illustrator_list_swatches`, `illustrator_list_text_styles`, `illustrator_list_variables`, `illustrator_make_compound_path`, `illustrator_measure_scale_reference`, `illustrator_move_object_to_layer`, `illustrator_mutate_batch`, `illustrator_normalize_stroke_widths`, `illustrator_open_document`, `illustrator_open_edit_session`, `illustrator_optimize_images`, `illustrator_place_image`, `illustrator_plan_color_replacement`, `illustrator_plan_recipe`, `illustrator_plan_text_fit`, `illustrator_plan_text_increment`, `illustrator_preflight_images`, `illustrator_preflight_print`, `illustrator_read_structure_diff`, `illustrator_reconcile`, `illustrator_reconcile_backup`, `illustrator_reconcile_delete`, `illustrator_reconcile_export`, `illustrator_reconcile_save_as`, `illustrator_release_clipping_mask`, `illustrator_relink_image`, `illustrator_render_artboards`, `illustrator_reorder_layer`, `illustrator_replace_area_text_range`, `illustrator_replace_font`, `illustrator_replace_point_text`, `illustrator_replace_point_text_batch`, `illustrator_replace_rgb_converted_black`, `illustrator_replace_text_range`, `illustrator_run_m6_appearance_preview_recipe`, `illustrator_run_recipe`, `illustrator_save_document`, `illustrator_save_document_as`, `illustrator_save_recipe`, `illustrator_scale_artwork`, `illustrator_set_area_text_columns`, `illustrator_set_layer_state`, `illustrator_set_no_break`, `illustrator_set_object_state`, `illustrator_set_path_appearance`, `illustrator_set_stacking_order`, `illustrator_set_stroke_style`, `illustrator_set_text_composition`, `illustrator_set_text_orientation`, `illustrator_set_text_style`, `illustrator_transform_object`, `illustrator_transform_path_anchors`, `illustrator_update_artboard`, `illustrator_update_character_style`, `illustrator_update_dataset`
 
 </details>
 

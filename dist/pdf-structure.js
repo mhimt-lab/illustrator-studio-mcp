@@ -19,7 +19,7 @@ export const PDF_STRUCTURE_LIMITS = Object.freeze({
 export function bufferSource(bytes) {
     return { size: bytes.length, read: async (offset, length) => bytes.subarray(offset, Math.min(bytes.length, offset + length)) };
 }
-function fileSource(handle, size) {
+export function fileSource(handle, size) {
     return {
         size,
         async read(offset, length) {
@@ -633,7 +633,7 @@ function normalizeBox(value, label) {
 function clip(box, to) {
     return [Math.max(box[0], to[0]), Math.max(box[1], to[1]), Math.min(box[2], to[2]), Math.min(box[3], to[3])];
 }
-export async function readPdfStructure(source, limits = PDF_STRUCTURE_LIMITS) {
+async function openPdf(source, limits) {
     if (source.size > limits.maxFileBytes)
         fail('too_large', 'The PDF exceeds the size limit for structure verification.');
     const head = (await source.read(0, 16)).toString('latin1');
@@ -675,6 +675,10 @@ export async function readPdfStructure(source, limits = PDF_STRUCTURE_LIMITS) {
     if (!isDict(pagesRoot) || nameOf(pagesRoot.get('Type')) !== 'Pages')
         fail('bad_page', 'The catalog /Pages is not a page tree node.');
     const pagesNode = pagesRoot;
+    return { reader, newest, catalog, pagesNode, headerVersion: header[1], kinds, sections };
+}
+export async function readPdfStructure(source, limits = PDF_STRUCTURE_LIMITS) {
+    const { reader, newest, catalog, pagesNode, headerVersion, kinds, sections } = await openPdf(source, limits);
     const pages = [];
     const seen = new Set();
     const walk = async (nodeRef, inherited, depth) => {
@@ -749,7 +753,7 @@ export async function readPdfStructure(source, limits = PDF_STRUCTURE_LIMITS) {
         pdfxVersion = stringOf(await reader.resolve(info.get('GTS_PDFXVersion')));
     const xmp = await readXmpPdfx(reader, catalog.get('Metadata'));
     return {
-        headerVersion: header[1],
+        headerVersion,
         catalogVersion: nameOf(catalog.get('Version')),
         bytes: source.size,
         xref: kinds.size === 2 ? 'hybrid' : kinds.has('stream') ? 'stream' : 'table',
@@ -796,4 +800,21 @@ export async function readPdfFileStructure(path, limits = PDF_STRUCTURE_LIMITS) 
     finally {
         await handle.close();
     }
+}
+export { isDict, isRef, nameOf };
+export async function openPdfDocument(source, limits = PDF_STRUCTURE_LIMITS) {
+    const { reader, catalog } = await openPdf(source, limits);
+    return {
+        catalog,
+        encrypted: reader.encrypted,
+        resolve: (value) => reader.resolve(value),
+        async stream(ref) {
+            const object = await reader.indirect(ref.ref[0], ref.ref[1]);
+            if (!isDict(object.value) || object.stream === null)
+                return null;
+            const dict = object.value;
+            const raw = object.stream;
+            return { dict, raw, decoded: () => decodeStream(dict, raw, limits) };
+        },
+    };
 }

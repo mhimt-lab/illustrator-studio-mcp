@@ -11,11 +11,14 @@ const category = z.enum([
 ]);
 const code = z.enum([
     'document_color_space_disallowed', 'color_profile_unavailable', 'used_ink_list_unavailable',
-    'current_vector_rgb_in_cmyk_document', 'spot_color_used', 'overprint_used',
+    'current_vector_rgb_in_cmyk_document', 'total_ink_over_limit', 'four_color_solid_black',
+    'rgb_converted_black', 'overprint_avoidance_black', 'rich_black_used', 'rich_black_small_text',
+    'rich_black_thin_stroke', 'registration_color_in_artwork', 'black_scan_incomplete', 'spot_color_used', 'overprint_used',
     'transparency_used', 'raster_effect_resolution_below_threshold',
     'raster_effect_settings_unavailable', 'bleed_unavailable',
     'object_outside_artboards', 'object_crosses_artboard', 'stroke_below_minimum',
     'font_missing', 'font_scan_incomplete', 'text_paint_scan_incomplete', 'nonprinting_layer_content',
+    'visible_nonprinting_layer', 'trim_view_guide_layer',
     'image_link_missing', 'image_print_state_unavailable', 'image_file_inspection_unavailable',
     'image_effective_ppi_unavailable', 'image_effective_ppi_below_threshold',
     'image_color_space_unavailable', 'image_color_space_disallowed',
@@ -38,6 +41,16 @@ export const printPreflightConditionsSchema = z.strictObject({
     allowOverprint: z.boolean(),
     allowTransparency: z.boolean(),
     requireLinkedImageIcc: z.boolean(),
+    maximumTotalInkPercent: z.number().finite().min(100).max(400).optional(),
+    classifyBlacks: z.boolean().optional(),
+    richBlackMinTextPt: z.number().finite().min(0.1).max(72).optional(),
+    richBlackMinStrokePt: z.number().finite().min(0.01).max(10).optional(),
+}).superRefine((value, context) => {
+    for (const key of ['richBlackMinTextPt', 'richBlackMinStrokePt']) {
+        if (value[key] !== undefined && value.classifyBlacks !== true) {
+            context.addIssue({ code: 'custom', message: `${key} requires classifyBlacks: true.`, path: [key] });
+        }
+    }
 });
 const target = z.discriminatedUnion('kind', [
     z.strictObject({ kind: z.literal('document') }),
@@ -115,6 +128,9 @@ export const printPreflightResultSchema = z.strictObject({
     }),
     facts,
     findings: z.array(printPreflightFindingSchema).max(PRINT_PREFLIGHT_LIMITS.findings),
+    notes: z.array(message).max(4),
+    possible_freeform_gradient_fills: z.number().int().nonnegative(),
+    possible_freeform_gradient_note: message.nullable(),
 }).superRefine((value, context) => {
     if (value.complete !== value.absenceConclusive) {
         context.addIssue({ code: 'custom', message: 'complete and absenceConclusive must agree.', path: ['absenceConclusive'] });

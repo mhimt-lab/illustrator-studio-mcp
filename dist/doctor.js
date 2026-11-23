@@ -10,6 +10,7 @@ import { summarizeEditSessionRecords } from './edit-session.js';
 import { inFileProviderDomain, summarizeSaveAsRecords } from './save-as-session.js';
 import { isWindowsPrivateState, validatePrivateStateRoot } from './private-state.js';
 import { quarantineArea } from './state-quarantine.js';
+import { parseWindowsCandidateMutations } from './windows/mutation-publication.js';
 import { probeWindowsAttach, windowsCommandRunner, WINDOWS_ILLUSTRATOR_APPLICATION, WINDOWS_READ_ONLY_NOTICE } from './windows/com-transport.js';
 export { spotlightQueryForApplication } from './illustrator-application.js';
 export const DOCTOR_REPORT_VERSION = 1;
@@ -30,6 +31,7 @@ export function defaultDoctorEnvironment() {
         stateRoot: defaultStateRoot(),
         uid: typeof process.getuid === 'function' ? process.getuid() : undefined,
         runCommand: process.platform === 'win32' ? windowsCommandRunner : defaultCommandRunner,
+        ...(process.platform === 'win32' ? { windowsEnv: process.env } : {}),
     };
 }
 function errorMessage(error) {
@@ -519,11 +521,24 @@ export function resolveBundleByAppleEventVersion(bundleCheck, bundles, appleEven
     bundleCheck.summary = `${bundles.length} bundles match the application name; Apple events reached ${resolved.path} (${resolved.bundleIdentifier ?? 'unknown id'} ${version}).`;
     bundleCheck.recommendation = `If that is not the intended install, set ILLUSTRATOR_APPLICATION to "id:<bundle identifier>" so the choice no longer depends on LaunchServices name resolution.`;
 }
+function checkWindowsMutations(env) {
+    let tools;
+    try {
+        tools = [...parseWindowsCandidateMutations(env).tools].sort();
+    }
+    catch (error) {
+        return { id: 'windows_mutations', status: 'fail', evidence: { mutationsAvailable: false }, summary: errorMessage(error) };
+    }
+    if (tools.length === 0)
+        return { id: 'windows_mutations', status: 'skip', evidence: { mutationsAvailable: false }, summary: WINDOWS_READ_ONLY_NOTICE };
+    return { id: 'windows_mutations', status: 'pass', evidence: { mutationsAvailable: true, tools },
+        summary: `Windows mutation tools published: ${tools.join(', ')}. Other mutations are not available on Windows yet.` };
+}
 export async function runDoctor(environment = defaultDoctorEnvironment()) {
     const checks = [];
     checks.push(checkNodeRuntime(environment.nodeVersion));
     if (environment.platform === 'win32') {
-        checks.push({ id: 'windows_platform', status: 'pass', evidence: { platform: 'win32' }, summary: 'Windows read-only transport selected.' });
+        checks.push({ id: 'windows_platform', status: 'pass', evidence: { platform: 'win32' }, summary: 'Windows COM transport selected.' });
         const host = await probeWindowsAttach(environment.runCommand);
         checks.push({ id: 'powershell_sta', status: host ? 'pass' : 'indeterminate',
             evidence: { powerShellVersion: host?.powerShellVersion ?? null, apartmentState: host?.apartmentState ?? null },
@@ -535,7 +550,7 @@ export async function runDoctor(environment = defaultDoctorEnvironment()) {
             summary: configured && host?.attachAvailable ? 'Attached to the single running Illustrator; Version read only.'
                 : 'Illustrator attach unavailable or target unsupported; concurrent instances are refused and Illustrator is never launched.',
             ...(!(configured && host?.attachAvailable) ? { recommendation: 'Use Illustrator.Application and start exactly one Illustrator instance.' } : {}) });
-        checks.push({ id: 'windows_mutations', status: 'skip', evidence: { mutationsAvailable: false }, summary: WINDOWS_READ_ONLY_NOTICE });
+        checks.push(checkWindowsMutations(environment.windowsEnv ?? {}));
         checks.push(await checkStateRoot(environment));
         return { version: DOCTOR_REPORT_VERSION, generatedAt: new Date().toISOString(), application: environment.application,
             stateRoot: environment.stateRoot, checks, ok: checks.every((check) => check.status === 'pass' || check.status === 'skip') };

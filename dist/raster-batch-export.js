@@ -7,20 +7,24 @@ import { z } from 'zod';
 import { ARTBOARD_INTEGER_TOLERANCE } from './artboard-integer.js';
 import { applyCommandIdSchema } from './command-id.js';
 import { BackupCopyError, BackupPreconditionError, copyErrorCreatedDestination, copyFileExclusive, hostDocumentIdentitySchema, inspectSourceFile, resolveBackupRoot, sameFileOrSameBytes, serializeFileIdentity, verifyTrackedFile, withBackupRootScope, } from './document-backup.js';
-import { assertOutputAbsent, EXPORT_CLOSE_WORK_COPY_SCRIPT, EXPORT_HELPERS, EXPORT_HOST_TIMEOUT_MS, EXPORT_INVENTORY_SCRIPT, EXPORT_OPEN_PRE_ATTEMPT_CODES, EXPORT_OPEN_WORK_COPY_SCRIPT, ExportPreconditionError, createOnceLinkAllowance, parseExportHostError, STAGING_DIRECTORY_PREFIX, withOutputParentScope, workCopyFileName, } from './document-export.js';
+import { assertOutputAbsent, EXPORT_CLOSE_WORK_COPY_SCRIPT, EXPORT_HELPERS, EXPORT_HOST_TIMEOUT_MS, EXPORT_INVENTORY_SCRIPT, EXPORT_OPEN_PRE_ATTEMPT_CODES, EXPORT_OPEN_WORK_COPY_SCRIPT, ExportPreconditionError, createOnceLinkAllowance, OutputPreLinkCheckError, parseExportHostError, STAGING_DIRECTORY_PREFIX, withOutputParentScope, workCopyFileName, } from './document-export.js';
 import { documentKeyMatches } from './document-key.js';
+import { DEFAULT_DURABLE_FILE_POLICY } from './durable-file-policy.js';
 import { IndeterminateExecutionError } from './domain.js';
 import { canonicalSha256 } from './mutation-canonical.js';
 import { atomicCreatePrivateRecord, readSecurePrivateRecord } from './private-record.js';
 import { currentUid, noFollowReadFlags } from './platform-primitives.js';
 import { isMissingPath } from './private-state.js';
 import { rasterQuarantinePaths } from './raster-export.js';
+import { EXCLUDE_NON_PRINTING_LAYERS_DESCRIPTION, NON_PRINTING_LAYER_HELPERS } from './non-printing-layers.js';
+import { RASTER_READ_LINKS_SCRIPT, admitLinkedFiles } from './raster-linked-files.js';
 import { RASTER_BATCH_MAX_ITEMS, RASTER_BATCH_RECORD_MAX_BYTES, RASTER_BATCH_RECORD_SCHEMAS, RASTER_BATCH_SESSION_MAX_BYTES, rasterBatchSessionSchema, } from './raster-batch-export-records.js';
 import { assessRasterRecordSet, RASTER_BATCH_EXPORT_KIND, RASTER_EXPORT_RECORD_SUFFIXES, RASTER_EXPORT_RECORD_VERSION, } from './raster-export-records.js';
-import { inspectRasterArtifact, linkBoundArtifact, hashWholeFile, pathTaken, readBounded, rasterExtension, rasterExportInputSchema, RASTER_EXPORT_FAILED_CODE, RASTER_EXPORT_PRE_ATTEMPT_CODES, RASTER_MAX_ARTIFACT_BYTES, RASTER_READ_SOURCE_SCRIPT, RasterAfterHostError, RasterArtifactError, RasterPrepareRefusal, RasterPublishError, RasterStateChangedError, recordSetFingerprint, removeEmptyDirectory, removeOwnedFile, retainedEntry, syncDirectory, unlinkStagedName, WEB_RGB_PIXEL_CONTRACT, RASTER_EXPORT_TOOL, artifactSizeAdmitted, describeExpectedSize, } from './raster-export.js';
+import { inspectRasterArtifact, linkBoundArtifact, hashWholeFile, pathTaken, readBounded, rasterExtension, rasterExportInputSchema, RASTER_EXPORT_FAILED_CODE, RASTER_EXPORT_PRE_ATTEMPT_CODES, RASTER_MAX_ARTIFACT_BYTES, RASTER_READ_SOURCE_LAYERS_SCRIPT, RasterAfterHostError, RasterArtifactError, RasterPrepareRefusal, RasterPublishError, RasterStateChangedError, recordSetFingerprint, removeEmptyDirectory, removeOwnedFile, retainedEntry, syncDirectory, unlinkStagedName, WEB_RGB_PIXEL_CONTRACT, RASTER_EXPORT_TOOL, artifactSizeAdmitted, describeExpectedSize, nonPrintingWarnings, } from './raster-export.js';
 export const RASTER_BATCH_PROFILE = 'raster_batch_export_v1';
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 export const rasterBatchInputSchema = z.strictObject({
+    overwrite: z.literal(false).optional(),
     expected_document_key: z.string().min(1).max(16_384),
     format: z.enum(['png', 'jpeg']),
     output_dir: z.string().min(1).max(4_096),
@@ -29,6 +33,7 @@ export const rasterBatchInputSchema = z.strictObject({
     scale: z.union([z.literal(1), z.literal(2)]).optional(),
     transparent: z.boolean().optional(),
     quality: z.number().int().min(0).max(100).optional(),
+    exclude_non_printing_layers: z.boolean().optional().describe(EXCLUDE_NON_PRINTING_LAYERS_DESCRIPTION),
     apply: z.boolean().default(false),
     command_id: applyCommandIdSchema.optional(),
     confirm_export_hash: sha256Schema.optional(),
@@ -143,6 +148,14 @@ var result = {
   documentCount: app.documents.length
 };
 `;
+export const RASTER_BATCH_EXPORT_EXCLUDING_SCRIPT = (() => {
+    const helpered = RASTER_BATCH_EXPORT_SCRIPT.replace(EXPORT_HELPERS, `${EXPORT_HELPERS}${NON_PRINTING_LAYER_HELPERS}`);
+    const hiding = helpered.replace('app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;\ntry {\n  for (var batchItemCursor', 'app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;\ntry {\n  try { nplScan(batchDocument, true); }\n' +
+        '  catch (batchHideError) { throw new Error("MCP_ERROR:" + stringifyJson({ code: "RASTER_EXPORT_FAILED", message: "hiding non-printing layers: " + String(batchHideError.message || batchHideError) })); }\n  for (var batchItemCursor');
+    if (helpered === RASTER_BATCH_EXPORT_SCRIPT || hiding === helpered)
+        throw new Error('The raster batch export script no longer has the expected shape.');
+    return hiding;
+})();
 function classifyBatchRecord(text, exportId, recordType) {
     let value;
     try {
@@ -405,6 +418,7 @@ export class RasterBatchExportOperation {
             artboard_indexes: plan.items.map((item) => item.artboard.index),
             scale: plan.options.scale,
             ...(plan.options.format === 'png' ? { transparent: plan.options.transparent } : { quality: plan.options.quality }),
+            ...(plan.excludeNonPrintingLayers ? { exclude_non_printing_layers: true } : {}),
             apply: true,
             command_id: randomUUID(),
             confirm_export_hash: plan.digest,
@@ -412,6 +426,8 @@ export class RasterBatchExportOperation {
         return {
             outcome: 'planned_batch', options: plan.options,
             items: plan.items.map(({ artboard, outputPath, expected, expectedRange, roundedEdges, edgeWarnings }) => ({ artboard, outputPath, expected, ...(expectedRange === undefined ? {} : { expectedRange }), ...(roundedEdges === undefined ? {} : { roundedEdges }), ...(edgeWarnings === undefined ? {} : { edgeWarnings }) })),
+            ...(plan.links.length === 0 ? {} : { links: plan.links }),
+            ...nonPrintingWarnings(plan.source.nonPrintingLayers, plan.excludeNonPrintingLayers),
             planDigest: plan.digest, nextCall: { tool: RASTER_EXPORT_TOOL, arguments: args },
         };
     }
@@ -421,7 +437,7 @@ export class RasterBatchExportOperation {
         try {
             source = await this.host(meter, {
                 kind: 'read',
-                script: RASTER_READ_SOURCE_SCRIPT,
+                script: RASTER_READ_SOURCE_LAYERS_SCRIPT,
                 params: { expectedDocumentKey: input.expected_document_key },
                 hostGate: { beforeHost: async () => { await this.deps.assertNoUnresolvedLease(); } },
             });
@@ -439,7 +455,29 @@ export class RasterBatchExportOperation {
         if (document.path === null || document.fileRevision === null) {
             return result(this.rejected('document_not_saved', 'この文書はまだ保存されていません。AI 形式で保存してから、もう一度お試しください。', document));
         }
+        const admitLinks = async () => {
+            try {
+                return await admitLinkedFiles({
+                    placedItems: source.placedItems, documentKey: document.key,
+                    readLinks: async () => await this.host(meter, {
+                        kind: 'read', script: RASTER_READ_LINKS_SCRIPT, params: { expectedDocumentKey: input.expected_document_key },
+                        hostGate: { beforeHost: async () => { await this.deps.assertNoUnresolvedLease(); } },
+                    }),
+                });
+            }
+            catch (error) {
+                if (parseExportHostError(error)?.code === 'DOCUMENT_MISMATCH')
+                    return { kind: 'rejected', reason: 'document_key_mismatch', message: 'The active document key does not match expected_document_key.' };
+                throw error;
+            }
+        };
+        let linked = null;
         if (!document.saved) {
+            if (source.placedItems > 0) {
+                linked = await admitLinks();
+                if (linked.kind === 'rejected' && linked.reason === 'linked_file_unavailable')
+                    return result(this.rejected(linked.reason, linked.message, document));
+            }
             return result(this.rejected('document_dirty', 'この書き出しでは未保存の変更を含められません。現在の内容を書き出すには、変更を保存してからもう一度お試しください。元ファイルを更新したくない場合は、別名で保存した文書から書き出してください。', document));
         }
         if (document.mutationProfile !== 'saved_file') {
@@ -447,8 +485,9 @@ export class RasterBatchExportOperation {
         }
         if (document.colorSpace !== 'RGB')
             return result(this.rejected('color_space_not_admitted', 'Only RGB documents are measured for this export.', document));
-        if (source.placedItems !== 0)
-            return result(this.rejected('artwork_not_admitted', 'Linked (placed) images are not measured for this export; embed them first.', document));
+        linked ??= await admitLinks();
+        if (linked.kind === 'rejected')
+            return result(this.rejected(linked.reason, linked.message, document));
         const indexes = input.all_artboards === true ? source.artboards.map((board) => board.index) : input.artboard_indexes;
         if (indexes.length > RASTER_BATCH_MAX_ITEMS) {
             return result(this.rejected('too_many_artboards', `${indexes.length} artboards were requested; at most ${RASTER_BATCH_MAX_ITEMS} are exported in one call.`, document));
@@ -538,11 +577,13 @@ export class RasterBatchExportOperation {
             source: { key: document.key, path: sourceFile.path, fileRevision: document.fileRevision, sha256: sourceFile.sha256, identity: serializeFileIdentity(sourceFile.identity) },
             artboards: source.artboards,
             rulerOrigin: source.rulerOrigin,
+            ...(linked.binding.length === 0 ? {} : { links: linked.binding }),
+            ...(input.exclude_non_printing_layers === true ? { excludeNonPrintingLayers: true } : {}),
             destination: { parent },
             items: items.map((item) => ({ index: item.artboard.index, leaf: item.leaf, expected: item.expected, ...(item.expectedRange === undefined ? {} : { expectedRange: item.expectedRange }) })),
             options,
         });
-        return { kind: 'plan', plan: { document, source, options, sourceFile, parent, items, digest } };
+        return { kind: 'plan', plan: { document, source, options, sourceFile, parent, items, links: linked.links, linkBinding: linked.binding, excludeNonPrintingLayers: input.exclude_non_printing_layers === true, digest } };
     }
     async existingOutcome(exportId, planDigest) {
         if (await pathTaken(rasterQuarantinePaths(this.deps.exportStore.stateRootPath, exportId).manifest)) {
@@ -753,13 +794,14 @@ export class RasterBatchExportOperation {
             try {
                 const exported = await this.host(meter, {
                     kind: 'read',
-                    script: RASTER_BATCH_EXPORT_SCRIPT,
+                    script: plan.excludeNonPrintingLayers ? RASTER_BATCH_EXPORT_EXCLUDING_SCRIPT : RASTER_BATCH_EXPORT_SCRIPT,
                     params: {
                         workCopyPath, workCopyKey: opened.opened.key, artboards: boards,
                         items: items.map((item) => ({ artboardIndex: item.artboard.index, basePath: item.stagedBasePath, stagedPath: item.stagedPath })),
                         format: plan.options.format, scale: plan.options.scale,
                         transparent: plan.options.format === 'png' ? plan.options.transparent : false,
                         quality: plan.options.format === 'jpeg' ? plan.options.quality : 0,
+                        excludeNonPrintingLayers: plan.excludeNonPrintingLayers,
                     },
                     timeoutMs: EXPORT_HOST_TIMEOUT_MS,
                     hostGate: {
@@ -868,6 +910,15 @@ export class RasterBatchExportOperation {
                                 artboardIndex: item.artboard.index, stagedPath: item.stagedPath, outputPath: item.outputPath,
                                 stagedIdentity: serializeFileIdentity(bound[position].identity), sha256: bound[position].sha256,
                             }));
+                            try {
+                                await (this.deps.durableFilePolicy ?? DEFAULT_DURABLE_FILE_POLICY).checkOutputParentCheckpoint('beforeLink', parentScope, { staging: stagingDirectory, files: items.map((item) => item.stagedPath) });
+                            }
+                            catch (error) {
+                                if (!(error instanceof OutputPreLinkCheckError))
+                                    throw error;
+                                outcome = await this.recordFailure(exportId, common, { stage: 'pre_link_check', reason: 'output_verification_failed', message: error.message }, [], ownedWorkCopy());
+                                return;
+                            }
                             const identities = [];
                             let publishFailure = null;
                             for (const [position, item] of items.entries()) {

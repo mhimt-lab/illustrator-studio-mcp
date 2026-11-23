@@ -13,6 +13,7 @@ export const pointTextAlignedCharacterSchema = pointTextCharacterSchema.extend({
     alignment: textAlignmentSchema.optional(),
     autoLeading: z.boolean().optional(),
     strokeColor: recordedStrokeSchema,
+    tsume: z.number().finite().min(0).max(100).optional(),
 });
 export const setTextStyleSnapshotSchema = pointTextRangeGroupSnapshotSchema.extend({
     profile: z.enum(['plain_point_text_v2', RECORDED_PROFILE_NAME]),
@@ -37,6 +38,10 @@ export const setTextStyleSnapshotSchema = pointTextRangeGroupSnapshotSchema.exte
         context.addIssue({ code: 'custom', message: 'Alignment is recorded for single-line point text only.' });
     }
     const recordedProfile = snapshot.profile === RECORDED_PROFILE_NAME;
+    const tsumeRecorded = characters.filter((entry) => entry.tsume !== undefined).length;
+    if ((tsumeRecorded !== 0 && tsumeRecorded !== characters.length) || (tsumeRecorded !== 0 && !recordedProfile)) {
+        context.addIssue({ code: 'custom', message: 'Tsume is recorded for every character of a recorded-profile snapshot or for none.' });
+    }
     const stroked = characters.filter((entry) => entry.strokeColor.model === 'recorded').length;
     if (recordedProfile !== (snapshot.attributeRecord !== undefined)) {
         context.addIssue({ code: 'custom', message: 'An attribute record belongs to the recorded profile snapshot, and only to it.' });

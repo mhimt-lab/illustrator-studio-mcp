@@ -10,7 +10,6 @@ import { APPLY_CHARACTER_STYLE_MODULE_SCRIPT, APPLY_CHARACTER_STYLE_OPERATION, a
 import { validateClusterRange } from './point-text-cluster.js';
 export const BATCH_CHARSTYLE_OPERATION = APPLY_CHARACTER_STYLE_OPERATION;
 export const BATCH_CHARSTYLE_STEP_COUNT = 2;
-export const BATCH_CHARSTYLE_VERSION = '30.8.2';
 export const BATCH_CHARSTYLE_FONT = 'KozGoPr6N-Regular';
 export const BATCH_CHARSTYLE_MAX_CHARACTERS = 64;
 export const BATCH_CHARSTYLE_MAX_DOCUMENT_STYLES = 3;
@@ -99,7 +98,6 @@ export function batchCharStylePlanIssue(plans) {
 }
 export const BATCH_CHARSTYLE_SCRIPT = `
 var BATCH_CHARSTYLE_STEP_COUNT = ${BATCH_CHARSTYLE_STEP_COUNT};
-var BATCH_CHARSTYLE_VERSION = ${JSON.stringify(BATCH_CHARSTYLE_VERSION)};
 var BATCH_CHARSTYLE_FONT = ${JSON.stringify(BATCH_CHARSTYLE_FONT)};
 var BATCH_CHARSTYLE_MAX_CHARACTERS = ${BATCH_CHARSTYLE_MAX_CHARACTERS};
 var BATCH_CHARSTYLE_MAX_DOCUMENT_STYLES = ${BATCH_CHARSTYLE_MAX_DOCUMENT_STYLES};
@@ -107,9 +105,6 @@ var BATCH_CHARSTYLE_RESULT_BUDGET_BYTES = ${BATCH_CHARSTYLE_RESULT_BUDGET_BYTES}
 
 /** The F0 fixture structure: RGB, one root layer without sub-layers, one artboard, and nothing but the two target frames. */
 function batchCharStyleProfile(document, context) {
-  if (context.appVersion !== BATCH_CHARSTYLE_VERSION) {
-    throw mutationError("preflight_failed", "Character-style batch requires measured Illustrator " + BATCH_CHARSTYLE_VERSION + ".");
-  }
   if (context.colorSpace !== "RGB" || document.documentColorSpace !== DocumentColorSpace.RGB) {
     throw mutationError("preflight_failed", "Character-style batch supports RGB documents only.");
   }

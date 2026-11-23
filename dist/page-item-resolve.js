@@ -20,14 +20,22 @@ function resolveReadUuidAndType(item) {
   try { return { uuid: String(item.uuid), typename: String(item.typename) }; } catch (readError) { return null; }
 }
 
-function resolveViaNativeUuid(doc, uuid) {
+// The native lookup answered with an object that did not resolve: remember why, so that the walk's silence cannot turn it into an absence.
+function resolveNoteNative(evidence, reason) {
+  if (evidence !== undefined && evidence !== null && evidence.reason === null) evidence.reason = reason;
+}
+
+function resolveViaNativeUuid(doc, uuid, evidence) {
   var startedAt = new Date().getTime();
   var item = null;
   try { item = doc.getPageItemFromUuid(uuid); } catch (lookupError) { item = null; }
   if (item === undefined || item === null) return null;
   var answer = resolveReadUuidAndType(item);
-  if (answer === null || answer.uuid !== uuid) return null;
+  if (answer === null) { resolveNoteNative(evidence, "native_answer_unreadable"); return null; }
+  if (answer.uuid !== uuid) { resolveNoteNative(evidence, "native_answer_uuid_mismatch"); return null; }
   if (answer.typename === "PathItem" || answer.typename === "TextFrame") return { item: item, typename: answer.typename, route: "native" };
+  // The host confirmed the UUID (its own uuid reads back equal) but the type it reports cannot be trusted: the parent's row must give it.
+  resolveNoteNative(evidence, "native_uuid_confirmed");
   var siblings = null;
   try {
     var parent = item.parent;
@@ -57,7 +65,7 @@ function resolveScanBegin(doc) {
   scanTicks = 0;
 }
 
-function resolveViaWalk(doc, uuid) {
+function resolveViaWalk(doc, uuid, evidence) {
   resolveScanBegin(doc);
   var foundItem = null;
   try {
@@ -75,17 +83,21 @@ function resolveViaWalk(doc, uuid) {
   if (scanVisited !== scanTotal) {
     throw resolveError("The document walk reached " + scanVisited + " of " + scanTotal + " page items, so the absence of the target UUID is unproven.");
   }
+  if (evidence !== undefined && evidence !== null && evidence.reason !== null) {
+    throw resolveError("The native UUID lookup answered for the target (" + evidence.reason + ") but neither its parent collection nor the document walk produced the item, so the absence of the target UUID is unproven.");
+  }
   return null;
 }
 
 /** The direct-reference route only (no walk): null when it cannot answer. For a caller whose own fallback decides what absence means. */
 function resolvePageItemDirect(doc, uuid) {
-  return resolveViaNativeUuid(doc, uuid);
+  return resolveViaNativeUuid(doc, uuid, null);
 }
 
 function resolvePageItem(doc, uuid) {
-  var fast = resolveViaNativeUuid(doc, uuid);
+  var evidence = { reason: null };
+  var fast = resolveViaNativeUuid(doc, uuid, evidence);
   if (fast !== null) return fast;
-  return resolveViaWalk(doc, uuid);
+  return resolveViaWalk(doc, uuid, evidence);
 }
 `;

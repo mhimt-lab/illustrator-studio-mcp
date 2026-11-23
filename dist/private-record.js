@@ -89,7 +89,8 @@ async function writeSyncedTemporary(path, contents, options) {
     try {
         handle = await createPrivateFileExclusive(temporaryPath);
         await handle.writeFile(contents);
-        await handle.sync();
+        if (options?.unsynced !== true)
+            await handle.sync();
         await options?.durabilityBoundary?.('temporary_synced');
         return temporaryPath;
     }
@@ -146,14 +147,16 @@ export async function atomicCreatePrivateRecord(path, contents, options) {
             await link(temporaryPath, path);
             await options?.durabilityBoundary?.('published');
             await scope.assertStable();
-            await scope.syncLeafParent();
+            if (options?.unsynced !== true)
+                await scope.syncLeafParent();
             await options?.durabilityBoundary?.('publish_parent_synced');
         }
         finally {
             await unlinkTemporary(temporaryPath, false);
             await options?.durabilityBoundary?.('temporary_unlinked');
             await scope.assertStable();
-            await scope.syncLeafParent();
+            if (options?.unsynced !== true)
+                await scope.syncLeafParent();
             await options?.durabilityBoundary?.('temporary_unlink_parent_synced');
         }
     });
@@ -246,7 +249,8 @@ export async function unlinkPrivateRecord(path, options) {
         await unlink(path);
         await options?.durabilityBoundary?.('unlinked');
         await scope.assertStable();
-        await scope.syncLeafParent();
+        if (options?.unsynced !== true)
+            await scope.syncLeafParent();
         await options?.durabilityBoundary?.('unlink_parent_synced');
     });
 }

@@ -405,6 +405,8 @@ function trimMarksRollback(state) {
 
 var trimMarksExecution = runMutationTransaction({
   apply: params.apply === true,
+  editSessionAffected: function (phase, preflight, plan, state, value) { return phase === "after" ? [value.groupUuid] : []; },
+  editSessionLayers: function (phase, preflight, plan, state) { return phase === "after" ? [state.operationState.layer] : []; },
   initialOperationState: function () { return { mutationStarted: false, layer: null, group: null, lines: [], rollbackEvidence: { restoredSiblingOrder: null, createdLayerRemoved: false } }; },
   preflight: trimMarksResolve,
   plan: trimMarksPlan,
@@ -437,13 +439,7 @@ function normalizedRequest(input) {
 export const createTrimMarksToolContract = {
     name: 'illustrator_create_trim_marks',
     title: 'Plan or Create Trim Marks on an Artboard',
-    description: 'Plan or apply drawing editable trim marks (crop marks) as paths in the document around one artboard (artboard_index, 0-based). '
-        + 'This is for marks that must exist in the .ai itself; for marks only in a PDF use illustrator_export_pdf trim_marks instead, and never both for the same output (double marks). '
-        + 'Every dimension is an explicit point value (1 mm = 72/25.4 pt); there is no Japanese/Western preset, so take bleed, offset and length from the print provider. '
-        + 'At each artboard corner one horizontal and one vertical line run outward from offset_pt to offset_pt + length_pt on the trim edge, and with lines "trim_and_bleed" also on the bleed edge (8 or 16 lines). '
-        + 'The lines go into one group on a new front root layer (layer_name, default "Trim Marks"; refused if a root layer of that name exists), stroked with the document\'s Registration swatch at tint 100, geometry from the artboard rect only. '
-        + 'The plan binds the root layer order, the active layer and the artboard rect and lists every planned line. Apply compares and sets them, restores the active layer (the selection is not touched), and verifies every anchor, the stroke and the UUIDs by native read-back; on failure only the created group and layer are removed and the baseline order is proved. '
-        + 'Created UUIDs are not durable across a later save. Not available inside an edit session.',
+    description: 'Plan or apply editable trim marks (crop marks) as paths in the document around one artboard (artboard_index, 0-based). Use only for marks that must exist in the .ai; for PDF-only marks use illustrator_export_pdf trim_marks, never both (double marks). Dimensions are explicit points (1 mm = 72/25.4 pt); there is no preset, so take bleed_pt, offset_pt and length_pt from the print provider. Lines come from the artboard rect: one horizontal and one vertical per corner on the trim edge, plus the bleed edge with "trim_and_bleed". They go into one group on a new front root layer (layer_name, default "Trim Marks"; refused if that root layer exists), stroked with the Registration swatch. Apply restores the active layer; on failure only its own group and layer are removed. Supports edit sessions: the created group, every line and the new layer join the session head before one final save. Re-read layer paths after creation, since adding the front layer shifts existing paths. Created UUIDs are not durable across a later save.',
     inputSchema,
     publicInputSchema: createTrimMarksPublicInputSchema,
     outputSchema: createTrimMarksResponseSchema,

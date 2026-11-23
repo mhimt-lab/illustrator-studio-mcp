@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { hostVersionBackupPublicFields, hostVersionInternalFields } from '../host-version-consent.js';
 import { DUPLICATE_TEXT_HOST_SCRIPT, duplicateTextWireSnapshotSchema } from './duplicate-text-host-script.js';
 import { DUPLICATE_IMAGE_HOST_SCRIPT, duplicateImageWireSnapshotSchema, } from './duplicate-image-host-script.js';
 import { POINT_TEXT_SNAPSHOT_SCRIPT } from './point-text-host-script.js';
@@ -271,6 +272,7 @@ function nestedIdentitiesAreBound(sourceUuid, parentOrder, nested) {
         nested.layerOrder.every((uuid) => uuid === outermost.uuid || !identities.includes(uuid));
 }
 const commonInternalFields = {
+    ...hostVersionInternalFields,
     expectedDocumentKey: z.string().min(1).max(16_384),
     sourceUuid: z.string().min(1).max(255),
     placement: z.literal('after_source'),
@@ -287,6 +289,7 @@ const duplicateObjectInternalInputSchema = z.discriminatedUnion('apply', [
     }),
 ]);
 const commonPublicFields = {
+    ...hostVersionBackupPublicFields,
     expected_document_key: z.string().min(1).max(16_384),
     source_uuid: z.string().min(1).max(255),
     placement: z.literal('after_source'),
@@ -313,6 +316,7 @@ duplicateObjectInputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publi
 function normalizePublicInput(input) {
     const value = duplicateObjectPublicInputSchema.parse(input);
     const common = {
+        ...(value.backup_id === undefined ? {} : { backupId: value.backup_id }),
         expectedDocumentKey: value.expected_document_key,
         sourceUuid: value.source_uuid,
         placement: value.placement,
@@ -1111,7 +1115,7 @@ function layerOrderForText(document, layer, outer) {
   return mutationSameSequence(duplicateParentOrder(layer), [outer.uuid]);
 }
 function duplicateNestedContext(document, source, copyUuid) {
-  if (String(app.version) !== "30.8.2" || (document.documentColorSpace !== DocumentColorSpace.RGB && document.documentColorSpace !== DocumentColorSpace.CMYK) || document.layers.length !== 1 ||
+  if (!duplicateVersionAdmitted() || (document.documentColorSpace !== DocumentColorSpace.RGB && document.documentColorSpace !== DocumentColorSpace.CMYK) || document.layers.length !== 1 ||
       source.layer.layers.length !== 0) {
     throw mutationError("preflight_failed", "Nested duplicate requires the measured single-layer RGB profile.");
   }
@@ -1210,7 +1214,7 @@ function duplicateColourSpotBase(color) {
 function duplicateColourContext(document, source, copyUuid) {
   function need(value) { if (!value) throw mutationError("preflight_failed", "Outside the measured #577 colour profile."); }
   var nested = source.parent.typename === "GroupItem";
-  need(params.nestedHostReady === true && String(app.version) === "30.8.2" && document.documentColorSpace === DocumentColorSpace.CMYK &&
+  need(params.nestedHostReady === true && duplicateVersionAdmitted() && document.documentColorSpace === DocumentColorSpace.CMYK &&
     document.layers.length === 1 && source.layer === document.layers[0] && source.layer.layers.length === 0);
   var order = duplicateParentOrder(source.parent), baselineOrder = [];
   for (var o=0;o<order.length;o++) if (order[o] !== copyUuid) baselineOrder.push(order[o]);
@@ -1289,7 +1293,14 @@ function duplicateResolve(forApply) {
   if (source === null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: params.sourceUuid }));
   var sourceBefore = duplicateSnapshot(document, source, params.sourceUuid);
   var nestedContext = null;
-  if (duplicateColourRequired(document, source)) {
+  // The paths whose measured profile used to pin the host version (nested, colour and image duplicates) are admitted by the
+  // policy table (\`duplicate_object\`): the channel and, for a saved file, the verified backup are checked here with the real params.
+  var colourRequired = duplicateColourRequired(document, source);
+  if ((duplicateImageType(sourceBefore.type) || colourRequired || source.parent.typename === "GroupItem") &&
+      !hostVersionAdmitted("duplicate_object", String(app.version))) {
+    throw mutationError("preflight_failed", "The host version policy does not admit Illustrator " + String(app.version) + " for this duplicate.");
+  }
+  if (colourRequired) {
     sourceBefore.colourContext = duplicateColourContext(document, source, null);
   }
   if (source.parent.typename === "GroupItem") {
@@ -1612,6 +1623,13 @@ export const duplicateObjectToolContract = {
     annotations: operationSafetyPolicyToMcpAnnotations(DUPLICATE_OBJECT_SAFETY.policy),
     normalizePublicInput,
 };
+export function duplicateHostVersionOperation(outcome) {
+    const holder = outcome;
+    const source = (holder?.request?.expectedBefore ?? holder?.plan?.sourceBefore);
+    if (source === undefined || source === null)
+        return null;
+    return source.type === 'PlacedItem' || source.type === 'RasterItem' || Boolean(source.nestedContext) || Boolean(source.colourContext) ? 'duplicate_object' : null;
+}
 export function createDuplicateObjectAdapter() {
     return {
         version: 1,
@@ -1632,6 +1650,7 @@ export function createDuplicateObjectAdapter() {
         safetyConformanceVersion: DUPLICATE_CONFORMANCE_VERSION,
         errorMappingVersion: DUPLICATE_ERROR_MAPPING_VERSION,
         hostScriptDigest: DUPLICATE_OBJECT_HOST_SCRIPT_DIGEST,
+        hostVersionOperation: (outcome) => duplicateHostVersionOperation(outcome),
         async admit(input, services) {
             const request = duplicateObjectInternalInputSchema.parse(input);
             if (request.apply && !request.expectedBefore.nestedContext && !('colourContext' in request.expectedBefore && request.expectedBefore.colourContext))

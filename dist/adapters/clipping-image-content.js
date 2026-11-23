@@ -65,6 +65,7 @@ function clipImageNumber(value) {
 function clipImageSelection(document) {
   var selection=document.selection, result=[];
   if (selection===null) return result;
+  if (isTextRangeSelection(selection)) throw clipUnsupported("text_editing_selection",params.contentUuid);
   if (!selection || typeof selection.length!=="number" || selection.length>128) throw clipUnsupported("selection_unmeasured",params.contentUuid);
   for(var i=0;i<selection.length;i++) {
     var uuid=selection[i].uuid;

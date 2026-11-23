@@ -7,8 +7,10 @@ import { boundsSchema, documentContextSchema, layerPathSchema, layerStructuralRe
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { CREATION_APPEARANCE_MODULE_SCRIPT } from './create-appearance.js';
 import { CREATE_RECTANGLE_MODULE_SCRIPT } from './create-rectangle/jsx.js';
+import { EDIT_SESSION_CAPACITY_SCRIPT } from './edit-session-capacity-jsx.js';
 import { QR_ERROR_CORRECTION_LEVELS, QR_MAX_VERSION, QR_MIN_QUIET_ZONE_MODULES, QR_MIN_VERSION, QrMatrixError } from '../qr/matrix.js';
 import { QR_ENCODER_IDENTITY, resolveQr } from '../qr/plan.js';
+export const QR_SESSION_MAX_RECTANGLES = 1_500;
 export const CREATE_QR_CODE_OPERATION = 'create_qr_code';
 export const CREATE_QR_CODE_VALIDATOR = { kind: CREATE_QR_CODE_OPERATION, version: 1 };
 const CANONICAL_VERSION = 1;
@@ -293,6 +295,7 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
     await assertOperationSafetyAdapterConformance({ registration: CREATE_QR_CODE_SAFETY, plan, result: safetyResult(result, requestDigest, attestation, plan) }, resolver);
 }
 export const CREATE_QR_CODE_MODULE_SCRIPT = `var QR_TOLERANCE_PT = ${QR_COORDINATE_TOLERANCE_PT};
+var QR_SESSION_MAX_RECTANGLES = ${QR_SESSION_MAX_RECTANGLES};
 var QR_GROUP_NAME = ${JSON.stringify(QR_GROUP_NAME)};
 var QR_MODULES_NAME = ${JSON.stringify(QR_MODULES_NAME)};
 var QR_BACKGROUND_NAME = ${JSON.stringify(QR_BACKGROUND_NAME)};
@@ -340,6 +343,15 @@ function qrRuns() {
   return runs;
 }
 
+/** Inside an edit session only: the rectangle ceiling first, then the session's item limit, both before anything is drawn (items: group, compound, optional background, rectangles). */
+function qrSessionRefuse(context, runCount) {
+  if (MUTATION_EDIT_SESSION === null) return;
+  if (runCount > QR_SESSION_MAX_RECTANGLES) {
+    throw new Error("MCP_ERROR:" + stringifyJson({ code: "CREATE_QR_CODE_SESSION_TOO_LARGE", message: "The symbol has " + runCount + " rectangles; an edit session takes at most " + QR_SESSION_MAX_RECTANGLES + "; nothing was changed. Create it outside the session." }));
+  }
+  sessionCapacityRefuse(context, runCount + 2 + (params.background === "white" ? 1 : 0), "CREATE_QR_CODE_SESSION_TOO_LARGE", "The symbol");
+}
+
 function qrResolve(forApply) {
   var context = forApply ? requireDocument(params.expectedDocumentKey) : requireDocumentForRead(params.expectedDocumentKey);
   var doc = app.activeDocument;
@@ -365,6 +377,7 @@ function qrResolve(forApply) {
   var moduleBounds = [symbolBounds[0] + inset, symbolBounds[1] - inset, symbolBounds[2] - inset, symbolBounds[3] + inset];
   for (var b = 0; b < 4; b++) { mutationFiniteNumber(symbolBounds[b], "symbolBounds"); mutationFiniteNumber(moduleBounds[b], "moduleBounds"); }
   if (forApply && blockers.length > 0) throw mutationBeforeSideEffectError(stringifyJson({ code: "CREATE_QR_CODE_APPLY_BLOCKED", reasonCodes: blockers }));
+  if (forApply) qrSessionRefuse(context, runs.length);
   return { context: context, doc: doc, colors: colors, runs: runs, modulePt: modulePt, artboardBounds: artboardBounds, symbolBounds: symbolBounds, moduleBounds: moduleBounds,
     targetLayer: layerChain[layerChain.length - 1], layerInspection: layerInspection, blockers: blockers, itemCount: layerChain[layerChain.length - 1].pageItems.length };
 }
@@ -551,6 +564,8 @@ function qrRollback(state) {
 `;
 export const CREATE_QR_CODE_RUNNER_SCRIPT = `var qrExecution = runMutationTransaction({
   apply: params.apply === true,
+  editSessionAffected: function (phase, preflight, plan, state, value) { return phase === "after" ? [value.uuid] : []; },
+  editSessionLayers: function (phase, preflight) { return [preflight.targetLayer]; },
   initialOperationState: function () {
     return { mutationStarted: false, createdObject: null, createdUuid: null, container: null, background: null, selectionBefore: 0, selectionAfter: 0,
       rollbackEvidence: { createdUuid: null, restoredItemCount: null } };
@@ -573,7 +588,7 @@ var result = { operation: "create_qr_code", applied: qrExecution.transaction.sta
 if (qrExecution.transaction.state === "verified") result.created = qrExecution.value;
 `;
 export const CREATE_QR_CODE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
-${CREATION_APPEARANCE_MODULE_SCRIPT}${CREATE_RECTANGLE_MODULE_SCRIPT}${CREATE_QR_CODE_MODULE_SCRIPT}${CREATE_QR_CODE_RUNNER_SCRIPT}`;
+${CREATION_APPEARANCE_MODULE_SCRIPT}${CREATE_RECTANGLE_MODULE_SCRIPT}${EDIT_SESSION_CAPACITY_SCRIPT}${CREATE_QR_CODE_MODULE_SCRIPT}${CREATE_QR_CODE_RUNNER_SCRIPT}`;
 export const CREATE_QR_CODE_HOST_SCRIPT_DIGEST = canonicalSha256(CREATE_QR_CODE_SCRIPT);
 export const CREATE_QR_CODE_ADAPTER_IDENTITY = mutationAdapterIdentity({
     version: 2, contractVersion: 1, operation: CREATE_QR_CODE_OPERATION, validator: CREATE_QR_CODE_VALIDATOR, canonicalContractVersion: CANONICAL_VERSION,
@@ -589,11 +604,7 @@ function normalizedRequest(input) {
 export const createQrCodeToolContract = {
     name: 'illustrator_create_qr_code',
     title: 'Plan or Create a QR Code',
-    description: 'Plan or draw a QR Code Model 2 symbol (Version 1-40, error correction L/M/Q/H, UTF-8 content) as editable vector artwork on an explicit layer path, bound by explicit document key. '
-        + 'x, y and size_pt place the whole square, quiet zone included, from the artboard top-left; quiet_zone_modules is at least 4. The foreground is black (CMYK K100 or RGB 0,0,0); background is a white rectangle or none. '
-        + 'The dark modules become one compound path (horizontal runs merged), grouped with the optional white rectangle. The plan returns the version, module count, rectangle count and physical module size (small sizes are your check; no minimum is asserted) and a software decode of the planned rectangles (zbarimg; not_run when it is missing). '
-        + 'Apply revalidates in the same host call, reads back every rectangle and paint, and rolls back only its own group. After a verified apply a separate read renders the group in a throwaway document and decodes it: decode is match, mismatch (returned as an error naming the group; the symbol is not a success) or not_run. '
-        + 'This is standard Model 2 only: no styling, logo, GS1 conformance or other colours. The encoded content is yours to license and use lawfully. Created UUIDs are not durable across a later save. Not available inside an edit session.',
+    description: 'Plan or draw a QR Code Model 2 symbol (Version 1-40, error correction L/M/Q/H, UTF-8) as editable vector artwork on an explicit layer path, bound by document key. x, y and size_pt place the whole square, quiet zone included, from the artboard top-left; quiet_zone_modules is at least 4, and no minimum physical size is enforced. Black foreground (K100 in CMYK, RGB 0,0,0); background is a white rectangle or none. The plan returns version, module count, module size and a software decode (zbarimg; not_run when missing). Apply reads back every rectangle and rolls back only its own group; a decode mismatch after apply is an error, not a success. Standard Model 2 only: no styling, logo, GS1 or other colours. The encoded content is yours to license and use lawfully. Created UUIDs are not durable across a later save. Supports edit sessions for symbols of at most ' + QR_SESSION_MAX_RECTANGLES + ' rectangles (the plan\'s items.rectangles): the created group, compound path, every rectangle and the target layer\'s stacking order join the session head before one final save, and a larger symbol is refused before any change (create it outside the session). Inside a session a decode mismatch cannot be removed with illustrator_delete_objects: do not save, close the session, close the document without saving and reopen the saved file. QR Code is a registered trademark of DENSO WAVE INCORPORATED in Japan and in other countries.',
     inputSchema,
     publicInputSchema: createQrCodePublicInputSchema,
     outputSchema: createQrCodeResponseSchema,
@@ -628,6 +639,8 @@ export function createCreateQrCodeAdapter() {
         },
         assertSafetyConformance: assertSafety,
         mapExecutionError(error, detail) {
+            if (detail?.code === 'CREATE_QR_CODE_SESSION_TOO_LARGE')
+                return new Error(`${detail.code}: ${detail.message ?? 'The symbol does not fit the edit session.'}`);
             if (detail?.code === 'CREATE_QR_CODE_APPLY_BLOCKED')
                 return new Error(`QR code creation is blocked: ${(detail.reasonCodes ?? []).join(', ') || 'unknown reason'}.`);
             return error instanceof Error ? error : new Error(String(error));

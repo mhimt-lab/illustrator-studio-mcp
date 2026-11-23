@@ -2,7 +2,8 @@ import { PRIVATE_RECORD_LIMITS } from '../private-record.js';
 import { AREA_TEXT_MAX_LINES } from './area-text-host-script.js';
 export const SNAPSHOT_RESULT_ADMISSION_BYTES = Math.floor(PRIVATE_RECORD_LIMITS.result * 0.8);
 const FIXED_BYTES = 32_768;
-const COUNTERS = String.raw `
+export const SNAPSHOT_RESULT_FIXED_BYTES = FIXED_BYTES;
+const JSON_COUNTER = String.raw `
 function snapshotJsonBytes(value) {
   if (value === null || value === undefined) return 4;
   if (typeof value === "string") {
@@ -30,7 +31,8 @@ function snapshotJsonBytes(value) {
   }
   return bytes;
 }
-function snapshotResultBytes(documentKey, pairs, layoutUnits) {
+`;
+const COUNTERS = JSON_COUNTER + String.raw `function snapshotResultBytes(documentKey, pairs, layoutUnits) {
   var bytes = SNAPSHOT_RESULT_FIXED_BYTES + 2 * snapshotJsonBytes(documentKey);
   for (var i = 0; i < pairs.length; i++) {
     var before = snapshotJsonBytes(pairs[i].before), after = snapshotJsonBytes(pairs[i].after);
@@ -107,6 +109,7 @@ function mixedSnapshotResultPairs(documentKey, steps, fromApply) {
 const count = new Function('SNAPSHOT_RESULT_FIXED_BYTES', 'SNAPSHOT_RESULT_MAX_LINES', COUNTERS
     + '\nreturn { json: snapshotJsonBytes, result: snapshotResultBytes, mixed: mixedSnapshotResultPairs };')(FIXED_BYTES, AREA_TEXT_MAX_LINES);
 export const snapshotJsonBytes = count.json;
+export const SNAPSHOT_JSON_BYTES_SCRIPT = JSON_COUNTER;
 export const snapshotResultBytes = count.result;
 export const mixedSnapshotResultPairs = count.mixed;
 export function assertSnapshotResultFits(documentKey, pairs, layoutUnits) {

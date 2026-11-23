@@ -8,6 +8,7 @@ import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canon
 import { SUPPORTED_PATH_ITEM_HOST_SCRIPT } from './supported-path-item-host-script.js';
 import { POINT_TEXT_APPLY_BLOCKERS } from './point-text-host-script.js';
 import { defineBatchStep } from './batch-step-contract.js';
+import { LAYER_TOP_LEVEL_ITEMS_HELPER } from '../layer-top-level-items.js';
 import { SET_OBJECT_STATE_BATCH_NEXT_CALL } from './batch-step-next-call.js';
 export const SET_OBJECT_STATE_OPERATION = 'set_object_state';
 export const SET_OBJECT_STATE_VALIDATOR = { kind: SET_OBJECT_STATE_OPERATION, version: 1 };
@@ -600,14 +601,17 @@ function objectStateRollback(state) {
 }
 
 `;
-export const SET_OBJECT_STATE_BATCH_SCRIPT = `function mixedObjectStateProfile(document, context) {
-  if (context.appVersion !== "30.8.2") throw mutationError("preflight_failed", "Object-state batch requires measured Illustrator 30.8.2.");
+export const SET_OBJECT_STATE_BATCH_SCRIPT = `${LAYER_TOP_LEVEL_ITEMS_HELPER}function mixedObjectStateProfile(document, context) {
+  // #971 W4: the layer's own collection (fresh) says what the document holds; document.pageItems.length is only a lower bound (longer than the layer's total = nested items).
+  var topCount = layerTopLevelCount(document.layers);
   if (context.colorSpace !== "RGB" || document.layers.length !== 1 || document.layers[0].layers.length !== 0 || document.artboards.length !== 1 ||
-      document.pageItems.length > OBJECT_STATE_BATCH_MAX_STEPS) {
+      document.pageItems.length > OBJECT_STATE_BATCH_MAX_STEPS || topCount > OBJECT_STATE_BATCH_MAX_STEPS) {
     throw mutationError("preflight_failed", "Object-state batch supports small RGB documents with one root layer, one artboard and at most three rectangle PathItems only.");
   }
-  for (var itemIndex = 0; itemIndex < document.pageItems.length; itemIndex++) {
-    var target = document.pageItems[itemIndex];
+  if (document.pageItems.length > topCount) throw mutationError("preflight_failed", "Object-state batch requires layer-direct plain four-point closed paths.");
+  var topItems = layerTopLevelItems(document.layers, []);
+  for (var itemIndex = 0; itemIndex < topItems.length; itemIndex++) {
+    var target = topItems[itemIndex];
     if (String(target.typename) !== "PathItem" || target.parent !== document.layers[0] ||
         target.closed !== true || target.guides !== false || target.clipping !== false || target.pathPoints.length !== 4) {
       throw mutationError("preflight_failed", "Object-state batch requires layer-direct plain four-point closed paths.");
@@ -640,13 +644,22 @@ function mixedObjectStateResolve() {
   resolved.blockers = blockers;
   return resolved;
 }
+// Bounds compare in the form the host prints them: ExtendScript's String(number) keeps 15 significant digits, so a plan
+// read back from the output (expected_before, confirmed_after) equals a fresh read only at that precision.
+function mixedObjectStateSameBounds(left, right) {
+  if (!left || !right || typeof left.length !== "number" || typeof right.length !== "number" || left.length !== right.length) return false;
+  for (var i = 0; i < left.length; i++) if (String(left[i]) !== String(right[i])) return false;
+  return true;
+}
 function mixedObjectStateSame(left, right) {
   if (!left || !right) return false;
   for (var key in left) {
     if (!left.hasOwnProperty(key)) continue;
     if (!right.hasOwnProperty(key)) return false;
-    if (key === "layerPath" || key === "geometricBounds") {
+    if (key === "layerPath") {
       if (!mutationSameSequence(left[key], right[key])) return false;
+    } else if (key === "geometricBounds") {
+      if (!mixedObjectStateSameBounds(left[key], right[key])) return false;
     } else if (left[key] !== right[key]) return false;
   }
   for (var rightKey in right) if (right.hasOwnProperty(rightKey) && !left.hasOwnProperty(rightKey)) return false;
@@ -808,7 +821,7 @@ function normalizedRequest(input) {
 export const setObjectStateToolContract = {
     name: 'illustrator_set_object_state',
     title: 'Plan or Set Object State',
-    description: `Plan or apply any subset of name, hidden, locked, opacity (0-100), blending_mode, and note on one PathItem, GroupItem, TextFrame, PlacedItem, or CompoundPathItem resolved by native UUID in its declared typed collection. The plan binds the full before state (identity, the six properties, editable, layer chain, ancestor-group lock/hidden state, bounds), lists only the properties that actually change, and exposes blockers: targets under a locked or hidden layer or group are refused; a locked target is accepted only when the request unlocks it and a hidden one only when it shows it. Apply performs compare-and-set on expected_before, writes the changed properties in a fixed order (locked, hidden, name, note, opacity, blending_mode) without touching no-op properties, verifies by native read-back, and on failure rewrites only the properties it wrote, in reverse order, and proves the before state. Document saved is reported as observed and is not restored by rollback. note is a caller-supplied string only.`,
+    description: 'Plan or apply any subset of name, hidden, locked, opacity (0-100), blending_mode and note on one PathItem, GroupItem, TextFrame, PlacedItem or CompoundPathItem, resolved by native UUID in its declared typed collection. The plan binds the full before state and lists only the properties that would change. Targets under a locked or hidden layer or group are refused; a locked target is accepted only when the request unlocks it, and a hidden one only when it shows it. Apply uses compare-and-set on expected_before, writes the changed properties, verifies by native read-back, and on failure rolls back only the properties it wrote. Document saved is reported as observed and is not restored by rollback. note is a caller-supplied string only.',
     inputSchema,
     publicInputSchema: setObjectStatePublicInputSchema,
     outputSchema: setObjectStateResponseSchema,

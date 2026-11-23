@@ -5,6 +5,14 @@ import { isFileTime } from '../execution-record.js';
 import { HostProcessExitError } from '../host-transport.js';
 import { windowsPowerShellEnvironment, windowsRunnerInvocation } from './powershell-runner.js';
 import { createWindowsDurationProbe } from './perf-probe.js';
+import { parseWindowsAttachLine, WINDOWS_ATTACH_LINE_MAX_CHARS } from './attach-line.js';
+class AttachRefusal extends Error {
+    refusal;
+    constructor(refusal) {
+        super('Windows runner attach preflight refused.');
+        this.refusal = refusal;
+    }
+}
 export class WindowsRunnerPreGoError extends Error {
     constructor(cause) {
         super(`Windows runner stopped before go: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
@@ -87,8 +95,46 @@ export async function launchWindowsRunner(files, timeoutMs, recordExecution, onG
                 reject(new Error('Windows runner could not start with private pipes.'));
                 return;
             }
+            const startsLike = (text, word) => text.startsWith(word.slice(0, Math.min(text.length, word.length)));
+            let awaitingAttach = options.attachPreflight !== undefined;
+            const refuseAttach = (observation) => {
+                try {
+                    options.attachPreflight(observation);
+                    return false;
+                }
+                catch (error) {
+                    reject(new AttachRefusal(error));
+                    return true;
+                }
+            };
             const receive = (chunk) => {
                 received += chunk.toString('utf8');
+                if (awaitingAttach) {
+                    if (received.startsWith('ready ')) {
+                        awaitingAttach = false;
+                        if (refuseAttach(null))
+                            return;
+                    }
+                    else if (!startsLike(received, 'attach ') && !startsLike(received, 'ready ')) {
+                        reject(new Error('Invalid Windows runner ready line.'));
+                        return;
+                    }
+                    else if (received.includes('\n')) {
+                        const end = received.indexOf('\n') + 1;
+                        const observation = parseWindowsAttachLine(received.slice(0, end), nonce);
+                        received = received.slice(end);
+                        awaitingAttach = false;
+                        if (refuseAttach(observation))
+                            return;
+                    }
+                    else if (received.length > WINDOWS_ATTACH_LINE_MAX_CHARS) {
+                        refuseAttach(null);
+                        return;
+                    }
+                    else {
+                        return;
+                    }
+                }
                 if (received.length > 512 || !received.startsWith('ready '.slice(0, Math.min(received.length, 6)))) {
                     reject(new Error('Invalid Windows runner ready line.'));
                 }
@@ -138,6 +184,8 @@ export async function launchWindowsRunner(files, timeoutMs, recordExecution, onG
         if (crossedGo)
             throw error;
         await stopBeforeGo();
+        if (error instanceof AttachRefusal)
+            throw error.refusal;
         throw new WindowsRunnerPreGoError(error);
     }
     finally {

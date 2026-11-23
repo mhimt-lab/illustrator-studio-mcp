@@ -35,6 +35,17 @@ export class CommandQuarantinedError extends Error {
         this.name = 'CommandQuarantinedError';
     }
 }
+export class CommandReleasedAsOrphanError extends Error {
+    commandId;
+    code = 'COMMAND_RELEASED_AS_ORPHAN';
+    constructor(commandId) {
+        super(`Command ${commandId} never started: its lock was released after its server stopped before the command was created, ` +
+            'and the id is closed for good. Nothing reached Illustrator. Resolve the unresolved backup, export, or save-as session ' +
+            'with its reconcile tool, then send the request again with a new command_id.');
+        this.commandId = commandId;
+        this.name = 'CommandReleasedAsOrphanError';
+    }
+}
 export class ProvenPreApplyFailureError extends Error {
     commandId;
     hostMessage;

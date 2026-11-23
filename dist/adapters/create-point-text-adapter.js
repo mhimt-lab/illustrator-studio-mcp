@@ -406,6 +406,26 @@ function createPointTextLayerOrder(layer) {
 }
 
 /**
+ * The same order for a plan or preflight that only has to decide whether the layer is over its capacity (#954): at most
+ * \`limit\` UUIDs, from the front, so the read and the result do not grow with the layer. A layer that holds \`limit\` or more
+ * items is blocked, so a cut list is never the one a verify or a rollback compares; those read the whole order above.
+ */
+function createPointTextLayerOrderUpTo(layer, limit) {
+  var items = layer.pageItems;
+  var count = items.length;
+  var take = count > limit ? limit : count;
+  var order = [];
+  for (var index = 0; index < take; index++) {
+    var uuid = items[index].uuid;
+    if (typeof uuid !== "string" || uuid.length === 0) {
+      throw mutationError("preflight_failed", "A layer item native UUID is unavailable.");
+    }
+    order.push(uuid);
+  }
+  return order;
+}
+
+/**
  * The ancestry of the layer itself, nearest first. Creation is blocked by a hidden or locked ancestor
  * exactly as replacement is, because the immediate layer never reports an ancestor's state.
  */
@@ -471,7 +491,7 @@ function createPointTextResolve(forApply) {
   var document = app.activeDocument;
   var layer = createPointTextResolveLayer(document, params.expectedLayerPath);
   var ancestry = createPointTextLayerAncestry(layer);
-  var order = createPointTextLayerOrder(layer);
+  var order = createPointTextLayerOrderUpTo(layer, CREATE_POINT_TEXT_MAX_DIRECT_ITEMS);
   var rect = createPointTextArtboardRect(document, params.artboardIndex);
   var anchor = createPointTextAnchor(rect);
   var font = createPointTextFont();
@@ -742,16 +762,7 @@ function normalizedRequest(input) {
 export const createPointTextToolContract = {
     name: 'illustrator_create_point_text',
     title: 'Plan or Create Point Text',
-    description: 'Plan or create one single-line POINTTEXT frame at an artboard-relative anchor on an explicit layer path, '
-        + 'bound by explicit document key. `style.fill_color` is RGB (`{red, green, blue}`, optionally tagged '
-        + '`model: "rgb"`), CMYK (`{model: "cmyk", cyan, magenta, yellow, black}`) or Gray '
-        + '(`{model: "gray", gray}`); RGB is accepted only in an RGB document and CMYK only in a CMYK document, '
-        + 'Gray in either, and a mismatch is refused instead of implicitly converted. Every character, paragraph '
-        + 'and frame property outside the requested font, size, tracking and fill is written from the measured '
-        + 'plain_point_text_v2 profile rather than inherited. Apply '
-        + 'revalidates the exact layer order in the same host call, verifies the complete created snapshot by native UUID, '
-        + 'and rolls back only its own created item. The returned native UUID identifies the item until the document is '
-        + 'next saved; Illustrator renumbers UUIDs across that save.',
+    description: 'Plan or create one single-line POINTTEXT frame at an artboard-relative anchor on an explicit layer path, bound by expected_document_key. style sets font_post_script_name, size, tracking, justification (optional) and fill_color. fill_color is RGB ({red, green, blue}, optionally model "rgb"), CMYK ({model "cmyk", cyan, magenta, yellow, black}) or Gray ({model "gray", gray}). RGB is accepted only in an RGB document and CMYK only in a CMYK document (Gray in either); a mismatch is refused, never converted. Other character, paragraph and frame properties follow a fixed profile, not inherited. Apply revalidates the exact layer order in the same host call, verifies the created item by native UUID, and rolls back only its own item. A layer that holds 128 or more direct items is blocked (layer_item_capacity_exceeded); that plan lists only the first 128 item UUIDs, whatever the layer holds. The returned native UUID identifies the item until the document is next saved, because Illustrator renumbers UUIDs on save.',
     inputSchema,
     publicInputSchema: createPointTextPublicInputSchema,
     outputSchema: createPointTextResponseSchema,

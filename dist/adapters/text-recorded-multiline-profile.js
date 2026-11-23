@@ -1,11 +1,12 @@
 import { TEXT_RESULT_SIZE_SCRIPT } from './text-result-size.js';
 import { z } from 'zod';
 import { canonicalSha256 } from '../mutation-canonical.js';
-import { POINT_TEXT_MAX_CODE_UNITS, pointTextCharacterSchema, pointTextFrameSchema, pointTextRangeGroupSnapshotSchema } from './point-text-host-script.js';
+import { POINT_TEXT_MAX_CODE_UNITS, POINT_TEXT_PROFILES, pointTextCharacterSchema, pointTextFrameSchema, pointTextRangeGroupSnapshotSchema } from './point-text-host-script.js';
 import { POINT_TEXT_MULTILINE_MAX_PARAGRAPHS, splitBreakUnits, pointTextMultilineRangeGroupSnapshotSchema, pointTextParagraphBreakSchema } from './point-text-multiline.js';
 import { attributeRecordSchema, RECORDED_ADMITTED_STYLE_FIELDS, RECORDED_JUSTIFICATIONS, recordedStrokeSchema } from './text-recorded-profile.js';
 import { pointTextAlignedCharacterSchema, setTextStyleSnapshotSchema } from './text-alignment-profile.js';
 import { validateClusterRange } from './point-text-cluster.js';
+import { GuidedRefusalError } from '../blocked-guidance.js';
 export const RECORDED_MULTILINE_PROFILE = 'recorded_multiline_point_text_v1';
 export const pointTextLineBreakSchema = z.strictObject({ contents: z.literal('\u0003'), kind: z.literal('line_break') });
 export function isBreakEntry(entry) {
@@ -16,8 +17,11 @@ export { splitBreakUnits } from './point-text-multiline.js';
 export const recordedBreakReplacementSchema = z.string().max(POINT_TEXT_MAX_CODE_UNITS).regex(/^(?:[^\r\n\u0003]*|\r|\u0003)$/u);
 const contentsSchema = z.string().min(1).max(POINT_TEXT_MAX_CODE_UNITS).regex(/^[^\n]+$/u);
 const recordedCharacterSchema = pointTextCharacterSchema.extend({ autoLeading: z.boolean().optional(), strokeColor: recordedStrokeSchema });
+export const recordedStyleDelimiterSchema = pointTextAlignedCharacterSchema.extend({
+    contents: z.enum(['\r', '\u0003']), kind: z.enum(['paragraph_break', 'line_break']), autoLeading: z.boolean(),
+});
 const sharedShape = {
-    profile: z.enum(['plain_point_text_v2', 'recorded_point_text_v3', RECORDED_MULTILINE_PROFILE]),
+    profile: z.enum([...POINT_TEXT_PROFILES, 'recorded_point_text_v3', RECORDED_MULTILINE_PROFILE]),
     contents: contentsSchema,
     manualKerning: z.enum(['none', 'present']), tabStopCount: z.number().int().nonnegative(),
     justification: z.enum(RECORDED_JUSTIFICATIONS),
@@ -25,10 +29,30 @@ const sharedShape = {
     attributeRecord: attributeRecordSchema.optional(),
     layoutBounds: z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]).nullable().optional(),
 };
-function refineRecordedBreakSnapshot(snapshot, context) {
+export const EMPTY_PARAGRAPH_REFUSAL_CODE = 'EMPTY_PARAGRAPH_REFUSED';
+export const EMPTY_PARAGRAPH_REFUSAL_REASON = 'empty_paragraph_structure_unsupported';
+export function emptyParagraphRefusal(detail) {
+    if (detail?.code !== EMPTY_PARAGRAPH_REFUSAL_CODE)
+        return null;
+    return new GuidedRefusalError(detail.reason ?? EMPTY_PARAGRAPH_REFUSAL_REASON, detail.message ?? 'The frame holds an empty host paragraph item outside the measured set.');
+}
+export function emptyUnitsOf(contents) {
+    const units = splitBreakUnits(contents);
+    return units.flatMap((unit, index) => (unit.start === unit.end ? [{ index, offset: unit.start, form: (index === units.length - 1 ? 'item_unreadable' : 'attrs_unreadable') }] : []));
+}
+export const hasAdjacentEmptyUnits = (contents) => emptyUnitsOf(contents).some((empty, at, all) => at > 0 && all[at - 1].index === empty.index - 1);
+export function emptyStructureDetail(empties) {
+    return 'the frame holds empty host paragraph items: ' + empties.map(empty => `unit ${empty.index} at offset ${empty.offset} (${empty.form}, Error ${empty.form === 'item_unreadable' ? 1302 : 1220})`).join('; ')
+        + '. The cause is the frame structure, not the requested range. Supported: ordinary characters inside one non-empty unit, no CR or U+0003 in the range or the replacement, no two adjacent empty items; edit anything else with your own script outside this server.';
+}
+const emptyMask = (contents) => splitBreakUnits(contents).map(unit => (unit.start === unit.end ? '1' : '0')).join('');
+function refineRecordedBreakSnapshot(snapshot, context, style = false) {
     const units = splitBreakUnits(snapshot.contents);
-    if (units.length > POINT_TEXT_MULTILINE_MAX_PARAGRAPHS || units.some(unit => unit.start === unit.end)) {
-        context.addIssue({ code: 'custom', message: 'Recorded multiline text needs 1 to 32 non-empty host paragraph items.' });
+    if (units.length > POINT_TEXT_MULTILINE_MAX_PARAGRAPHS) {
+        context.addIssue({ code: 'custom', message: 'Recorded multiline text needs 1 to 32 host paragraph items.' });
+    }
+    if (hasAdjacentEmptyUnits(snapshot.contents) || units.every(unit => unit.start === unit.end)) {
+        context.addIssue({ code: 'custom', message: 'Recorded multiline text admits an empty host paragraph item only between, before or after ordinary items, never two next to each other.' });
     }
     if (snapshot.attributeRecord === undefined || snapshot.layoutBounds === undefined || snapshot.paragraphLeading !== undefined) {
         context.addIssue({ code: 'custom', message: 'Recorded multiline text records the attribute tables and bounds, without paragraph_style.' });
@@ -37,17 +61,22 @@ function refineRecordedBreakSnapshot(snapshot, context) {
         context.addIssue({ code: 'custom', message: 'A snapshot needs one entry per UTF-16 unit.' });
         return;
     }
+    const ordinary = snapshot.characters.filter(entry => style || !isBreakEntry(entry));
+    const tsumeRecorded = ordinary.filter(entry => entry.tsume !== undefined).length;
+    if (tsumeRecorded !== 0 && tsumeRecorded !== ordinary.length) {
+        context.addIssue({ code: 'custom', message: style ? 'Tsume is recorded for every style snapshot unit, including delimiters, or for none.' : 'Tsume is recorded for every ordinary character of a recorded snapshot or for none.' });
+    }
     for (let index = 0; index < snapshot.contents.length; index += 1) {
         const entry = snapshot.characters[index], value = snapshot.contents.charAt(index);
         const kind = value === '\r' ? 'paragraph_break' : value === '\u0003' ? 'line_break' : undefined;
-        if (entry.contents !== value || entry.kind !== kind || (kind === undefined && (entry.autoLeading === undefined || entry.alignment !== undefined))) {
-            context.addIssue({ code: 'custom', message: 'CR and U+0003 need distinct sentinels; every ordinary character records auto leading and its exact unit.' });
+        if (entry.contents !== value || entry.kind !== kind || ((style || kind === undefined) && (entry.autoLeading === undefined || entry.alignment !== undefined))) {
+            context.addIssue({ code: 'custom', message: style ? 'CR and U+0003 need distinct kinds and actual attributes; every unit records auto leading.' : 'CR and U+0003 need distinct sentinels; every ordinary character records auto leading and its exact unit.' });
             return;
         }
     }
 }
 export const rangeEditSnapshotSchema = z.strictObject({ ...pointTextRangeGroupSnapshotSchema.shape, ...sharedShape,
-    profile: z.enum(['plain_point_text_v2', RECORDED_MULTILINE_PROFILE]),
+    profile: z.enum([...POINT_TEXT_PROFILES, RECORDED_MULTILINE_PROFILE]),
     characters: z.array(z.union([recordedCharacterSchema, pointTextParagraphBreakSchema, pointTextLineBreakSchema])).min(1).max(POINT_TEXT_MAX_CODE_UNITS),
 }).superRefine((snapshot, context) => {
     if (snapshot.profile === RECORDED_MULTILINE_PROFILE)
@@ -59,11 +88,23 @@ export const rangeEditSnapshotSchema = z.strictObject({ ...pointTextRangeGroupSn
                 context.addIssue({ code: 'custom', path: issue.path, message: issue.message });
     }
 });
-export const multilineStyleSnapshotSchema = z.strictObject({ ...setTextStyleSnapshotSchema.shape, ...sharedShape,
+export const batchStylePlanSnapshotSchema = z.strictObject({ ...setTextStyleSnapshotSchema.shape, ...sharedShape,
     characters: z.array(z.union([pointTextAlignedCharacterSchema, pointTextParagraphBreakSchema, pointTextLineBreakSchema])).min(1).max(POINT_TEXT_MAX_CODE_UNITS),
 }).superRefine((snapshot, context) => {
     if (snapshot.profile === RECORDED_MULTILINE_PROFILE)
         refineRecordedBreakSnapshot(snapshot, context);
+    else {
+        const old = setTextStyleSnapshotSchema.safeParse(snapshot);
+        if (!old.success)
+            for (const issue of old.error.issues)
+                context.addIssue({ code: 'custom', path: issue.path, message: issue.message });
+    }
+});
+export const multilineStyleSnapshotSchema = z.strictObject({ ...batchStylePlanSnapshotSchema.shape,
+    characters: z.array(z.union([pointTextAlignedCharacterSchema, recordedStyleDelimiterSchema, pointTextParagraphBreakSchema, pointTextLineBreakSchema])).min(1).max(POINT_TEXT_MAX_CODE_UNITS),
+}).superRefine((snapshot, context) => {
+    if (snapshot.profile === RECORDED_MULTILINE_PROFILE)
+        refineRecordedBreakSnapshot(snapshot, context, true);
     else {
         const old = setTextStyleSnapshotSchema.safeParse(snapshot);
         if (!old.success)
@@ -79,15 +120,19 @@ export function checkBreakRange(contents, start, end) {
     }
     return breaks.length ? { reason: 'range_crosses_paragraph', breaks } : null;
 }
-export function checkRecordedMultilineReplacement(before, start, end, replacement) {
-    if (!hasBreakUnits(before.contents) && !hasBreakUnits(replacement))
+export function checkRecordedMultilineReplacement(before, start, end, replacement, recorded = false) {
+    if (!recorded && !hasBreakUnits(before.contents) && !hasBreakUnits(replacement))
         return null;
     const crossing = checkBreakRange(before.contents, start, end);
     if (crossing)
         return crossing;
+    const empties = emptyUnitsOf(before.contents);
+    const structure = empties.length > 0 ? { emptyUnits: empties, detail: emptyStructureDetail(empties) } : {};
     if (hasBreakUnits(replacement)) {
         if (replacement !== '\r' && replacement !== '\u0003' || end - start !== 1)
             return { reason: 'paragraph_split_unsupported' };
+        if (empties.length > 0)
+            return { reason: 'paragraph_split_unsupported', ...structure };
         if (start === 0 || end >= before.contents.length || hasBreakUnits(before.contents[start - 1] + before.contents[end]))
             return { reason: 'paragraph_edge_unsupported' };
     }
@@ -104,8 +149,9 @@ export function checkRecordedMultilineReplacement(before, start, end, replacemen
     const units = splitBreakUnits(before.contents.slice(0, start) + replacement + before.contents.slice(end));
     if (units.length > POINT_TEXT_MULTILINE_MAX_PARAGRAPHS)
         return { reason: 'too_many_paragraphs' };
-    if (units.some(unit => unit.start === unit.end))
-        return { reason: 'paragraph_edge_unsupported' };
+    const afterMask = emptyMask(before.contents.slice(0, start) + replacement + before.contents.slice(end));
+    if (empties.length > 0 ? afterMask !== emptyMask(before.contents) : afterMask.includes('1'))
+        return { reason: 'paragraph_edge_unsupported', ...structure };
     return null;
 }
 export function checkRecordedMultilineStyle(before, start, end, style) {
@@ -122,15 +168,52 @@ function recordedMultilineSelected(target) {
 function recordedMultilineStyleSelected(target) {
   return params.paragraphStyle === undefined && params.style && params.style.alignment === undefined && recordedMultilineHasBreak(String(target.contents));
 }
+/* #935: an empty item is a unit of its own ({empty:true}); only two adjacent empty items are refused here. Which empty items a frame holds is part of every message.
+   A refusal the frame's structure causes is thrown as {code, reason, message} so the adapter answers it with its code and next steps (a capability: a client's own script may go on). */
+function recordedMultilineStructureRefusal(message) {
+  throw mutationError("preflight_failed", stringifyJson({ code: ${JSON.stringify(EMPTY_PARAGRAPH_REFUSAL_CODE)}, reason: ${JSON.stringify(EMPTY_PARAGRAPH_REFUSAL_REASON)}, message: message }));
+}
+function recordedMultilineEmptyDetail(units) {
+  var parts = [], index;
+  for (index = 0; index < units.length; index++) if (units[index].empty) parts.push("unit " + index + " at offset " + units[index].start + (index === units.length - 1 ? " (item_unreadable, Error 1302)" : " (attrs_unreadable, Error 1220)"));
+  return (parts.length ? "the frame holds empty host paragraph items: " + parts.join("; ") : "the frame holds no empty host paragraph item") +
+    ". The cause is the frame structure, not the requested range. Supported: ordinary characters inside one non-empty unit, no CR or U+0003 in the range or the replacement, no two adjacent empty items; edit anything else with your own script outside this server.";
+}
 function recordedMultilineUnits(text) {
   var units = [], start = 0, index;
   for (index = 0; index <= text.length; index++) {
     if (index !== text.length && text.charAt(index) !== "\r" && text.charAt(index) !== "\x03") continue;
-    if (start === index) throw mutationError("preflight_failed", "paragraph_edge_unsupported: empty host paragraph item at " + index + ".");
-    units.push({ start: start, end: index }); start = index + 1;
+    units.push({ start: start, end: index, empty: start === index }); start = index + 1;
   }
   if (units.length > POINT_TEXT_MULTILINE_MAX_PARAGRAPHS) throw mutationError("preflight_failed", "too_many_paragraphs: at most 32 host paragraph items.");
+  for (index = 1; index < units.length; index++) {
+    if (units[index].empty && units[index - 1].empty) recordedMultilineStructureRefusal("paragraph_edge_unsupported: empty host paragraph items " + (index - 1) + " and " + index + " (offsets " + units[index - 1].start + " and " + units[index].start + ") are adjacent; " + recordedMultilineEmptyDetail(units));
+  }
   return units;
+}
+/* The measured forms of an empty item (#935 F0, 30.8.2) and nothing else: the last item cannot be taken (Error 1302); any other reads start === end with every attribute throwing 1220. */
+function recordedMultilineErrorNumber(error) { return error && typeof error.number === "number" ? error.number : "x"; }
+function recordedMultilineEmptyRow(paragraphs, units, index) {
+  var last = index === units.length - 1, item = null, attributes, number, names = STYLE_V3_PARA_NAMES.concat(["justification"]), k, read;
+  var refuse = function (what) { recordedMultilineStructureRefusal("paragraph_edge_unsupported: empty host paragraph item " + index + " at offset " + units[index].start + " " + what + "; only the measured forms are admitted. " + recordedMultilineEmptyDetail(units)); };
+  try { item = paragraphs[index]; }
+  catch (itemError) {
+    number = recordedMultilineErrorNumber(itemError);
+    if (last && number === 1302) return ["empty", "item_unreadable", "1302"];
+    refuse("cannot be taken (error " + number + ")");
+  }
+  if (last) refuse("is readable, but the trailing empty item is measured as unreadable (Error 1302)");
+  if (item.start !== units[index].start || item.end !== units[index].end) refuse("reads offsets " + item.start + "-" + item.end);
+  try { attributes = item.paragraphAttributes; } catch (attributesError) { refuse("has no attribute object (error " + recordedMultilineErrorNumber(attributesError) + ")"); }
+  for (k = 0; k < names.length; k++) {
+    try { read = attributes[names[k]]; refuse("reads " + names[k] + " without an error"); }
+    catch (readError) {
+      if (readError && readError.mutationReasonCode) throw readError;
+      number = recordedMultilineErrorNumber(readError);
+      if (number !== 1220) refuse("reads " + names[k] + " with error " + number + " (only 1220 is measured)");
+    }
+  }
+  return ["empty", "attrs_unreadable", "1220"];
 }
 function recordedMultilineFingerprintText(rows, paragraphs, frame) {
   var text = styleV3FingerprintText(rows, [], frame), joined = [], index;
@@ -163,6 +246,7 @@ function recordedMultilineSnapshot(document, target, expectedUuid) {
     read.entry.contents = value; entries.push(read.entry); rows.push(read.row); if (read.manual) manual = true;
   }
   for (index = 0; index < units.length; index++) {
+    if (units[index].empty) { paraRows.push(recordedMultilineEmptyRow(paragraphs, units, index)); continue; }
     paragraph = paragraphs[index];
     if (paragraph.start !== units[index].start || paragraph.end !== units[index].end) throw mutationError("preflight_failed", "Host paragraph offsets differ from CR/U+0003 positions.");
     read = styleV3Paragraph(paragraph); paraRows.push(read.row); tabs += read.tabStopCount; if (justification === null) justification = read.justification;
@@ -183,8 +267,11 @@ function recordedMultilineAssertRange(before, start, end) {
 }
 function recordedMultilineAssertEdit(before, start, end, replacement) {
   recordedMultilineAssertRange(before, start, end);
+  var beforeUnits = recordedMultilineUnits(before.contents), hasEmpty = false, at;
+  for (at = 0; at < beforeUnits.length; at++) if (beforeUnits[at].empty) hasEmpty = true;
   if (recordedMultilineHasBreak(replacement)) {
     if ((replacement !== "\r" && replacement !== "\x03") || end - start !== 1) throw mutationError("preflight_failed", "paragraph_split_unsupported: replace exactly one ordinary unit with one CR or U+0003.");
+    if (hasEmpty) recordedMultilineStructureRefusal("paragraph_split_unsupported: a split next to an empty host paragraph item is unmeasured; " + recordedMultilineEmptyDetail(beforeUnits));
     if (start === 0 || end >= before.contents.length || recordedMultilineHasBreak(before.contents.charAt(start - 1) + before.contents.charAt(end))) throw mutationError("preflight_failed", "paragraph_edge_unsupported: a split needs ordinary text on both sides.");
   }
   var tables = RECORDED_MULTILINE_TABLES.before[before.uuid], first = tables.rows[start].join("\u0001"), index;
@@ -194,7 +281,16 @@ function recordedMultilineAssertEdit(before, start, end, replacement) {
     if (start === 0 || recordedMultilineHasBreak(before.contents.charAt(start - 1)) ||
         rangeStyleKey(before.characters[start - 1]) !== rangeStyleKey(before.characters[start]) || tables.rows[start - 1].join("\u0001") !== first) throw mutationError("preflight_failed", "paragraph_edge_unsupported: deletion needs an unchanged same-style left neighbour.");
   }
-  recordedMultilineUnits(before.contents.substring(0, start) + replacement + before.contents.substring(end));
+  // The empty items stay where they are: an edit may neither empty an item nor fill one.
+  var afterUnits = recordedMultilineUnits(before.contents.substring(0, start) + replacement + before.contents.substring(end));
+  for (at = 0; at < afterUnits.length; at++) {
+    // A split (a frame without empty items) adds an item; every other edit keeps the item count and the empty positions.
+    if (hasEmpty ? afterUnits.length !== beforeUnits.length || afterUnits[at].empty !== beforeUnits[at].empty : afterUnits[at].empty) {
+      var emptied = "paragraph_edge_unsupported: the edit would " + (afterUnits[at] && afterUnits[at].empty ? "empty" : "fill") + " host paragraph item " + at + "; " + recordedMultilineEmptyDetail(beforeUnits);
+      if (hasEmpty) recordedMultilineStructureRefusal(emptied);
+      throw mutationError("preflight_failed", emptied);
+    }
+  }
 }
 function recordedMultilinePredictRange(before) {
   var tables = RECORDED_MULTILINE_TABLES.before[before.uuid], after = styleV3Copy(before), rows = [], entries = [], index, next, value;
@@ -213,7 +309,7 @@ function recordedMultilinePredictRange(before) {
 }
 function recordedMultilineAssertStyle(before, start, end, style) {
   recordedMultilineAssertRange(before, start, end);
-  for (var key in style) if (style.hasOwnProperty(key) && style[key] !== undefined && !styleV3Admitted(key)) throw mutationError("preflight_failed", "multiline_style_unsupported: " + key + " is outside the measured six character fields.");
+  for (var key in style) if (style.hasOwnProperty(key) && style[key] !== undefined && !styleV3Admitted(key)) throw mutationError("preflight_failed", "multiline_style_unsupported: " + key + " is outside the measured character fields.");
 }
 function recordedMultilinePredictStyle(target, before) {
   var units = recordedMultilineUnits(before.contents), amount = 0, index;
@@ -226,6 +322,7 @@ function recordedMultilinePredictStyle(target, before) {
     if (params.style.tracking !== undefined) next.tracking = params.style.tracking;
     if (params.style.horizontalScale !== undefined) next.horizontalScale = params.style.horizontalScale;
     if (params.style.verticalScale !== undefined) next.verticalScale = params.style.verticalScale;
+    if (params.style.tsume !== undefined) next.tsume = params.style.tsume;
     if (params.style.fillColor !== undefined) next.fillColor = params.style.fillColor;
     if (params.style.fontPostScriptName !== undefined) { var font = styleFont(); next.font = { postScriptName: font.name, family: font.family, style: font.style }; }
     characters.push(next);
@@ -239,6 +336,7 @@ function recordedMultilineRestoreStyle(target, before) {
     if (params.style.tracking !== undefined) attributes.tracking = source.tracking;
     if (params.style.horizontalScale !== undefined) attributes.horizontalScale = source.horizontalScale;
     if (params.style.verticalScale !== undefined) attributes.verticalScale = source.verticalScale;
+    if (params.style.tsume !== undefined) attributes.Tsume = source.tsume;
     if (params.style.fillColor !== undefined) attributes.fillColor = pointTextNativeFillColor(source.fillColor);
     if (params.style.fontPostScriptName !== undefined) attributes.textFont = app.textFonts.getByName(source.font.postScriptName);
   }

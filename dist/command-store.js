@@ -3,9 +3,12 @@ import { lstat, mkdir, readdir, rename, rmdir, stat, statfs, unlink } from 'node
 import { homedir } from 'node:os';
 import { realpathSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
+import { LockObservationBudget, LockObservationBudgetExhaustedError } from './lock-observation-budget.js';
+import { QuotaScanCache } from './quota-scan-cache.js';
 import { CANONICAL_COMMAND_ID_MESSAGE, isCanonicalCommandId } from './command-id.js';
-import { CommandQuarantinedError, CommandReleasedUnverifiedError } from './domain.js';
+import { PRE_CREATE_LOCK_FAMILIES, } from './pre-create-lock-types.js';
+import { CommandQuarantinedError, CommandReleasedAsOrphanError, CommandReleasedUnverifiedError } from './domain.js';
+import { pathContainsPercentEscape } from './file-path.js';
 import { describeStateEntry, ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath, isWindowsPrivateState, privateOwnerModeViolation, unsafeStateEntriesError, validatePrivateDirectory, validatePrivateStateRoot, withPrivateDirectoryScope, } from './private-state.js';
 import { PRIVATE_RECORD_LIMITS, atomicCreatePrivateRecord, atomicCreatePrivateRecords, atomicReplacePrivateRecord, createEmptyPrivateStagingRecords, readSecurePrivateRecord, unlinkPrivateRecord, unlinkPrivateRecords, } from './private-record.js';
 import { rectangleResultSchema as legacyRectangleResultSchema } from './legacy-rectangle-result-v1.js';
@@ -30,8 +33,6 @@ const COMMAND_FILE_KEYS = [
     'idempotencyPath',
 ];
 export const MUTATION_DURABLE_STATE_VERSION = 2;
-const ACTIVE_LOCK_PUBLICATION_SETTLE_TIMEOUT_MS = 250;
-const ACTIVE_LOCK_PUBLICATION_RETRY_INTERVAL_MS = 10;
 const RELEASE_REASON_CODES = new Set([
     'adapter_unresolved', 'result_missing', 'host_indeterminate', 'host_failed_unproven', 'result_unverifiable',
 ]);
@@ -43,10 +44,32 @@ export const DEFAULT_MUTATION_STATE_QUOTA = {
     maxTotalBytes: 134_217_728,
     reservationBytes: 1_048_576,
 };
+export const ORPHAN_PRECREATE_MARKER_NAME = 'orphan-precreate-release.json';
+export { PRE_CREATE_LOCK_FAMILIES } from './pre-create-lock-types.js';
+const RELEASE_CLAIM_WAIT_MS = 250;
+const heldReleaseClaims = new Set();
+const RELEASE_CLAIM_NONCE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const COMMAND_CREATED_NOT_STARTED_MESSAGE = 'Command created but not started.';
+export const AUTO_RELEASE_STATUS_PREFIX = 'Command was released automatically by a later call:';
+export const AUTO_RELEASE_RECORD_NAME = 'auto-release.json';
+export class LockReleaseInProgressError extends Error {
+    commandId;
+    claimPath;
+    constructor(commandId, claimPath) {
+        super(`The Illustrator lock of command ${commandId} is being released by another call (${basename(claimPath)}). ` +
+            'The lock is kept and nothing was lost: wait a moment and retry the same action (for example illustrator_reconcile with action=abandon). ' +
+            `If it keeps failing and no illustrator-studio-mcp process is running, remove the files named active-command.lock.release-${commandId}* from the state root and retry.`);
+        this.commandId = commandId;
+        this.claimPath = claimPath;
+        this.name = 'LockReleaseInProgressError';
+    }
+}
 export class CommandLockedError extends Error {
     commandId;
-    constructor(commandId) {
-        super(`Illustrator is reserved by command ${commandId}. If that command is still running (a call from another ` +
+    constructor(commandId, diagnosis) {
+        super(`Illustrator is reserved by command ${commandId}${diagnosis === undefined ? '' : ` (${diagnosis.summary})`}. ` +
+            `${diagnosis === undefined ? '' : `${diagnosis.nextSteps} `}` +
+            'If that command is still running (a call from another ' +
             'server process; calls from this server wait their turn), wait for it to finish and retry. If it timed out or ' +
             'was interrupted, reconcile it with illustrator_reconcile before continuing; when reconcile reports ' +
             'canReleaseUnverified, check the document in Illustrator first and then use action=release_unverified.');
@@ -75,6 +98,12 @@ function defaultProcessAlive(pid) {
     }
 }
 export function defaultStateRoot() {
+    const root = resolveStateRoot();
+    if (pathContainsPercentEscape(root))
+        throw new Error(`The state root contains a '%' escape ('%' and two hex digits), which ExtendScript would decode (#848): ${root}. Use ILLUSTRATOR_STUDIO_MCP_STATE_DIR with a path that has none.`);
+    return root;
+}
+function resolveStateRoot() {
     if (process.env.ILLUSTRATOR_STUDIO_MCP_STATE_DIR !== undefined)
         return process.env.ILLUSTRATOR_STUDIO_MCP_STATE_DIR;
     if (process.platform === 'win32') {
@@ -224,6 +253,11 @@ export class FileCommandStore {
     availableBytes;
     registry;
     quarantinesInFlight = new Set();
+    capacityScanCache;
+    releaseBoundary;
+    releaseClaimWaitMs;
+    lockObservation;
+    fenceBoundary;
     constructor(root = defaultStateRoot(), options = {}) {
         this.root = root;
         this.lockPath = join(root, 'active-command.lock');
@@ -232,7 +266,12 @@ export class FileCommandStore {
             const filesystem = await statfs(path, { bigint: true });
             return filesystem.bavail * filesystem.bsize;
         });
+        this.capacityScanCache = new QuotaScanCache(options.capacityScanClock);
         this.registry = options.registry ?? defaultMutationOperationRegistry();
+        this.releaseBoundary = options.releaseBoundary;
+        this.releaseClaimWaitMs = options.releaseClaimWaitMs ?? RELEASE_CLAIM_WAIT_MS;
+        this.lockObservation = options.lockObservation;
+        this.fenceBoundary = options.fenceBoundary;
         if (!this.registry.isSealed())
             throw new Error('FileCommandStore requires a sealed mutation adapter registry.');
     }
@@ -269,7 +308,15 @@ export class FileCommandStore {
         const directory = files.directory;
         await this.withCommandsScope(async (scope) => {
             await scope.assertStable();
-            await mkdir(directory, { mode: 0o700 });
+            try {
+                await mkdir(directory, { mode: 0o700 });
+            }
+            catch (error) {
+                if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST' && await this.hasOrphanFence(commandId)) {
+                    throw new CommandReleasedAsOrphanError(commandId);
+                }
+                throw error;
+            }
             await scope.assertStable();
             await scope.syncLeafParent();
         });
@@ -286,7 +333,7 @@ export class FileCommandStore {
                 requestDigest: idempotency.requestDigest,
             }),
         }), { scope }));
-        await this.writeStatus(files, { commandId, state: 'unknown', message: 'Command created but not started.' });
+        await this.writeStatus(files, { commandId, state: 'unknown', message: COMMAND_CREATED_NOT_STARTED_MESSAGE });
         return files;
     }
     async acquire(commandId) {
@@ -302,9 +349,158 @@ export class FileCommandStore {
             throw error;
         }
     }
-    async release(commandId) {
+    orphanMarkerPath(commandId) {
+        return join(this.files(commandId).directory, ORPHAN_PRECREATE_MARKER_NAME);
+    }
+    async hasOrphanFence(commandId) {
+        try {
+            const entry = await lstat(this.orphanMarkerPath(commandId));
+            return entry.isFile() && !entry.isSymbolicLink();
+        }
+        catch (error) {
+            if (isMissingPath(error) || (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOTDIR'))
+                return false;
+            throw error;
+        }
+    }
+    async inspectFenceDirectory(commandId) {
+        const files = this.files(commandId);
+        const entry = await lstat(files.directory).catch((error) => {
+            if (isMissingPath(error))
+                return null;
+            throw error;
+        });
+        if (entry === null)
+            return { state: 'absent' };
+        if (!entry.isDirectory() || entry.isSymbolicLink()) {
+            return { state: 'other', reason: 'command_directory_present', message: `${files.directory} exists and is not a command directory.` };
+        }
+        return await this.withCommandScope(commandId, async (scope) => {
+            const names = await readdir(files.directory);
+            const twin = new RegExp(`^${ORPHAN_PRECREATE_MARKER_NAME.replaceAll('.', '\\.')}\\.[0-9a-f-]{36}\\.tmp$`, 'u');
+            const unexpected = names.filter((name) => name !== ORPHAN_PRECREATE_MARKER_NAME && !twin.test(name));
+            if (unexpected.length > 0) {
+                return { state: 'other', reason: 'command_directory_present', message: `The command directory of ${commandId} exists and holds entries (${unexpected.length}); the command protocol started.` };
+            }
+            if (!names.includes(ORPHAN_PRECREATE_MARKER_NAME)) {
+                return { state: 'other', reason: 'fence_incomplete', message: `The command directory of ${commandId} exists and is empty: it cannot be told from a directory a stopped server made, so the lock is kept.` };
+            }
+            const record = await readSecurePrivateRecord(join(files.directory, ORPHAN_PRECREATE_MARKER_NAME), PRIVATE_RECORD_LIMITS.metadata, { scope, maxLinkCount: 2 });
+            await scope.assertStable();
+            if (record.state !== 'valid') {
+                return { state: 'other', reason: 'fence_incomplete', message: `The fence marker of ${commandId} is not readable; the lock is kept.` };
+            }
+            let value;
+            try {
+                value = JSON.parse(record.text);
+            }
+            catch {
+                return { state: 'other', reason: 'fence_incomplete', message: `The fence marker of ${commandId} is not JSON; the lock is kept.` };
+            }
+            if (Object.keys(value).sort().join(',') !== 'commandId,family,kind,nonce,pid,releasedAt,sessionDigest,sessionId,version' ||
+                value.version !== 1 || value.kind !== 'orphan_precreate_release' || value.commandId !== commandId ||
+                !PRE_CREATE_LOCK_FAMILIES.includes(value.family) || typeof value.sessionId !== 'string' ||
+                typeof value.sessionDigest !== 'string' || !/^[0-9a-f]{64}$/.test(value.sessionDigest) ||
+                typeof value.nonce !== 'string' || !RELEASE_CLAIM_NONCE.test(value.nonce) || !Number.isInteger(value.pid) ||
+                !hasCanonicalTimestamp(value.releasedAt)) {
+                return { state: 'other', reason: 'fence_incomplete', message: `The fence marker of ${commandId} has an unknown shape; the lock is kept.` };
+            }
+            return { state: 'fence', marker: value };
+        });
+    }
+    async releaseProvenPreCreateLock(commandId, evidence) {
+        const files = this.files(commandId);
+        const refuse = (reason, message) => ({ state: 'refused', reason, message });
+        if (isWindowsPrivateState())
+            return refuse('unsupported_platform', 'Releasing a lock that never reached its command directory is defined for POSIX only.');
+        if (evidence.kind !== 'external_session_open_pending' || !PRE_CREATE_LOCK_FAMILIES.includes(evidence.family) ||
+            evidence.boundCommandId !== commandId || !/^[0-9a-f]{64}$/.test(evidence.sessionDigest) ||
+            !/^\d+$/.test(evidence.sessionIdentity.dev) || !/^\d+$/.test(evidence.sessionIdentity.ino) ||
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(evidence.sessionId)) {
+            return refuse('invalid_evidence', 'The lease evidence is not an exact binding to this lock owner.');
+        }
+        if (await this.readLockOwner(this.createLockObservationBudget(), 'eligibility_owner') !== commandId) {
+            return refuse('not_lock_owner', `Command ${commandId} does not hold the active lock.`);
+        }
+        if (await this.isQuarantined(commandId) || await this.findQuarantineOperation(commandId) !== null) {
+            return refuse('quarantined', `Command ${commandId} is quarantined or the lock belongs to a quarantine.`);
+        }
+        if ((await this.inspectCompactIdempotency(commandId)).state !== 'missing') {
+            return refuse('compact_record', `Command ${commandId} has a compact idempotency record.`);
+        }
+        const leaseUnchanged = async () => {
+            const current = await evidence.reread();
+            if (current === 'gone')
+                return refuse('evidence_gone', `The lease ${evidence.sessionId} is gone.`);
+            if (current === 'ambiguous')
+                return refuse('evidence_ambiguous', `More than one lease names ${commandId} as its open command.`);
+            if (current.boundCommandId !== commandId || current.sessionDigest !== evidence.sessionDigest ||
+                current.sessionIdentity.dev !== evidence.sessionIdentity.dev || current.sessionIdentity.ino !== evidence.sessionIdentity.ino) {
+                return refuse('evidence_changed', `The lease ${evidence.sessionId} changed since it was read.`);
+            }
+            return null;
+        };
+        const directory = await this.inspectFenceDirectory(commandId);
+        let fence;
+        if (directory.state === 'other')
+            return refuse(directory.reason, directory.message);
+        if (directory.state === 'fence') {
+            if (directory.marker.family !== evidence.family || directory.marker.sessionId !== evidence.sessionId ||
+                directory.marker.sessionDigest !== evidence.sessionDigest) {
+                return refuse('fence_mismatch', `The fence marker of ${commandId} names another lease; the lock is kept.`);
+            }
+            const unchanged = await leaseUnchanged();
+            if (unchanged !== null)
+                return unchanged;
+            fence = 'resumed';
+        }
+        else {
+            const unchanged = await leaseUnchanged();
+            if (unchanged !== null)
+                return unchanged;
+            const made = await this.withCommandsScope(async (scope) => {
+                await scope.assertStable();
+                try {
+                    await mkdir(files.directory, { mode: 0o700 });
+                }
+                catch (error) {
+                    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST')
+                        return false;
+                    throw error;
+                }
+                await scope.assertStable();
+                await scope.syncLeafParent();
+                return true;
+            });
+            if (!made)
+                return refuse('command_directory_appeared', `The command directory of ${commandId} appeared while it was checked; the command protocol started.`);
+            await this.fenceBoundary?.('after_mkdir');
+            const marker = {
+                version: 1, kind: 'orphan_precreate_release', commandId, family: evidence.family, sessionId: evidence.sessionId,
+                sessionDigest: evidence.sessionDigest, releasedAt: new Date().toISOString(), pid: process.pid, nonce: randomUUID(),
+            };
+            await this.withCommandScope(commandId, async (scope) => atomicCreatePrivateRecord(this.orphanMarkerPath(commandId), JSON.stringify(marker), { scope }));
+            await this.fenceBoundary?.('after_marker');
+            fence = 'created';
+        }
+        const stillBound = await leaseUnchanged();
+        if (stillBound !== null)
+            return stillBound;
+        await this.fenceBoundary?.('before_release');
+        if (await this.readLockOwner(this.createLockObservationBudget(), 'pre_release_owner') === commandId) {
+            await this.release(commandId);
+            if (await this.readLockOwner(this.createLockObservationBudget(), 'completion_owner') === commandId) {
+                throw new Error(`The lock of ${commandId} could not be verified as released after its fence.`);
+            }
+        }
+        return { state: 'released', fence };
+    }
+    createLockObservationBudget() {
+        return new LockObservationBudget(this.releaseClaimWaitMs, this.lockObservation);
+    }
+    async release(commandId, budget = this.createLockObservationBudget()) {
         this.files(commandId);
-        if (await this.readLockOwner() !== commandId)
+        if (await this.readLockOwner(budget) !== commandId)
             return;
         const compact = await this.inspectCompactIdempotency(commandId);
         if (compact.state === 'valid') {
@@ -314,7 +510,7 @@ export class FileCommandStore {
                     break;
                 case 'released_unverified':
                     await this.assertReleasedUnverifiedBinding(compact.value);
-                    if ('executionProcessId' in compact.value.evidence && await this.readLockOwner() !== commandId)
+                    if ('executionProcessId' in compact.value.evidence && await this.readLockOwner(budget, 'released_owner') !== commandId)
                         return;
                     break;
                 case 'replay_bundle':
@@ -323,31 +519,166 @@ export class FileCommandStore {
                     assertNeverTerminalKind(compact.value);
             }
         }
-        await this.withRootScope(async (scope) => unlinkPrivateRecord(this.lockPath, { scope })).catch((error) => {
-            if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'))
-                throw error;
-        });
+        await this.releaseBoundary?.('before_claim');
+        await this.unlinkLockUnderClaim(commandId, budget);
     }
-    async readLockOwner() {
+    releaseClaimPath(commandId) {
+        return `${this.lockPath}.release-${commandId}`;
+    }
+    async tryCreateReleaseClaim(path, commandId) {
+        const record = JSON.stringify({ version: 1, commandId, pid: process.pid, nonce: randomUUID() });
+        const added = !heldReleaseClaims.has(path);
+        if (added)
+            heldReleaseClaims.add(path);
         try {
-            await validatePrivateStateRoot(this.root);
+            await this.withRootScope(async (scope) => atomicCreatePrivateRecord(path, record, { scope, unsynced: true }));
+            return true;
         }
         catch (error) {
-            if (isMissingPath(error))
-                return null;
+            if (added)
+                heldReleaseClaims.delete(path);
+            if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST')
+                return false;
             throw error;
         }
-        const deadline = performance.now() + ACTIVE_LOCK_PUBLICATION_SETTLE_TIMEOUT_MS;
+    }
+    async removeReleaseClaims(paths) {
+        for (const path of paths) {
+            try {
+                await this.withRootScope(async (scope) => unlinkPrivateRecord(path, { scope, unsynced: true })).catch((error) => {
+                    if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'))
+                        throw error;
+                });
+            }
+            finally {
+                heldReleaseClaims.delete(path);
+            }
+        }
+    }
+    async unlinkLockUnderClaim(commandId, budget) {
+        const claimPath = this.releaseClaimPath(commandId);
+        try {
+            while (true) {
+                await budget.enter('claim_create');
+                if (await this.tryCreateReleaseClaim(claimPath, commandId)) {
+                    await this.unlinkLockHoldingClaims(commandId, 'after_claim', [claimPath], [claimPath], budget);
+                    return;
+                }
+                budget.startWaiting();
+                if (await this.waitOnHeldReleaseClaim(commandId, claimPath, budget) === 'done')
+                    return;
+            }
+        }
+        catch (error) {
+            if (error instanceof LockObservationBudgetExhaustedError)
+                throw new LockReleaseInProgressError(commandId, claimPath);
+            throw error;
+        }
+    }
+    async unlinkLockHoldingClaims(commandId, boundary, removeOnFailure, removeOnSuccess, budget) {
+        try {
+            await this.releaseBoundary?.(boundary);
+            if (await this.readLockOwner(budget, 'authority_owner') === commandId) {
+                await this.withRootScope(async (scope) => unlinkPrivateRecord(this.lockPath, { scope })).catch((error) => {
+                    if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'))
+                        throw error;
+                });
+            }
+        }
+        catch (error) {
+            await this.removeReleaseClaims(removeOnFailure).catch(() => undefined);
+            throw error;
+        }
+        await this.removeReleaseClaims(removeOnSuccess);
+    }
+    async readReleaseClaim(path, commandId, budget) {
+        await budget.enter('held_claim');
+        let record;
         while (true) {
+            record = await this.withRootScope(async (scope) => readSecurePrivateRecord(path, PRIVATE_RECORD_LIMITS.metadata, { scope, maxLinkCount: 2 }));
+            if (record.state !== 'invalid' || !this.canReobserveLockSample(record.reason) || !await budget.retry('held_claim'))
+                break;
+        }
+        if (record.state === 'missing')
+            return { state: 'missing' };
+        if (record.state === 'invalid')
+            return { state: 'unsafe', reason: record.reason };
+        try {
+            const parsed = JSON.parse(record.text);
+            if (parsed.version === 1 && parsed.commandId === commandId && typeof parsed.pid === 'number' && Number.isInteger(parsed.pid) &&
+                parsed.pid > 0 && typeof parsed.nonce === 'string' && RELEASE_CLAIM_NONCE.test(parsed.nonce)) {
+                return { state: 'valid', pid: parsed.pid, nonce: parsed.nonce };
+            }
+        }
+        catch (_error) {
+        }
+        return { state: 'unparsable' };
+    }
+    releaseClaimHolderIsGone(claimPath, pid) {
+        if (pid === process.pid)
+            return !heldReleaseClaims.has(claimPath);
+        try {
+            process.kill(pid, 0);
+            return false;
+        }
+        catch (error) {
+            return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ESRCH';
+        }
+    }
+    async waitOnHeldReleaseClaim(commandId, claimPath, budget) {
+        while (true) {
+            if (await this.readLockOwner(budget, 'held_owner') !== commandId)
+                return 'done';
+            await this.releaseBoundary?.('claim_held');
+            const claim = await this.readReleaseClaim(claimPath, commandId, budget);
+            if (claim.state === 'missing')
+                return 'retry';
+            if (claim.state === 'unsafe') {
+                throw new Error(`The release claim ${basename(claimPath)} is unsafe (${claim.reason}); the lock of ${commandId} is kept.`);
+            }
+            if (claim.state === 'unparsable' || (claim.state === 'valid' && this.releaseClaimHolderIsGone(claimPath, claim.pid))) {
+                await this.takeOverReleaseClaim(commandId, claimPath, claim.state === 'valid' ? claim.nonce : 'unparsable', budget);
+                return 'done';
+            }
+        }
+    }
+    async takeOverReleaseClaim(commandId, claimPath, key, budget) {
+        const takeoverPath = `${claimPath}.takeover-${key}`;
+        await budget.enter('takeover_create');
+        if (await this.tryCreateReleaseClaim(takeoverPath, commandId)) {
+            await this.unlinkLockHoldingClaims(commandId, 'after_takeover', [takeoverPath], [claimPath, takeoverPath], budget);
+            return;
+        }
+        budget.startWaiting();
+        try {
+            while (await this.readLockOwner(budget, 'takeover_owner') === commandId) { }
+        }
+        catch (error) {
+            if (error instanceof LockObservationBudgetExhaustedError)
+                throw new LockReleaseInProgressError(commandId, takeoverPath);
+            throw error;
+        }
+    }
+    canReobserveLockSample(reason) {
+        return reason === 'changed_during_read' || reason === 'unexpected_link_count';
+    }
+    async readLockOwner(budget = this.createLockObservationBudget(), phase = 'owner') {
+        await budget.enter(phase);
+        while (true) {
+            try {
+                await validatePrivateStateRoot(this.root);
+            }
+            catch (error) {
+                if (isMissingPath(error))
+                    return null;
+                throw error;
+            }
             const record = await this.withRootScope(async (scope) => readSecurePrivateRecord(this.lockPath, PRIVATE_RECORD_LIMITS.lock, { scope }));
             if (record.state === 'missing')
                 return null;
             if (record.state === 'invalid') {
-                const remaining = deadline - performance.now();
-                if (record.reason === 'unexpected_link_count' && remaining > 0) {
-                    await delay(Math.min(ACTIVE_LOCK_PUBLICATION_RETRY_INTERVAL_MS, remaining));
+                if (this.canReobserveLockSample(record.reason) && await budget.retry(phase))
                     continue;
-                }
                 throw new Error(`Active command lock is unsafe (${record.reason}).`);
             }
             const owner = record.text.trim();
@@ -459,7 +790,7 @@ export class FileCommandStore {
         }
         await this.withCommandScope(files.commandId, async (scope) => atomicCreatePrivateRecords(artifacts, { scope }));
     }
-    async prepareHostArtifactTemps(files) {
+    async prepareHostArtifactTemps(files, options = {}) {
         files = this.validateCommandFiles(files);
         const paths = [
             `${files.resultPath}.tmp`,
@@ -467,7 +798,7 @@ export class FileCommandStore {
             `${files.statusPath}.host_completed.json.tmp`,
             `${files.statusPath}.completed.json.tmp`,
             `${files.statusPath}.failed.json.tmp`,
-            ...Array.from({ length: 32 }, (_unused, index) => `${files.statusPath}.audit.${String(index).padStart(3, '0')}.json.tmp`),
+            ...(options.auditEvents === false ? [] : Array.from({ length: 32 }, (_unused, index) => `${files.statusPath}.audit.${String(index).padStart(3, '0')}.json.tmp`)),
         ];
         const running = new Map([[`${files.statusPath}.running.json.tmp`, JSON.stringify({ commandId: files.commandId, state: 'running' })]]);
         await this.withCommandScope(files.commandId, async (scope) => createEmptyPrivateStagingRecords(paths, { scope }, running));
@@ -872,8 +1203,9 @@ export class FileCommandStore {
         if (compacted.kind !== 'tombstone') {
             throw new Error('Proven pre-apply terminalization did not produce a tombstone.');
         }
-        await this.release(files.commandId);
-        if (await this.readLockOwner() === files.commandId) {
+        const budget = this.createLockObservationBudget();
+        await this.release(files.commandId, budget);
+        if (await this.readLockOwner(budget, 'completion_owner') === files.commandId) {
             throw new Error('Proven pre-apply terminalization could not verify command lock release.');
         }
         return compacted;
@@ -919,7 +1251,7 @@ export class FileCommandStore {
         if (await this.hostRunningPublished(commandId))
             fail('the host running marker exists');
         const status = await this.readStatus(commandId);
-        if (status.state !== 'unknown' || status.message !== 'Command created but not started.')
+        if (status.state !== 'unknown' || status.message !== COMMAND_CREATED_NOT_STARTED_MESSAGE)
             fail('its status is not the created state');
         const published = new Set(['metadata.json', 'status.json.unknown.json', 'params.json', 'command.jsx', 'runner.ps1']);
         const stagingNames = new Set([
@@ -971,13 +1303,23 @@ export class FileCommandStore {
         }, options);
         if (compacted.kind !== 'tombstone')
             throw new Error('Never-started terminalization did not produce a tombstone.');
-        await this.release(files.commandId);
-        if (await this.readLockOwner() === files.commandId) {
+        const budget = this.createLockObservationBudget();
+        await this.release(files.commandId, budget);
+        if (await this.readLockOwner(budget, 'completion_owner') === files.commandId) {
             throw new Error('Never-started terminalization could not verify command lock release.');
         }
         return compacted;
     }
     async assertMutationCapacity() {
+        try {
+            await this.scanMutationCapacity();
+        }
+        catch (error) {
+            this.capacityScanCache.clear();
+            throw error;
+        }
+    }
+    async scanMutationCapacity() {
         const quota = this.mutationQuota;
         if (!Number.isSafeInteger(quota.maxCommandCount) || quota.maxCommandCount < 1 ||
             !Number.isSafeInteger(quota.maxTotalBytes) || quota.maxTotalBytes < 1 ||
@@ -986,19 +1328,30 @@ export class FileCommandStore {
             throw new Error('Mutation state quota configuration is invalid.');
         }
         const selfUid = isWindowsPrivateState() ? null : currentUid();
+        const scanCache = this.capacityScanCache;
         await this.withCommandsScope(async (scope) => {
             const commandsRoot = join(this.root, 'commands');
             const entries = await readdir(commandsRoot, { withFileTypes: true });
             if (entries.length >= quota.maxCommandCount) {
                 throw new Error('Mutation state quota is full; a new command ID cannot be applied.');
             }
+            const useCache = selfUid !== null;
+            const bypassCache = !useCache || scanCache.bypass(entries.length, quota.maxCommandCount, quota.maxTotalBytes);
+            const verified = new Map();
             const violations = [];
             const violatingCommands = [];
             let totalBytes = 0n;
             for (const entry of entries) {
                 const before = violations.length;
                 const directory = join(commandsRoot, entry.name);
-                const directoryMetadata = await lstat(directory);
+                const directoryStats = await lstat(directory, { bigint: true });
+                const directoryMetadata = {
+                    isFile: () => directoryStats.isFile(),
+                    isDirectory: () => directoryStats.isDirectory(),
+                    isSymbolicLink: () => directoryStats.isSymbolicLink(),
+                    uid: Number(directoryStats.uid),
+                    mode: Number(directoryStats.mode),
+                };
                 if (!entry.isDirectory() || !isCanonicalCommandId(entry.name)) {
                     violations.push(`unsafe command entry: ${describeStateEntry(directory, directoryMetadata, 0o700)}`);
                     continue;
@@ -1009,6 +1362,13 @@ export class FileCommandStore {
                     violatingCommands.push(entry.name);
                     continue;
                 }
+                const cached = bypassCache ? null : scanCache.lookup(entry.name, directoryStats);
+                if (cached !== null) {
+                    verified.set(entry.name, cached);
+                    totalBytes += cached.bytes;
+                    continue;
+                }
+                let commandBytes = 0n;
                 await this.withCommandScope(entry.name, async (commandScope) => {
                     const artifacts = await readdir(directory, { withFileTypes: true });
                     if (artifacts.length > 128) {
@@ -1031,12 +1391,18 @@ export class FileCommandStore {
                             violations.push(`unsafe artifact: ${describeStateEntry(artifactPath, artifactMetadata, 0o600)}`);
                             continue;
                         }
-                        totalBytes += BigInt(artifactMetadata.size);
+                        commandBytes += BigInt(artifactMetadata.size);
                     }
                     await commandScope.assertStable();
                 });
+                totalBytes += commandBytes;
                 if (violations.length > before)
                     violatingCommands.push(entry.name);
+                else if (useCache) {
+                    const fresh = scanCache.entry(directoryStats, commandBytes);
+                    if (fresh !== null)
+                        verified.set(entry.name, fresh);
+                }
             }
             const quarantined = selfUid === null
                 ? await this.windowsQuarantineAreaScan()
@@ -1044,6 +1410,8 @@ export class FileCommandStore {
             violations.push(...quarantined.violations);
             totalBytes += quarantined.bytes;
             await scope.assertStable();
+            if (violations.length === 0 && useCache)
+                scanCache.commit(verified, totalBytes);
             if (violations.length > 0) {
                 throw unsafeStateEntriesError('Mutation state quota scan', violations, selfUid === null
                     ? ['Windows does not implement quarantine: the evidence is retained and no automatic repair was performed.']
@@ -1218,16 +1586,179 @@ export class FileCommandStore {
         const inspection = await this.readExecution(commandId);
         return inspection.state === 'valid' ? inspection.value.pid : null;
     }
-    async abandon(commandId) {
+    async abandon(commandId, message = 'Command was explicitly abandoned after its execution process was confirmed stopped.', budget = this.createLockObservationBudget()) {
         const files = this.files(commandId);
         await this.writeStatus(files, {
             commandId,
             state: 'failed',
-            message: 'Command was explicitly abandoned after its execution process was confirmed stopped.',
+            message,
         });
-        await this.release(commandId);
+        await this.release(commandId, budget);
     }
-    async inspectReleaseUnverified(commandId, executionLiveness) {
+    async describeLockOwner(commandId, executionLiveness) {
+        this.files(commandId);
+        const metadata = await this.inspectMetadataStructure(commandId);
+        const kind = metadata.state === 'valid' ? metadata.value.kind : null;
+        const createdAt = metadata.state === 'valid' && hasCanonicalTimestamp(metadata.value.createdAt) ? metadata.value.createdAt : null;
+        const inspection = await this.readExecution(commandId);
+        let liveness = 'missing';
+        let processGroupId = null;
+        if (inspection.state === 'valid') {
+            processGroupId = inspection.value.version === 1 ? inspection.value.processGroupId : null;
+            try {
+                liveness = await executionLiveness(inspection.value);
+            }
+            catch {
+                liveness = 'unknown';
+            }
+        }
+        else if (inspection.state !== 'missing')
+            liveness = 'unknown';
+        const status = await this.readStatus(commandId);
+        const terminal = status.state === 'completed' || status.state === 'failed';
+        return {
+            kind,
+            createdAt,
+            liveness,
+            processGroupId,
+            terminalStatus: terminal,
+            canAbandon: kind === 'read' && liveness === 'inactive' && !terminal && await this.readLockOwner() === commandId &&
+                !(await this.isQuarantined(commandId)) && await this.findQuarantineOperation(commandId) === null &&
+                (await this.inspectCompactIdempotency(commandId)).state === 'missing',
+        };
+    }
+    async inspectStaleUnstartedRead(commandId, options) {
+        const files = this.files(commandId);
+        const refuse = (reason) => ({ eligible: false, reason });
+        if (isWindowsPrivateState())
+            return refuse('automatic release is defined for POSIX only');
+        if (await this.readLockOwner(options.observationBudget, 'eligibility_owner') !== commandId)
+            return refuse('the command does not hold the active lock');
+        if (await this.isQuarantined(commandId))
+            return refuse('the command is quarantined');
+        if (await this.findQuarantineOperation(commandId) !== null)
+            return refuse('the lock belongs to a quarantine');
+        if ((await this.inspectCompactIdempotency(commandId)).state !== 'missing')
+            return refuse('a compact idempotency record exists');
+        const metadata = await this.inspectMetadata(commandId);
+        if (metadata.state !== 'valid' || metadata.value.kind !== 'read')
+            return refuse('its metadata is not a valid read record');
+        if (!hasCanonicalTimestamp(metadata.value.createdAt))
+            return refuse('its creation time is not canonical');
+        const createdMs = Date.parse(metadata.value.createdAt);
+        const ageMs = options.now - createdMs;
+        if (!(ageMs >= options.minAgeMs))
+            return refuse(`it is only ${Math.max(0, Math.round(ageMs / 1000))} s old (the minimum is ${Math.round(options.minAgeMs / 1000)} s)`);
+        const status = await this.readStatus(commandId);
+        const created = status.state === 'unknown' && status.message === COMMAND_CREATED_NOT_STARTED_MESSAGE;
+        const resumed = options.resumeClaimed === true && status.state === 'failed' &&
+            status.message?.startsWith(AUTO_RELEASE_STATUS_PREFIX) === true;
+        if (!created && !resumed)
+            return refuse('its status is not the created state');
+        if (await this.hostRunningPublished(commandId))
+            return refuse('the host running marker exists or cannot be read');
+        if ((await this.readResult(commandId)).state !== 'missing')
+            return refuse('a result artifact exists');
+        const inspection = await this.readExecution(commandId);
+        if (inspection.state !== 'valid' || inspection.value.version !== 1)
+            return refuse('its POSIX execution record is missing or unreadable');
+        const execution = inspection.value;
+        if (!(Date.parse(execution.startedAt) >= createdMs))
+            return refuse('its execution record predates the command');
+        let liveness;
+        try {
+            liveness = options.processGroupLiveness(execution.processGroupId);
+        }
+        catch {
+            liveness = 'unknown';
+        }
+        if (liveness !== 'inactive')
+            return refuse(`its execution process group is ${liveness}`);
+        const published = new Set([
+            basename(files.paramsPath), basename(files.scriptPath), basename(files.runnerPath), basename(files.executionPath),
+            'metadata.json', 'status.json.unknown.json', 'status.json.failed.json', AUTO_RELEASE_RECORD_NAME,
+        ]);
+        const emptyStaging = new Set([
+            'result.json.tmp',
+            'status.json.running.json.tmp',
+            'status.json.host_completed.json.tmp',
+            'status.json.completed.json.tmp',
+            'status.json.failed.json.tmp',
+            ...Array.from({ length: 32 }, (_unused, index) => `status.json.audit.${String(index).padStart(3, '0')}.json.tmp`),
+        ]);
+        const twinBases = new Set([...published].filter((name) => name !== AUTO_RELEASE_RECORD_NAME));
+        try {
+            await this.withCommandScope(commandId, async (scope) => {
+                const names = await readdir(files.directory);
+                if (names.length > 128)
+                    throw new Error('the directory holds too many entries');
+                for (const name of names) {
+                    const twin = /^(.+)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/u.exec(name);
+                    if (!published.has(name) && !emptyStaging.has(name) && !(twin !== null && twinBases.has(twin[1]))) {
+                        throw new Error(`unexpected entry ${JSON.stringify(name)}`);
+                    }
+                    const entry = await lstat(join(files.directory, name));
+                    if (!entry.isFile() || entry.isSymbolicLink())
+                        throw new Error(`entry ${JSON.stringify(name)} is not a regular file`);
+                    if (emptyStaging.has(name) && name !== 'status.json.running.json.tmp' && entry.size !== 0) {
+                        throw new Error(`staging file ${name} is not empty`);
+                    }
+                }
+                await scope.assertStable();
+            });
+        }
+        catch (error) {
+            return refuse(`its directory is not the unstarted layout (${error instanceof Error ? error.message : String(error)})`);
+        }
+        return {
+            eligible: true,
+            evidence: {
+                kind: 'read',
+                createdAt: metadata.value.createdAt,
+                ageMs,
+                executionProcessGroupId: execution.processGroupId,
+                executionNonce: execution.nonce,
+                executionStartedAt: execution.startedAt,
+                liveness: 'inactive',
+            },
+        };
+    }
+    async claimStaleReadRelease(commandId, evidence, claimedAt) {
+        const files = this.files(commandId);
+        const path = join(files.directory, AUTO_RELEASE_RECORD_NAME);
+        const record = {
+            version: 1,
+            commandId,
+            reason: 'stale_unstarted_read',
+            claimedAt: new Date(claimedAt).toISOString(),
+            claimedByPid: process.pid,
+            evidence,
+        };
+        try {
+            await this.withCommandScope(commandId, async (scope) => atomicCreatePrivateRecord(path, JSON.stringify(record), { scope }));
+            return { state: 'claimed' };
+        }
+        catch (error) {
+            if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST'))
+                throw error;
+        }
+        try {
+            const existing = await this.readCommandRecord(commandId, path, PRIVATE_RECORD_LIMITS.status);
+            if (existing.state !== 'valid')
+                return { state: 'held', claimedAt: null };
+            const parsed = JSON.parse(existing.text);
+            return { state: 'held', claimedAt: hasCanonicalTimestamp(parsed.claimedAt) ? Date.parse(parsed.claimedAt) : null };
+        }
+        catch (_error) {
+            return { state: 'held', claimedAt: null };
+        }
+    }
+    async releaseStaleUnstartedRead(commandId, evidence, budget = this.createLockObservationBudget()) {
+        await this.retireUnstartedHostArtifacts(commandId);
+        await this.abandon(commandId, `${AUTO_RELEASE_STATUS_PREFIX} it never started (no running marker, no result), it is a read, and its execution process group ` +
+            `${String(evidence.executionProcessGroupId)} had stopped; it was released ${String(Math.round(evidence.ageMs / 1000))} s after it was created.`, budget);
+    }
+    async inspectReleaseUnverified(commandId, executionLiveness, budget = this.createLockObservationBudget()) {
         this.files(commandId);
         const refuse = (reason) => ({ eligible: false, reason });
         let selfUid = null;
@@ -1261,7 +1792,7 @@ export class FileCommandStore {
         }
         if (await this.isQuarantined(commandId))
             return refuse('the command is quarantined');
-        if (await this.readLockOwner() !== commandId)
+        if (await this.readLockOwner(budget, 'eligibility_owner') !== commandId)
             return refuse('the command does not hold the active lock');
         const metadata = await this.inspectMetadataStructure(commandId);
         if (metadata.state !== 'valid' || metadata.value.kind !== 'mutation') {
@@ -1530,7 +2061,7 @@ export class FileCommandStore {
             const started = await read(`${files.statusPath}.running.json`, PRIVATE_RECORD_LIMITS.status);
             if (status.state === 'valid' && staging.state === 'valid' && staging.bytes.length === 0 && started.state === 'missing') {
                 const parsed = parseStoredCommandStatus(status.text, commandId);
-                if (parsed.state === 'unknown' && parsed.message === 'Command created but not started.') {
+                if (parsed.state === 'unknown' && parsed.message === COMMAND_CREATED_NOT_STARTED_MESSAGE) {
                     const params = await read(files.paramsPath, 16_777_216);
                     const script = await read(files.scriptPath, 16_777_216);
                     const runner = await read(files.runnerPath, 16_777_216);
@@ -1562,21 +2093,22 @@ export class FileCommandStore {
     }
     async releaseUnverified(commandId, options) {
         const files = this.files(commandId);
+        const budget = this.createLockObservationBudget();
         if (options.confirmCommandId !== commandId) {
             throw new Error('Releasing a command without verification requires confirm_command_id to exactly match command_id.');
         }
-        const lockOwner = await this.readLockOwner();
+        const lockOwner = await this.readLockOwner(budget, 'unverified_owner');
         if (lockOwner !== commandId) {
             const compact = await this.inspectCompactIdempotency(commandId);
             if (compact.state === 'valid' && compact.value.kind === 'released_unverified')
                 return compact.value;
         }
-        const eligibility = await this.inspectReleaseUnverified(commandId, options.executionLiveness);
+        const eligibility = await this.inspectReleaseUnverified(commandId, options.executionLiveness, budget);
         if (!eligibility.eligible) {
             throw new Error(`Command ${commandId} cannot be released without verification: ${eligibility.reason}. Nothing was written.`);
         }
         const { metadata, execution } = eligibility;
-        if (!await this.releaseSnapshotMatches(commandId, metadata, execution) || await this.readLockOwner() !== commandId) {
+        if (!await this.releaseSnapshotMatches(commandId, metadata, execution) || await this.readLockOwner(budget, 'pre_release_owner') !== commandId) {
             throw new Error(`Command ${commandId} changed during its release; nothing was written.`);
         }
         if (eligibility.resume === 'twin') {
@@ -1611,8 +2143,8 @@ export class FileCommandStore {
         }
         if (options.beforeUnlock !== undefined)
             await options.beforeUnlock(published.value);
-        await this.release(commandId);
-        if (await this.readLockOwner() === commandId)
+        await this.release(commandId, budget);
+        if (await this.readLockOwner(budget, 'completion_owner') === commandId)
             throw new Error(`The release of ${commandId} could not verify its lock release.`);
         return published.value;
     }
@@ -1976,8 +2508,9 @@ export class FileCommandStore {
         await this.releaseQuarantineLock(operationId);
     }
     async releaseQuarantineLock(operationId) {
-        await this.release(operationId);
-        if (await this.readLockOwner() === operationId)
+        const budget = this.createLockObservationBudget();
+        await this.release(operationId, budget);
+        if (await this.readLockOwner(budget, 'completion_owner') === operationId)
             throw new Error('The quarantine could not verify its lock release.');
     }
     async readCommandRecord(commandId, path, maxBytes, directory) {

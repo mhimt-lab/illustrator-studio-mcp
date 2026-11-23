@@ -1,16 +1,18 @@
 import { z } from 'zod';
 import { defineBatchStep } from './batch-step-contract.js';
+import { GRADIENT_DIRECTION_SCRIPT, GRADIENT_SIDES, gradientStop0Side, gradientStop100Side } from '../gradient-direction.js';
 import { SET_PATH_APPEARANCE_BATCH_NEXT_CALL } from './batch-step-next-call.js';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
+import { FREEFORM_FILL_CHANGE_REFUSAL, FREEFORM_GRAY0_HOST_PREDICATE } from '../freeform-gradient-ambiguity.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 export const SET_PATH_APPEARANCE_OPERATION = 'set_path_appearance';
 export const SET_PATH_APPEARANCE_VALIDATOR = { kind: SET_PATH_APPEARANCE_OPERATION, version: 1 };
-const SET_PATH_APPEARANCE_CANONICAL_VERSION = 6;
-const SET_PATH_APPEARANCE_RESULT_SCHEMA_VERSION = 7;
+const SET_PATH_APPEARANCE_CANONICAL_VERSION = 8;
+const SET_PATH_APPEARANCE_RESULT_SCHEMA_VERSION = 8;
 const SET_PATH_APPEARANCE_CLASSIFIER_VERSION = 1;
 const SET_PATH_APPEARANCE_CONFORMANCE_VERSION = 1;
 const SET_PATH_APPEARANCE_ERROR_MAPPING_VERSION = 1;
@@ -18,6 +20,23 @@ const canonicalFiveDecimals = (value) => {
     const rounded = Math.round(value * 100_000) / 100_000;
     return Object.is(rounded, -0) ? 0 : rounded;
 };
+export const STROKE_WIDTH_RELATIVE_TOLERANCE = 2 ** -23;
+export const STROKE_WIDTH_GRID = 1024;
+export const canonicalStrokeWidth = (value) => Math.round(value * STROKE_WIDTH_GRID) / STROKE_WIDTH_GRID;
+export const requestedStrokeWidthSchema = z.number().finite().positive().max(10_000)
+    .overwrite(canonicalStrokeWidth)
+    .positive({ error: 'Stroke width is below 1/2048 pt, which rounds to 0 on the 1/1024 pt grid; use a width of at least 0.0005 pt or turn the stroke off.' });
+export function strokeWidthMatches(left, right) {
+    return Math.abs(left - right) <= Math.max(Math.abs(left), Math.abs(right)) * STROKE_WIDTH_RELATIVE_TOLERANCE;
+}
+export const canonicalPathRgbChannel = (value) => Math.round(Math.fround(value / 255) * 255);
+const rgbPathChannelSchema = z.number().finite().min(0).max(255).overwrite(canonicalPathRgbChannel);
+export const rgbPathColorSchema = z.strictObject({
+    model: z.literal('rgb'),
+    red: rgbPathChannelSchema,
+    green: rgbPathChannelSchema,
+    blue: rgbPathChannelSchema,
+});
 export const rgbColorSchema = z.strictObject({
     model: z.literal('rgb'),
     red: z.number().finite().min(0).max(255).overwrite(canonicalFiveDecimals),
@@ -52,7 +71,7 @@ const gradientAngleSchema = z.number().finite().min(-180).max(180).overwrite((va
     const normalized = ((value + 180) % 360 + 360) % 360 - 180;
     const rounded = Math.round(normalized * 100_000) / 100_000;
     return Object.is(rounded, -0) ? 0 : rounded;
-});
+}).describe('Degrees, y up: 0 = stop 0 on the left, 90 = bottom, -90 = top.');
 const gradientStopColorSchema = z.discriminatedUnion('model', [
     rgbColorSchema,
     cmykColorSchema,
@@ -79,6 +98,13 @@ export const explicitAppearanceColorSchema = z.discriminatedUnion('model', [
     spotColorSchema,
     gradientColorSchema,
 ]);
+const requestedAppearanceColorSchema = z.discriminatedUnion('model', [
+    rgbPathColorSchema,
+    cmykColorSchema,
+    grayColorSchema,
+    spotColorSchema,
+    gradientColorSchema,
+]);
 const appearanceStateColorSchema = z.discriminatedUnion('model', [
     z.strictObject({ model: z.literal('none') }),
     rgbColorSchema,
@@ -87,18 +113,20 @@ const appearanceStateColorSchema = z.discriminatedUnion('model', [
     spotColorSchema,
     gradientColorSchema,
 ]);
+const confirmGray0FillSchema = z.boolean().optional()
+    .describe('Set true only after checking that an existing fill reading as gray 0 is a real solid, not a freeform gradient. Ignored for any other fill.');
 export const pathAppearanceMutationSchema = z.strictObject({
     opacity: z.number().finite().min(0).max(100),
     fill: z.discriminatedUnion('kind', [
-        z.strictObject({ kind: z.literal('none') }),
-        z.strictObject({ kind: z.literal('solid'), color: explicitAppearanceColorSchema }),
+        z.strictObject({ kind: z.literal('none'), confirm_gray0_fill_is_solid: confirmGray0FillSchema }),
+        z.strictObject({ kind: z.literal('solid'), color: requestedAppearanceColorSchema, confirm_gray0_fill_is_solid: confirmGray0FillSchema }),
     ]),
     stroke: z.discriminatedUnion('kind', [
         z.strictObject({ kind: z.literal('none') }),
         z.strictObject({
             kind: z.literal('solid'),
-            color: explicitAppearanceColorSchema,
-            width: z.number().finite().positive().max(10_000),
+            color: requestedAppearanceColorSchema,
+            width: requestedStrokeWidthSchema.optional(),
         }),
     ]),
 });
@@ -121,6 +149,18 @@ export const pathAppearanceStateSchema = z.strictObject({
         }),
     ]),
 });
+export function comparableAppearanceState(state) {
+    return (state.stroke.kind === 'none' ? { ...state, stroke: { kind: 'none', color: state.stroke.color } } : state);
+}
+export function alignedAppearanceState(read, planned) {
+    return read.stroke.kind === 'none' && planned.stroke.kind === 'none' ? { ...read, stroke: { ...read.stroke, width: planned.stroke.width } } : read;
+}
+export function sameAppearanceState(left, right) {
+    const parsedLeft = pathAppearanceStateSchema.safeParse(left), parsedRight = pathAppearanceStateSchema.safeParse(right);
+    if (!parsedLeft.success || !parsedRight.success)
+        return canonicalSha256(left) === canonicalSha256(right);
+    return canonicalSha256(comparableAppearanceState(parsedLeft.data)) === canonicalSha256(comparableAppearanceState(parsedRight.data));
+}
 const commonInternalFields = {
     expectedDocumentKey: z.string().min(1).max(16_384),
     targetUuid: z.string().min(1).max(255),
@@ -313,12 +353,20 @@ const appearanceTransactionSchema = z.discriminatedUnion('state', [
         }
     }
 });
-const appearancePlanSchema = z.strictObject({
+const gradientSideSchema = z.enum(GRADIENT_SIDES);
+export const appearancePlanSchema = z.strictObject({
     targetUuid: z.string().min(1).max(255),
     before: pathAppearanceStateSchema,
     after: pathAppearanceStateSchema,
     confirmationStatus: z.enum(['required', 'confirmed']),
     applyAllowed: z.boolean(),
+    gradientDirection: z.array(z.strictObject({
+        paint: z.enum(['fill', 'stroke']),
+        angle: z.number().finite().min(-180).max(180),
+        stop0Side: gradientSideSchema,
+        stop100Side: gradientSideSchema,
+    })).max(2),
+    gradientRotation: z.strictObject({ differenceDegrees: z.number().finite().min(-180).max(180) }).nullable(),
 });
 const appearancePostconditionSchema = z.strictObject({
     targetUuid: z.string().min(1).max(255),
@@ -379,13 +427,20 @@ export const setPathAppearanceResultSchema = z.union([
         transaction: appearanceTransactionSchema,
     }),
 ]).superRefine((result, context) => {
+    const expectedDirection = ['fill', 'stroke'].flatMap((paint) => {
+        const state = result.plan.after[paint];
+        return state.kind === 'solid' && state.color.model === 'gradient'
+            ? [{ paint, angle: state.color.angle, stop0Side: gradientStop0Side(state.color.angle), stop100Side: gradientStop100Side(state.color.angle) }]
+            : [];
+    });
+    if (canonicalSha256(result.plan.gradientDirection) !== canonicalSha256(expectedDirection)) {
+        context.addIssue({ code: 'custom', message: 'Gradient direction must be derived from the planned Gradient angles.', path: ['plan', 'gradientDirection'] });
+    }
     if (result.applied) {
         if (result.transaction.state !== 'verified') {
             context.addIssue({ code: 'custom', message: 'Applied appearance requires a verified transaction.' });
         }
-        if (result.postcondition.targetUuid !== result.plan.targetUuid ||
-            canonicalSha256(result.postcondition.appearance) !==
-                canonicalSha256(result.plan.after)) {
+        if (result.postcondition.targetUuid !== result.plan.targetUuid || !sameAppearanceState(result.postcondition.appearance, result.plan.after)) {
             context.addIssue({
                 code: 'custom',
                 message: 'Appearance postcondition must exactly match the planned UUID and appearance.',
@@ -516,7 +571,7 @@ function appearanceSafetyResult(result, requestDigest, attestation, plan) {
             evidence: {
                 targetUuid: result.plan.targetUuid,
                 beforeStateHash,
-                afterStateHash: canonicalDigest(result.postcondition.appearance),
+                afterStateHash: canonicalDigest(alignedAppearanceState(result.postcondition.appearance, result.plan.after)),
                 restoredStateHash: null,
                 restoredBeforeStateVerified: false,
             },
@@ -535,8 +590,8 @@ function appearanceSafetyResult(result, requestDigest, attestation, plan) {
                 targetUuid: result.plan.targetUuid,
                 beforeStateHash,
                 afterStateHash: null,
-                restoredStateHash: canonicalDigest(transaction.rollback.restoredAppearance),
-                restoredBeforeStateVerified: canonicalDigest(transaction.rollback.restoredAppearance) === beforeStateHash,
+                restoredStateHash: canonicalDigest(transaction.rollback.restoredAppearance === null ? null : alignedAppearanceState(transaction.rollback.restoredAppearance, result.plan.before)),
+                restoredBeforeStateVerified: sameAppearanceState(transaction.rollback.restoredAppearance, result.plan.before),
             },
             executionEvidence: { outcome: 'completed' },
             resolution: {
@@ -1182,14 +1237,283 @@ function appearanceRollback(state) {
     : { status: "failed", message: "Rollback did not restore the exact before appearance." };
 }
 `;
+export const SET_PATH_APPEARANCE_ECHO_SCRIPT = `
+function appearanceSameNumber(left, right) { return String(left) === String(right); }
+
+function appearanceNativeWidthEqual(left, right) {
+  return left.stroke.kind !== "solid" || right.stroke.kind !== "solid" || left.stroke.width === right.stroke.width;
+}
+
+/**
+ * #974: the width of a stroke that is off (kind none) is not part of the state. Illustrator rewrites it when the stroke goes off (a width 2 stroke reads 1 after stroked=false, #930 P0 v2, 30.8.2),
+ * nothing draws or exports it, and a plan cannot promise to keep it. Like the colour of a none paint (#262, #306), it is left out of every comparison; the kind, a solid width, the colours, the
+ * fill and the opacity are compared exactly as before.
+ */
+function appearanceStrokeWidthCompared(stroke) { return !!stroke && stroke.kind === "solid"; }
+
+function appearancePaintEqual(left, right, stroke) {
+  if (!left || !right || left.kind !== right.kind) return false;
+  if (!appearanceColorEqual(left.color, right.color)) return false;
+  // #974: the width of a stroke that is off is not compared (see appearanceStrokeWidthCompared).
+  return !stroke || !appearanceStrokeWidthCompared(left) || appearanceSameNumber(left.width, right.width);
+}
+
+function appearanceEqual(left, right) {
+  return !!left && !!right && appearanceSameNumber(left.opacity, right.opacity) &&
+    appearancePaintEqual(left.fill, right.fill, false) && appearancePaintEqual(left.stroke, right.stroke, true);
+}
+
+function appearanceMismatch(left, right) {
+  if (!left || !right) return "appearance";
+  if (!appearanceSameNumber(left.opacity, right.opacity)) return "opacity";
+  var parts = ["fill", "stroke"];
+  for (var index = 0; index < parts.length; index++) {
+    var name = parts[index];
+    if (!left[name] || !right[name]) return name;
+    if (left[name].kind !== right[name].kind) return name + ".kind";
+    var colorMismatch = appearanceColorMismatch(left[name].color, right[name].color, name + ".color");
+    if (colorMismatch !== null) return colorMismatch;
+    if (name === "stroke" && appearanceStrokeWidthCompared(left.stroke) && !appearanceSameNumber(left.stroke.width, right.stroke.width)) return "stroke.width";
+  }
+  return null;
+}
+`;
+export const SET_PATH_APPEARANCE_ANGLE_SCRIPT = `
+var APPEARANCE_ANGLE_TOLERANCE = 0.001;
+var APPEARANCE_GRADIENT_ANGLE_ONLY = "A target that already carries a Gradient accepts only a change of Gradient angle: every other appearance value, and each Gradient name and stop, must equal the current state.";
+
+function appearanceCanonicalDifference(value) {
+  var normalized = ((value + 180) % 360 + 360) % 360 - 180;
+  var rounded = Math.round(normalized * 100000) / 100000;
+  return rounded === 0 ? 0 : rounded;
+}
+
+function appearanceShallowCopy(value) {
+  var copy = {}, key;
+  for (key in value) if (value.hasOwnProperty(key)) copy[key] = value[key];
+  return copy;
+}
+
+/** state with the angle of each Gradient paint replaced by the one in other; with a tolerance, only where the two already agree within it. */
+function appearanceWithAnglesOf(state, other, tolerance) {
+  var copy = appearanceShallowCopy(state), parts = ["fill", "stroke"], index, name, gradientState, paint;
+  for (index = 0; index < parts.length; index++) {
+    name = parts[index];
+    if (!state[name] || !other[name] || state[name].color.model !== "gradient" || other[name].color.model !== "gradient") continue;
+    if (tolerance !== null && Math.abs(appearanceCanonicalDifference(state[name].color.angle - other[name].color.angle)) > tolerance) continue;
+    gradientState = appearanceShallowCopy(state[name].color);
+    gradientState.angle = other[name].color.angle;
+    paint = appearanceShallowCopy(state[name]);
+    paint.color = gradientState;
+    copy[name] = paint;
+  }
+  return copy;
+}
+
+function appearanceExistingGradientRotation(before, after) {
+  var parts = ["fill", "stroke"], difference = null, index, name, step;
+  for (index = 0; index < parts.length; index++) {
+    name = parts[index];
+    if (before[name].color.model !== "gradient") continue;
+    if (before[name].kind !== "solid" || after[name].kind !== "solid" || after[name].color.model !== "gradient") {
+      throw mutationError("preflight_failed", APPEARANCE_GRADIENT_ANGLE_ONLY);
+    }
+    step = appearanceCanonicalDifference(after[name].color.angle - before[name].color.angle);
+    if (difference !== null && difference !== step) {
+      throw mutationError("preflight_failed", "Fill and stroke Gradients must turn by the same difference.");
+    }
+    difference = step;
+  }
+  if (difference === null || !appearanceEqual(appearanceWithAnglesOf(before, after, null), after)) {
+    throw mutationError("preflight_failed", APPEARANCE_GRADIENT_ANGLE_ONLY);
+  }
+  return { differenceDegrees: difference };
+}
+
+function appearanceResolve(forApply) {
+  var context = forApply ? requireDocument(params.expectedDocumentKey) : requireDocumentForRead(params.expectedDocumentKey);
+  var doc = app.activeDocument;
+  var target = appearanceFindTarget(doc, params.targetUuid);
+  if (target === null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: params.targetUuid }));
+  if (target.typename !== "PathItem") throw mutationError("preflight_failed", "Appearance P0 supports PathItem targets only.");
+  if (typeof target.uuid !== "string" || target.uuid !== params.targetUuid) throw mutationError("preflight_failed", "Target native UUID is unavailable or changed.");
+  if (typeof target.locked !== "boolean" || typeof target.hidden !== "boolean" || typeof target.editable !== "boolean" ||
+      target.locked || target.hidden || !target.editable) throw mutationError("preflight_failed", "Target is not verifiably editable.");
+  if (forApply && context.mutationAllowed !== true) throw mutationError("preflight_failed", "Document mutation is not allowed.");
+  var before = appearanceRead(target);
+  var desired = appearanceDesiredState(params.appearance, before);
+  appearanceValidateDesired(desired, context.colorSpace, doc);
+  if (before.fill.color.model !== "none") appearanceAssertColorCompatible(before.fill.color, context.colorSpace);
+  if (before.stroke.color.model !== "none") appearanceAssertColorCompatible(before.stroke.color, context.colorSpace);
+  var rotation = null;
+  if (appearanceContainsGradient(before)) {
+    rotation = appearanceExistingGradientRotation(before, desired);
+    if (params.boundPreview) throw mutationError("preflight_failed", "A bound preview does not support changing the angle of an existing Gradient.");
+  }
+  return { context: context, doc: doc, target: target, before: before, bounds: appearanceBounds(target), rotation: rotation };
+}
+
+function appearanceApply(preflight, plan, state) {
+  state.operationState.mutationStarted = true;
+  if (preflight.rotation === null) {
+    appearanceWrite(preflight.doc, preflight.target, plan.after);
+    var gradientAngle = appearanceGradientAngle(plan.after);
+    if (gradientAngle !== null && gradientAngle !== 0) {
+      preflight.target.rotate(gradientAngle, false, false, true, false, Transformation.CENTER);
+    }
+  } else if (preflight.rotation.differenceDegrees !== 0) {
+    preflight.target.rotate(preflight.rotation.differenceDegrees, false, false, true, false, Transformation.CENTER);
+  }
+  if (!appearanceSameBounds(appearanceBounds(preflight.target), preflight.bounds)) {
+    throw mutationError("apply_failed", "Gradient-only rotation changed target geometry.");
+  }
+  return preflight.target;
+}
+
+function appearanceVerify(preflight, plan) {
+  if (app.documents.length === 0 || app.activeDocument !== preflight.doc) throw mutationError("verify_mismatch", "Active document changed during appearance verification.");
+  var target = appearanceFindTarget(preflight.doc, plan.targetUuid);
+  if (target === null || target !== preflight.target || target.uuid !== plan.targetUuid) throw mutationError("verify_mismatch", "Target native UUID no longer resolves to the same PageItem.");
+  if (!appearanceSameBounds(appearanceBounds(target), preflight.bounds)) throw mutationError("verify_mismatch", "Target bounds changed during appearance apply.");
+  var actual = appearanceRead(target);
+  // A turned Gradient reads back within a rounding of the requested angle; the plan states the requested one.
+  if (preflight.rotation !== null) actual = appearanceWithAnglesOf(actual, plan.after, APPEARANCE_ANGLE_TOLERANCE);
+  if (!appearanceEqual(actual, plan.after) || !appearanceNativeWidthEqual(actual, plan.after)) {
+    throw mutationError("verify_mismatch", "Appearance postcondition does not match the plan at " +
+      String(!appearanceNativeWidthEqual(actual, plan.after) ? "stroke.width" : appearanceMismatch(actual, plan.after)) + ".");
+  }
+  return {
+    postcondition: { targetUuid: plan.targetUuid, appearance: actual },
+    boundPreview: appearanceVerifyBoundPreview(preflight, plan, target)
+  };
+}
+
+function appearanceRollbackRotation(preflight, target) {
+  var current = appearanceRead(target), parts = ["fill", "stroke"], index, name, step;
+  for (index = 0; index < parts.length; index++) {
+    name = parts[index];
+    if (preflight.before[name].color.model !== "gradient") continue;
+    if (current[name].color.model !== "gradient") throw mutationError("rollback_failed", "Rollback target no longer carries the Gradient.");
+    step = appearanceCanonicalDifference(preflight.before[name].color.angle - current[name].color.angle);
+    if (Math.abs(step) > APPEARANCE_ANGLE_TOLERANCE) target.rotate(step, false, false, true, false, Transformation.CENTER);
+    return;
+  }
+}
+
+function appearanceRollback(state) {
+  var preflight = state.preflight;
+  if (!preflight || app.documents.length === 0 || app.activeDocument !== preflight.doc) return { status: "indeterminate", message: "Rollback document identity is indeterminate." };
+  var target = appearanceFindTarget(preflight.doc, params.targetUuid);
+  if (target === null || target !== preflight.target || target.uuid !== params.targetUuid) return { status: "indeterminate", message: "Rollback target identity is indeterminate." };
+  try {
+    if (preflight.rotation === null) appearanceWrite(preflight.doc, target, preflight.before);
+    else appearanceRollbackRotation(preflight, target);
+  } catch (error) { return { status: "indeterminate", message: "Rollback write outcome is indeterminate." }; }
+  var restored;
+  try { restored = appearanceRead(target); }
+  catch (error) { return { status: "indeterminate", message: "Rollback verification is indeterminate." }; }
+  if (preflight.rotation !== null) restored = appearanceWithAnglesOf(restored, preflight.before, APPEARANCE_ANGLE_TOLERANCE);
+  state.operationState.rollbackEvidence.restoredAppearance = restored;
+  if (!appearanceSameBounds(appearanceBounds(target), preflight.bounds)) {
+    return { status: "indeterminate", message: "Rollback target bounds are not exactly restored." };
+  }
+  return appearanceEqual(restored, preflight.before) && appearanceNativeWidthEqual(restored, preflight.before)
+    ? { status: "verified" }
+    : { status: "failed", message: "Rollback did not restore the exact before appearance." };
+}
+`;
+export const SET_PATH_APPEARANCE_FREEFORM_GUARD_SCRIPT = `
+${FREEFORM_GRAY0_HOST_PREDICATE}
+
+function appearanceDesiredState(desired, before) {
+  var width = before.stroke.width;
+  if (desired.stroke.kind === "solid") {
+    if (typeof desired.stroke.width !== "undefined") width = desired.stroke.width;
+    else if (before.stroke.kind !== "solid") throw mutationError("preflight_failed", "Turning a stroke on requires an explicit width.");
+  }
+  return {
+    opacity: desired.opacity,
+    fill: desired.fill.kind === "solid"
+      ? { kind: "solid", color: appearanceCanonicalColorState(desired.fill.color) }
+      : { kind: "none", color: { model: "none" } },
+    stroke: desired.stroke.kind === "solid"
+      ? { kind: "solid", color: appearanceCanonicalColorState(desired.stroke.color), width: width }
+      : { kind: "none", color: { model: "none" }, width: width }
+  };
+}
+
+function appearanceRevalidate(preflight, plan) {
+  var current;
+  try { current = appearanceResolve(true); }
+  catch (error) { throw mutationBeforeSideEffectError(mutationPublicMessage(error, "Appearance preconditions changed before apply.")); }
+  if (current.doc !== preflight.doc || current.target !== preflight.target || current.target.uuid !== plan.targetUuid ||
+      !appearanceEqual(current.before, plan.before) || !appearanceNativeWidthEqual(current.before, plan.before) ||
+      !appearanceSameBounds(current.bounds, preflight.bounds)) {
+    throw mutationBeforeSideEffectError("Appearance target, bounds, or before-state changed before apply.");
+  }
+}
+
+function appearanceFreeformGuard(resolved) {
+  if (!appearanceFreeformGray0(resolved.before.fill)) return;
+  if (params.appearance.fill.confirm_gray0_fill_is_solid === true) return;
+  if (appearancePaintEqual(resolved.after.fill, resolved.before.fill, false)) return;
+  throw mutationError("preflight_failed", ${JSON.stringify(FREEFORM_FILL_CHANGE_REFUSAL)});
+}
+
+function appearancePreflight(forApply) {
+  var resolved = appearanceResolve(forApply);
+  resolved.after = appearanceDesiredState(params.appearance, resolved.before);
+  appearanceFreeformGuard(resolved);
+  if (forApply) {
+    if (!appearanceEqual(resolved.before, params.expectedBefore)) throw mutationError("preflight_failed", "Target appearance does not match expected_before.");
+    if (!appearanceEqual(resolved.after, params.confirmedAfter)) throw mutationError("preflight_failed", "confirmed_after does not match the planned appearance state.");
+  }
+  return resolved;
+}
+
+function appearanceWrite(document, item, value) {
+  var fillColor = appearanceNativeColor(document, value.fill.color);
+  var strokeColor = appearanceNativeColor(document, value.stroke.color);
+  var current = appearanceRead(item);
+  if (!appearanceSameNumber(current.opacity, value.opacity)) item.opacity = value.opacity;
+  if (!appearanceColorEqual(current.fill.color, value.fill.color)) item.fillColor = fillColor;
+  if (current.fill.kind !== value.fill.kind) item.filled = value.fill.kind === "solid";
+  if (current.stroke.kind !== value.stroke.kind) {
+    item.strokeColor = strokeColor;
+    item.strokeWidth = value.stroke.width;
+    item.stroked = value.stroke.kind === "solid";
+  } else {
+    if (!appearanceColorEqual(current.stroke.color, value.stroke.color)) item.strokeColor = strokeColor;
+    if (value.stroke.kind === "solid" && current.stroke.width !== value.stroke.width) item.strokeWidth = value.stroke.width;
+  }
+}
+`;
 const SET_PATH_APPEARANCE_RUNNER_SCRIPT = `
+${GRADIENT_DIRECTION_SCRIPT}
+function appearancePublicPlan(preflight) {
+  var plan = appearancePlan(preflight), parts = ["fill", "stroke"], directions = [], index, name, paint;
+  for (index = 0; index < parts.length; index++) {
+    name = parts[index];
+    paint = preflight.after[name];
+    if (paint.kind === "solid" && paint.color.model === "gradient") {
+      directions.push({
+        paint: name, angle: paint.color.angle,
+        stop0Side: appearanceGradientStop0Side(paint.color.angle), stop100Side: appearanceGradientStop100Side(paint.color.angle)
+      });
+    }
+  }
+  plan.gradientDirection = directions;
+  plan.gradientRotation = preflight.rotation === null ? null : { differenceDegrees: preflight.rotation.differenceDegrees };
+  return plan;
+}
+
 var appearanceExecution = runMutationTransaction({
   apply: params.apply === true,
   // the items this change reads and writes, so an edit session can advance its item aggregate.
   editSessionAffected: function () { return [params.targetUuid]; },
   initialOperationState: function () { return { mutationStarted: false, rollbackEvidence: { targetUuid: params.targetUuid, restoredAppearance: null } }; },
   preflight: appearancePreflight,
-  plan: appearancePlan,
+  plan: appearancePublicPlan,
   revalidate: appearanceRevalidate,
   applyMutation: appearanceApply,
   verify: appearanceVerify,
@@ -1213,7 +1537,7 @@ if (appearanceExecution.transaction.state === "verified") {
   if (appearanceExecution.value.boundPreview !== null) result.boundPreview = appearanceExecution.value.boundPreview;
 }
 `;
-export const SET_PATH_APPEARANCE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}${SET_PATH_APPEARANCE_MODULE_SCRIPT}${SET_PATH_APPEARANCE_RUNNER_SCRIPT}`;
+export const SET_PATH_APPEARANCE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}${SET_PATH_APPEARANCE_MODULE_SCRIPT}${SET_PATH_APPEARANCE_ECHO_SCRIPT}${SET_PATH_APPEARANCE_ANGLE_SCRIPT}${SET_PATH_APPEARANCE_FREEFORM_GUARD_SCRIPT}${SET_PATH_APPEARANCE_RUNNER_SCRIPT}`;
 const batchAppearanceUuidSchema = z.string().min(1).max(255);
 const batchPublicAppearancePlan = z.strictObject({
     operation: z.literal(SET_PATH_APPEARANCE_OPERATION), target_uuid: batchAppearanceUuidSchema, appearance: pathAppearanceMutationSchema,
@@ -1244,14 +1568,16 @@ export const setPathAppearanceBatchStep = defineBatchStep({
         appearance: step.appearance,
         ...('expected_before' in step ? { expectedBefore: step.expected_before, confirmedAfter: step.confirmed_after } : {}) }),
     request: (plan) => ({ appearance: plan.after }),
-    same: (left, right) => canonicalSha256(left) === canonicalSha256(right),
+    same: sameAppearanceState,
     reportedBlockers: () => [],
     binding: (plan) => ({ targetUuid: plan.targetUuid, documentKey: null, confirmationStatus: plan.confirmationStatus }),
     snapshotTargetUuid: () => null,
     planBlockers: () => [],
     nextCall: SET_PATH_APPEARANCE_BATCH_NEXT_CALL,
     host: {
-        fragments: [{ id: 'set-path-appearance.module', source: SET_PATH_APPEARANCE_MODULE_SCRIPT }],
+        fragments: [{ id: 'set-path-appearance.module', source: SET_PATH_APPEARANCE_MODULE_SCRIPT }, { id: 'set-path-appearance.echo', source: SET_PATH_APPEARANCE_ECHO_SCRIPT },
+            { id: 'set-path-appearance.angle', source: SET_PATH_APPEARANCE_ANGLE_SCRIPT },
+            { id: 'set-path-appearance.freeform-guard', source: SET_PATH_APPEARANCE_FREEFORM_GUARD_SCRIPT }],
         hooks: {
             resolve: 'function () { var resolved = appearancePreflight(false); resolved.document = resolved.doc; return resolved; }',
             plan: 'appearancePlan', same: 'appearanceEqual', apply: 'appearanceApply',
@@ -1300,7 +1626,7 @@ function normalizedRequest(input) {
 export const setPathAppearanceToolContract = {
     name: 'illustrator_set_path_appearance',
     title: 'Plan or Set Path Appearance',
-    description: 'Plan or apply explicit opacity/fill/stroke state to one PathItem bound by document key and native UUID. RGB is limited to RGB documents, CMYK to CMYK documents, Gray to either; existing exact non-Gray Spot and bounded existing linear Gradient paints follow the same recursive measured profile and are never implicitly converted.',
+    description: 'Plan or apply explicit opacity/fill/stroke state to one PathItem bound by document key and native UUID. RGB is limited to RGB documents, CMYK to CMYK documents, Gray to either; existing exact non-Gray Spot and bounded existing linear Gradient paints follow the same recursive measured profile and are never implicitly converted. A Gradient angle runs y-up, the opposite sense to the y-down create coordinates: 0 = stop 0 on the left, 90 = at the bottom, -90 = at the top, 180 = on the right; the plan\'s gradientDirection names the side stop 0 starts on. A target that already carries a Gradient accepts only a change of that angle, every other appearance value and the Gradient itself unchanged. Omit width to keep an existing solid stroke width; turning a stroke on requires width. Explicit width rounds to 1/1024 pt; RGB channels round to whole numbers.',
     inputSchema: setPathAppearanceInputSchema,
     publicInputSchema: setPathAppearancePublicInputSchema,
     outputSchema: setPathAppearanceResponseSchema,

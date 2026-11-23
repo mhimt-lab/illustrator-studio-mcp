@@ -496,7 +496,7 @@ const pairSchema = z.tuple([z.number(), z.number()]);
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/u);
 export const imageOptimizeStageSchema = z.enum([
     'read_source', 'copy_work', 'open_session', 'open_work_copy', 'baseline', 'rasterize', 'verify_result', 'save_output',
-    'verify_output', 'close_work_copy', 'verify_source', 'publish_output', 'cleanup',
+    'verify_output', 'close_work_copy', 'verify_source', 'pre_link_check', 'publish_output', 'cleanup',
 ]);
 const candidateSchema = z.strictObject({
     index: z.number().int().nonnegative(), uuid: z.string(), name: z.string(), layer: z.string(),

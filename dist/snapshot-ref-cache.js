@@ -41,14 +41,15 @@ export class SnapshotRefCache {
     get size() { return this.entries.size; }
     get heldBytes() { return this.bytes; }
 }
+const MUTATE_BATCH_RESEND = 'send the full expected_before and confirmed_after';
 export class SnapshotRefUnavailableError extends Error {
     field;
     sha256;
-    constructor(field, sha256) {
+    constructor(field, sha256, resend = MUTATE_BATCH_RESEND) {
         super(`snapshot_ref_unavailable: ${field} ${sha256} is not held by this server (it was planned before a restart, or `
             + 'evicted). Nothing was written and Illustrator was not called. If this command_id was sent before, check it with '
             + 'illustrator_reconcile (action inspect) and do not apply it again when it is terminal; otherwise plan again '
-            + '(apply:false) and send that plan\'s next_call, or send the full expected_before and confirmed_after.');
+            + `(apply:false) and send that plan's next_call, or ${resend}.`);
         this.field = field;
         this.sha256 = sha256;
     }

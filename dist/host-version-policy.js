@@ -1,19 +1,27 @@
-function row(kind, measured, unmeasured = 'admit') {
-    return Object.freeze({ kind, measured: Object.freeze([...measured]), unmeasured });
+function row(kind, measured, unmeasured = 'admit', sourceUnchanged = false) {
+    return Object.freeze({ kind, measured: Object.freeze([...measured]), unmeasured, ...(sourceUnchanged ? { sourceUnchanged: true } : {}) });
 }
 export const HOST_VERSION_POLICY = Object.freeze({
     operations: Object.freeze({
-        update_artboard: row('mutation', ['30.8.1']),
-        delete_objects: row('mutation', ['30.8.1']),
-        embed_image: row('mutation', ['30.8.1']),
-        clipping_mask: row('mutation', ['30.8.1']),
-        import_vector_artwork: row('mutation', ['30.8.1']),
-        edit_path_points: row('mutation', ['30.8.1']),
+        update_artboard: row('mutation', ['30.8.1', '31.0.0']),
+        delete_objects: row('mutation', ['30.8.1', '31.0.0']),
+        embed_image: row('mutation', ['30.8.1', '31.0.0']),
+        clipping_mask: row('mutation', ['30.8.1', '31.0.0']),
+        import_vector_artwork: row('mutation', ['30.8.1', '31.0.0']),
+        edit_path_points: row('mutation', ['30.8.1', '31.0.0']),
         spot_rollback: row('mutation', ['30.8.1']),
-        capture_preview: row('read', ['30.8.1']),
-        optimize_images: row('mutation', ['30.8.1']),
-        line_height_read: row('read', ['30.8.1']),
+        capture_preview: row('read', ['30.8.1', '31.0.0']),
+        optimize_images: row('mutation', ['30.8.1', '31.0.0'], 'admit', true),
+        line_height_read: row('read', ['30.8.1', '31.0.0']),
         export_exact_px: row('mutation', ['30.8.2'], 'refuse'),
+        mutate_batch: row('mutation', ['30.8.2']),
+        duplicate_object: row('mutation', ['30.8.2']),
+        replace_area_text_range: row('mutation', ['30.8.2', '31.0.0']),
+        svg_export: row('mutation', ['30.8.2'], 'admit', true),
+        work_copy_overwrite: row('mutation', ['30.8.2'], 'admit', true),
+        windows_set_stroke_style: row('mutation', ['30.8.2'], 'refuse'),
+        font_inventory: row('read', ['30.8.2']),
+        artboard_render: row('read', ['30.8.2']),
     }),
     blocked: Object.freeze([
         Object.freeze({ operation: 'spot_rollback', version: '30.8.0' }),
@@ -102,9 +110,9 @@ function hostVersionAdmitted(operation, version) {
     }
   }
   if (status === "patch_unmeasured") return true;
-  if (operation !== "optimize_images" && typeof params !== "undefined" && params.apply === true) {
+  if (HOST_VERSION_POLICY.operations[operation].sourceUnchanged !== true && typeof params !== "undefined" && params.apply === true) {
     var context = getDocumentContext();
-    if (context.path !== null) {
+    if (context.path !== null && context.mutationProfile !== "unsaved_document") {
       var backup = params.hostVersionBackup;
       if (!backup || !hostVersionBackupPathMatches(context.path, backup.sourcePath) || backup.sourceFileRevision !== context.fileRevision || backup.backupId !== params.backupId) {
         throw new Error("MCP_ERROR:" + stringifyJson({ code: "HOST_VERSION_BACKUP_REQUIRED", message: "A verified backup of this document file is required for an unmeasured Illustrator version." }));

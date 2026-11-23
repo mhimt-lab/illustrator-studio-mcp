@@ -4,6 +4,7 @@ import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js
 import { canonicalSha256 } from '../mutation-canonical.js';
 import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
+import { LAYER_TOP_LEVEL_ITEMS_HELPER } from '../layer-top-level-items.js';
 import { documentContextSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 export const SET_STROKE_STYLE_OPERATION = 'set_stroke_style';
@@ -253,7 +254,7 @@ export async function assertStrokeStyleHostProfile(_input, services) {
         throw new Error('Stroke style requires the measured foreground and unlocked profile; no activation is performed.');
     }
 }
-export const SET_STROKE_STYLE_MODULE_SCRIPT = `
+export const SET_STROKE_STYLE_MODULE_SCRIPT = `${LAYER_TOP_LEVEL_ITEMS_HELPER}
 var STROKE_STYLE_SCENE_MAX_CHARS = ${STROKE_SCENE_MAX_CHARS};
 var STROKE_STYLE_MAX_ITEMS = 32;
 
@@ -370,7 +371,9 @@ function strokeStyleRow(p) {
 }
 function strokeStyleScene(document) {
   var rows = [], selection = [], boards = [], layer = document.layers[0], i;
-  for (i = 0; i < document.pageItems.length; i++) rows.push(strokeStyleRow(document.pageItems[i]));
+  // #971 W4: the rows come from the layers' own collections (fresh); document.pageItems lags after a group was duplicated.
+  var topItems = layerTopLevelItems(document.layers, []);
+  for (i = 0; i < topItems.length; i++) rows.push(strokeStyleRow(topItems[i]));
   if (document.selection) for (i = 0; i < document.selection.length; i++) selection.push(String(document.selection[i].uuid));
   for (i = 0; i < document.artboards.length; i++) boards.push({ name: String(document.artboards[i].name), rect: strokeStyleNums(document.artboards[i].artboardRect) });
   return { document: { name: String(document.name), colorSpace: String(document.documentColorSpace), saved: document.saved,
@@ -390,8 +393,12 @@ function strokeStyleDocumentInScope(document) {
     if (String(document.documentColorSpace) !== String(DocumentColorSpace.CMYK) || document.layers.length !== 1 ||
         document.layers[0].layers.length !== 0 || document.pageItems.length > STROKE_STYLE_MAX_ITEMS) return false;
     var layer = document.layers[0];
-    for (var i = 0; i < document.pageItems.length; i++) {
-      var item = document.pageItems[i];
+    // #971 W4: the layer's own collection (fresh) says what is in the document; document.pageItems.length is only a lower bound (longer than the layer's total = nested items = out of scope).
+    var topCount = layerTopLevelCount(document.layers);
+    if (topCount > STROKE_STYLE_MAX_ITEMS || document.pageItems.length > topCount) return false;
+    var topItems = layerTopLevelItems(document.layers, []);
+    for (var i = 0; i < topItems.length; i++) {
+      var item = topItems[i];
       // Nontargets are read and protected, never styled; their readable attributes need not be defaults.
       if (item.typename !== "PathItem" || item.parent !== layer || item.tags.length !== 0 || item.visibilityVariable !== null ||
           typeof item.uuid !== "string" || item.uuid.length === 0) return false;
@@ -571,7 +578,7 @@ function normalizedRequest(input) {
 export const setStrokeStyleToolContract = {
     name: 'illustrator_set_stroke_style',
     title: 'Plan or Set Stroke Style',
-    description: 'Plan or apply a complete stroke style (dashes, dash_offset, cap, join, miter_limit together) on one open three-point straight PathItem bound by document key and native UUID: solid, dashed, round dots, or another cap, join or miter limit. Only these five style properties are written; fill, stroke color, width, opacity, geometry and every other object are compared before and after and must stay unchanged, otherwise the change is rolled back. Works in a never-saved one-layer CMYK document with enabled CMYK fill and stroke, with Illustrator in front and the screen unlocked. The plan returns before, after and strokeScene; apply sends them back as expected_before, confirmed_after and expected_stroke_scene (next_call fills them). Other documents, shapes and combinations are returned as blockers.',
+    description: 'Plan or apply a complete stroke style (dashes, dash_offset, cap, join, miter_limit together) on one open three-point straight PathItem bound by document key and native UUID: solid, dashed, round dots, or another cap, join or miter limit. Works only in a never-saved, one-layer CMYK document with CMYK fill and stroke enabled, with Illustrator in front and the screen unlocked. Only these five style properties are written; everything else must stay unchanged or the change is rolled back. The plan returns before, after and strokeScene; apply sends them back as expected_before, confirmed_after and expected_stroke_scene. Other documents, shapes and combinations are returned as blockers (reasonCodes).',
     inputSchema,
     publicInputSchema: setStrokeStylePublicInputSchema,
     outputSchema: setStrokeStyleResponseSchema,

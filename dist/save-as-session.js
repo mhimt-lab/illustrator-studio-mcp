@@ -9,6 +9,7 @@ import { atomicCreatePrivateRecord, readSecurePrivateRecord, unlinkPrivateRecord
 import { ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath } from './private-state.js';
 import { noFollowDirectoryFlags, noFollowReadFlags } from './platform-primitives.js';
 export const SAVE_AS_RECORD_VERSION = 3;
+export const SAVE_AS_SESSION_VERSION = 4;
 const MAX_RECORD_BYTES = 16_384;
 const execFileAsync = promisify(execFile);
 const digitsSchema = z.string().regex(/^\d+$/);
@@ -21,8 +22,7 @@ export const saveAsOwnerSchema = z.strictObject({
     processStartedAt: z.number().int().nonnegative(),
     bootSessionUuid: z.string().min(1).max(64),
 });
-export const saveAsSessionSchema = z.strictObject({
-    version: z.literal(SAVE_AS_RECORD_VERSION),
+const saveAsSessionFields = {
     kind: z.literal('save_as_session'),
     saveAsId: z.uuid(),
     documentKey: z.string().min(1).max(16_384),
@@ -33,7 +33,14 @@ export const saveAsSessionSchema = z.strictObject({
     parent: directoryIdentitySchema,
     owner: saveAsOwnerSchema,
     createdAt: isoSchema,
+};
+export const saveAsSessionV3Schema = z.strictObject({ version: z.literal(SAVE_AS_RECORD_VERSION), ...saveAsSessionFields });
+export const saveAsSessionV4Schema = z.strictObject({
+    version: z.literal(SAVE_AS_SESSION_VERSION),
+    ...saveAsSessionFields,
+    openCommandId: z.string().min(1),
 });
+export const saveAsSessionSchema = z.discriminatedUnion('version', [saveAsSessionV3Schema, saveAsSessionV4Schema]);
 export const saveAsPublishSchema = z.strictObject({
     version: z.literal(SAVE_AS_RECORD_VERSION),
     kind: z.literal('save_as_publish'),
@@ -126,8 +133,10 @@ export class SaveAsSessionStore {
         catch (_error) {
             return { state: 'invalid', reason: 'malformed_json' };
         }
-        if (type === 'session' && typeof value === 'object' && value !== null && value.version !== SAVE_AS_RECORD_VERSION) {
-            return { state: 'foreign' };
+        if (type === 'session' && typeof value === 'object' && value !== null) {
+            const version = value.version;
+            if (version !== SAVE_AS_RECORD_VERSION && version !== SAVE_AS_SESSION_VERSION)
+                return { state: 'foreign' };
         }
         const parsed = SCHEMA[type].safeParse(value);
         if (!parsed.success)
@@ -148,7 +157,8 @@ export class SaveAsSessionStore {
                 return false;
             try {
                 const value = JSON.parse(record.text);
-                return value !== null && typeof value === 'object' && value.version === SAVE_AS_RECORD_VERSION && value.kind === 'save_as_session';
+                return value !== null && typeof value === 'object' &&
+                    (value.version === SAVE_AS_RECORD_VERSION || value.version === SAVE_AS_SESSION_VERSION) && value.kind === 'save_as_session';
             }
             catch (_error) {
                 return record.text.includes('"save_as_session"');

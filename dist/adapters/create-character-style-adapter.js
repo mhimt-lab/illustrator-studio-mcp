@@ -683,13 +683,7 @@ function normalizedRequest(input) {
 export const createCharacterStyleToolContract = {
     name: 'illustrator_create_character_style',
     title: 'Plan or Create a Named Character Style',
-    description: 'Plan or create one named character style in the bound document, defining `size`, `tracking`, or both. '
-        + 'Those are the only attributes measured as writable on a style resource; `font`, horizontal and vertical scale '
-        + 'and fill are refused here and remain available through `illustrator_set_text_style`, which applies them '
-        + 'directly to text. A name that already exists is refused rather than merged or renamed, and no existing style '
-        + 'is ever modified or removed. Apply captures the complete ordered style collections before the add, '
-        + 'revalidates them and the name absence in the same host call, verifies the created style plus the exact '
-        + 'collection delta, and rolls back by removing only the style it created.',
+    description: 'Plan or create one named character style in the bound document, defining `size`, `tracking`, or both: the only attributes measured as writable on a style resource. `font`, horizontal and vertical scale and fill are refused here; set them directly on text with `illustrator_set_text_style`. A name that already exists is refused rather than merged or renamed, and no existing style is ever modified or removed. Apply checks the style collection and name before the add, verifies the created style, and rolls back by removing only the style it created.',
     inputSchema,
     publicInputSchema: createCharacterStylePublicInputSchema,
     outputSchema: createCharacterStyleResponseSchema,

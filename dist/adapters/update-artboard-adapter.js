@@ -12,7 +12,7 @@ import { RASTER_MAX_SIDE_PX, RASTER_MAX_TOTAL_PX } from '../raster-export.js';
 import { HOST_VERSION_POLICY_JSX, hostVersionAdmitted } from '../host-version-policy.js';
 import { OBJECT_WALK_HELPERS, OBJECT_WITNESS_HELPERS, READ_PAGE_ITEM_AT_HELPER } from '../page-item-walk.js';
 import { PAGE_ITEM_RESOLVE_DEADLINE_MS } from '../page-item-resolve.js';
-import { describeHostVersionScope } from '../host-version-admission.js';
+import { LAYER_TOP_LEVEL_ITEMS_HELPER } from '../layer-top-level-items.js';
 import { ARTBOARD_INTEGER_TOLERANCE, readIntegerWithinTolerance } from '../artboard-integer.js';
 export const UPDATE_ARTBOARD_OPERATION = 'update_artboard';
 export const UPDATE_ARTBOARD_VALIDATOR = { kind: UPDATE_ARTBOARD_OPERATION, version: 1 };
@@ -176,6 +176,16 @@ function normalizePublicInput(input) {
     const base = { ...normalizeHostVersionConsent(v), expectedDocumentKey: v.expected_document_key, ...(v.artboard_index === undefined ? {} : { artboardIndex: v.artboard_index }), change: v.change, ...(v.pixel === undefined ? {} : { pixel: v.pixel }) };
     return v.apply ? { ...base, apply: true, expectedBefore: v.expected_before, confirmedAfter: v.confirmed_after, commandId: v.command_id } : { ...base, apply: false };
 }
+export const UPDATE_ARTBOARD_UNSAVED_CHANGE_KEYS = ['add', 'adds', 'name', 'renames'];
+export function updateArtboardProfileAdmitted(document, change) {
+    if (document.colorSpace !== 'RGB')
+        return false;
+    if (document.mutationProfile === 'saved_file')
+        return document.saved;
+    if (document.mutationProfile === 'edit_session_file')
+        return 'name' in change || 'renames' in change;
+    return document.mutationProfile === 'unsaved_document' && UPDATE_ARTBOARD_UNSAVED_CHANGE_KEYS.some((key) => key in change);
+}
 const blockerSchema = z.enum(['saved_rgb_profile_required', 'host_version_unmeasured', 'unmeasured_ruler_origin', 'pixel_size_mismatch', 'artboard_overlap_unmeasured']);
 const planSchema = z.strictObject({
     operation: z.literal(UPDATE_ARTBOARD_OPERATION), profile: z.enum(['integer_pt_v1', 'web_rgb_pixel_v1', 'artboard_identity_v1', 'artboard_artwork_v1']), documentKey: keySchema, documentBefore: documentContextSchema,
@@ -228,8 +238,8 @@ export const updateArtboardResultSchema = z.union([
     const baseline = r.plan.documentBefore;
     if (r.document.path !== baseline.path || r.document.fileRevision !== baseline.fileRevision || r.document.name !== baseline.name || r.document.appVersion !== baseline.appVersion || r.document.colorSpace !== baseline.colorSpace)
         ctx.addIssue({ code: 'custom', message: 'Result document must preserve the admitted file identity and profile.' });
-    if (!planned && (baseline.mutationProfile !== 'saved_file' || !baseline.saved || baseline.colorSpace !== 'RGB' || !hostVersionAdmitted('update_artboard', baseline.appVersion)))
-        ctx.addIssue({ code: 'custom', message: 'Applied artboard result requires the measured saved RGB profile.' });
+    if (!planned && (!updateArtboardProfileAdmitted(baseline, r.plan.change) || !hostVersionAdmitted('update_artboard', baseline.appVersion)))
+        ctx.addIssue({ code: 'custom', message: 'Applied artboard result requires RGB: clean saved, never-saved for add/adds/name/renames, or an edit session for name/renames only.' });
     if (r.applied && (r.document.artboardCount !== r.postcondition.boards.length || r.document.activeArtboardIndex !== r.postcondition.active))
         ctx.addIssue({ code: 'custom', message: 'Result document context must agree with the native postcondition.' });
     else if (r.applied && !sameActiveBounds(r.document.activeArtboardBounds, r.postcondition.boards[r.postcondition.active]?.rect))
@@ -238,7 +248,7 @@ export const updateArtboardResultSchema = z.union([
         ctx.addIssue({ code: 'custom', message: 'Transaction requires the exact confirmed, unblocked plan.' });
     if (planned) {
         const blockers = [];
-        if (r.document.mutationProfile !== 'saved_file' || r.document.colorSpace !== 'RGB' || !r.document.saved)
+        if (!updateArtboardProfileAdmitted(r.document, r.plan.change))
             blockers.push('saved_rgb_profile_required');
         if (!hostVersionAdmitted('update_artboard', r.document.appVersion))
             blockers.push('host_version_unmeasured');
@@ -267,10 +277,13 @@ const assertSafety = artboardSafetyAsserter(UPDATE_ARTBOARD_SAFETY, (value) => {
         blocked: r.plan.applyBlockedReasonCodes.length > 0, confirmationStatus: r.plan.confirmationStatus, applyAllowed: r.plan.applyAllowed,
         transactionState: r.transaction.state, applied: r.applied };
 });
-export const UPDATE_ARTBOARD_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}${HOST_VERSION_POLICY_JSX}${READ_PAGE_ITEM_AT_HELPER}${OBJECT_WITNESS_HELPERS}${OBJECT_WALK_HELPERS}
+export const UPDATE_ARTBOARD_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}${HOST_VERSION_POLICY_JSX}${READ_PAGE_ITEM_AT_HELPER}${OBJECT_WITNESS_HELPERS}${OBJECT_WALK_HELPERS}${LAYER_TOP_LEVEL_ITEMS_HELPER}
 var scanStartedAt = 0, scanTotal = 0, scanVisited = 0, scanTicks = 0, abScanMs = [];
 function abFail(message) { throw mutationError("preflight_failed", message); }
+// Numbers compare in the form the host prints them: ExtendScript's String(number) keeps 15 significant digits, so a
+// plan read back from the output (expected_before, confirmed_after) equals a fresh read only at that precision.
 function abSame(a, b) {
+  if (typeof a === "number" && typeof b === "number") return String(a) === String(b);
   if (a === b) return true;
   if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
   if ((a instanceof Array) !== (b instanceof Array)) return false;
@@ -348,11 +361,13 @@ function abIdentity(doc) {
   return { count: count, witness: witnessHex(lanes[0]) + witnessHex(lanes[1]) + witnessHex(lanes[2]) };
 }
 // Select the existing profile by its explicit predicates; read errors never select another profile.
+// #971 W4: the layers' own collections (fresh) say what is in the document; doc.pageItems.length is only a lower bound (longer than the layers' total = nested items = not direct-only).
 function abLegacyArtworkEligible(doc) {
-  var count = doc.pageItems.length, points = 0;
-  if (count > ${ARTBOARD_MAX_ITEMS}) return false;
-  for (var i = 0; i < count; i++) {
-    var item = doc.pageItems[i];
+  var count = layerTopLevelCount(doc.layers), points = 0;
+  if (doc.pageItems.length > count || count > ${ARTBOARD_MAX_ITEMS}) return false;
+  var top = layerTopLevelItems(doc.layers, []);
+  for (var i = 0; i < top.length; i++) {
+    var item = top[i];
     if (item.typename !== "PathItem" || !item.parent || item.parent.typename !== "Layer" || item.clipping || item.guides) return false;
     points += item.pathPoints.length;
     if (points > ${ARTBOARD_MAX_POINTS}) return false;
@@ -415,11 +430,13 @@ function abArtworkWitnessScan(doc) {
   return { count: count, witness: abFinishWitness(lanes), topLevelCount: roots, topLevelBoundsWitness: abFinishWitness(boundsLanes) };
 }
 function abArtwork(doc) {
-  var items = [], uuids = {}, totalPoints = 0;
-  if (doc.pageItems.length > ${ARTBOARD_MAX_ITEMS}) abFail("Complete artwork collection exceeds the supported limit.");
-  for (var j = 0; j < doc.pageItems.length; j++) {
-    var item = doc.pageItems[j];
-    if (item.typename !== "PathItem" || !item.parent || item.parent.typename !== "Layer" || item.clipping || item.guides) abFail("Only direct ordinary PathItems are supported by this artboard slice: pageItems[" + j + "] of " + doc.pageItems.length + " is " + abWhyNotOrdinary(item) + ".");
+  var items = [], uuids = {}, totalPoints = 0, topCount = layerTopLevelCount(doc.layers);
+  if (topCount > ${ARTBOARD_MAX_ITEMS} || doc.pageItems.length > ${ARTBOARD_MAX_ITEMS}) abFail("Complete artwork collection exceeds the supported limit.");
+  if (doc.pageItems.length > topCount) abFail("The document holds " + doc.pageItems.length + " page items but its layers list " + topCount + ": nested artwork is not supported by this artboard slice.");
+  var top = layerTopLevelItems(doc.layers, []);
+  for (var j = 0; j < top.length; j++) {
+    var item = top[j];
+    if (item.typename !== "PathItem" || !item.parent || item.parent.typename !== "Layer" || item.clipping || item.guides) abFail("Only direct ordinary PathItems are supported by this artboard slice: pageItems[" + j + "] of " + top.length + " is " + abWhyNotOrdinary(item) + ".");
     var uuid = item.uuid;
     if (typeof uuid !== "string" || uuid.length < 1 || uuid.length > 256 || uuids["u:" + uuid]) abFail("Complete native artwork identity is unavailable.");
     uuids["u:" + uuid] = true;
@@ -586,10 +603,19 @@ function abAddOverlapIndex(before) {
   return null;
 }
 function abOverlapMessage(index) { return "Requested rect overlaps or touches artboard " + index + ". Place it with a gap from every other artboard."; }
+// Clean saved RGB admits every change; never-saved RGB admits add/adds/name/renames; a session admits names only.
+function abNameChange() { var c = params.change; return c.name !== undefined || c.renames !== undefined; }
+function abUnsavedChange() { var c = params.change; return c.add !== undefined || c.adds !== undefined || c.name !== undefined || c.renames !== undefined; }
+function abProfileAdmitted(context) {
+  if (context.colorSpace !== "RGB") return false;
+  if (context.mutationProfile === "saved_file") return !!context.saved;
+  if (context.mutationProfile === "edit_session_file") return abNameChange();
+  return context.mutationProfile === "unsaved_document" && abUnsavedChange();
+}
 function abResolve(forApply) {
   var context = forApply ? requireDocument(params.expectedDocumentKey) : requireDocumentForRead(params.expectedDocumentKey);
   var doc = app.activeDocument, before = abSnapshot(doc), after = abDerive(before), pixel = abPixel(after), blockers = [];
-  if (context.mutationProfile !== "saved_file" || context.colorSpace !== "RGB" || !context.saved) blockers.push("saved_rgb_profile_required");
+  if (!abProfileAdmitted(context)) blockers.push("saved_rgb_profile_required");
   if (!hostVersionAdmitted("update_artboard", String(context.appVersion))) blockers.push("host_version_unmeasured");
   // The predicted origin of add, a real active switch and an active-board rect is measured only from the implicit origin state.
   var abActiveRect = params.change.rect !== undefined && params.artboardIndex === before.active;
@@ -793,6 +819,8 @@ function abRollback(state) {
 }
 var abExecution = runMutationTransaction({
   apply: params.apply === true,
+  // Artboards have no PageItem row. Their names are in the shared structure digest; item and layer rows stay unchanged.
+  editSessionAffected: abNameChange() ? function () { return []; } : undefined,
   initialOperationState: function () { return { mutationStarted: false, rollbackEvidence: { restoredSnapshot: null } }; },
   preflight: abResolve, plan: abPlan, revalidate: abRevalidate, applyMutation: abApply, verify: abVerify, rollback: abRollback,
   hasMutationEvidence: function (s) { return s.operationState.mutationStarted === true; },
@@ -817,7 +845,7 @@ function normalizedRequest(input) {
 }
 export const updateArtboardToolContract = {
     name: 'illustrator_update_artboard', title: 'Plan or Update Artboards',
-    description: 'Plan/apply name/rect/active:true/add:{name,rect} (index=count), or renames/rects/adds arrays (no outer index/pixel; 1-256 entries, total boards<=256). Saved RGB, Illustrator ' + describeHostVersionScope('update_artboard') + ', foreground/unlocked; no edit session. Rect/add: integer pt; direct paths or mixed UUID/root bounds (20778 items, 3000 ms/scan; scanMs). Refuse unmeasured artwork. Add overlap/contact: artboard_overlap_unmeasured; keep gaps, including between adds. Add/active/active rect need board origins [0,0], document [-left,-bottom] of active; else unmeasured_ruler_origin. pixel only single rect/add, scale1|2; mismatch blocked. Full before/after CAS; partial failure restores all proven targets or stays indeterminate. No public remove. Refreshed key; save after name/rect/add.',
+    description: 'Plan or apply artboard changes: name, rect, active:true, add:{name,rect} (index = count), or renames/rects/adds arrays (1-256 entries, at most 256 boards in total). No public remove. Requires RGB (clean saved; never saved for add/adds/name/renames only, with integer pt sizes; or an open edit session for name/renames only), Illustrator frontmost and unlocked. Rect and add values are integer pt. Adds must not overlap or touch another board (artboard_overlap_unmeasured): keep gaps, including between adds. Add, active and active-rect changes need board origins [0,0] and the document origin at [-left,-bottom] of the active board, else unmeasured_ruler_origin. pixel applies only to a single rect or add with scale 1 or 2. A partial failure restores proven targets or stays indeterminate. Save after changing names, rects or adds (the document key changes); in a session, names can be mixed with supported changes before one save.',
     inputSchema, publicInputSchema: updateArtboardPublicInputSchema, outputSchema: responseSchema,
     annotations: operationSafetyPolicyToMcpAnnotations(UPDATE_ARTBOARD_SAFETY.policy), normalizePublicInput,
 };

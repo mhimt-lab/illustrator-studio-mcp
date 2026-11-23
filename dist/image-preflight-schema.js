@@ -136,6 +136,42 @@ const colorSchema = z.discriminatedUnion('provenance', [
         icc: unavailable(z.literal('icc_unavailable')),
     }),
 ]);
+const resizeSkipReasonSchema = z.enum([
+    'geometry_unavailable',
+    'pixels_unavailable',
+    'rotated_or_skewed',
+    'flipped',
+    'clip_state_unavailable',
+    'mask_outside_image',
+    'artboard_not_found',
+]);
+const bleedEdgeSchema = z.strictObject({
+    shortfallMm: z.number().finite().nonnegative(),
+    shortfallPx: z.number().int().nonnegative(),
+    maskShortfallMm: z.number().finite().nonnegative(),
+}).nullable();
+const bleedShortfallSchema = z.strictObject({
+    bleedMm: z.number().finite().min(0).max(25),
+    artboardIndex: z.number().int().nonnegative().nullable(),
+    edges: z.strictObject({
+        left: bleedEdgeSchema, top: bleedEdgeSchema, right: bleedEdgeSchema, bottom: bleedEdgeSchema,
+    }).nullable(),
+    skippedReason: resizeSkipReasonSchema.nullable(),
+});
+const pixelSizeSchema = z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() });
+const resizeSpecSchema = z.strictObject({
+    targetPpi: positiveFiniteSchema,
+    targetPixels: pixelSizeSchema.nullable(),
+    ratio: z.strictObject({ width: positiveFiniteSchema, height: positiveFiniteSchema }).nullable(),
+    visibleSourcePx: z.strictObject({
+        left: z.number().int().nonnegative(),
+        top: z.number().int().nonnegative(),
+        right: z.number().int().nonnegative(),
+        bottom: z.number().int().nonnegative(),
+    }).nullable(),
+    skippedReason: resizeSkipReasonSchema.nullable(),
+    bleedShortfall: bleedShortfallSchema.optional(),
+});
 const warningSchema = z.discriminatedUnion('code', [
     z.strictObject({ code: z.literal('link_missing'), severity: z.literal('error'), message: messageSchema }),
     z.strictObject({
@@ -174,6 +210,7 @@ export const imagePreflightItemSchema = z.strictObject({
     effectivePpi: effectivePpiSchema,
     color: colorSchema,
     warnings: z.array(warningSchema).max(4),
+    resizeSpec: resizeSpecSchema.optional(),
 });
 const pageBaseSchema = z.strictObject({
     document: documentContextSchema,
@@ -185,6 +222,8 @@ const pageBaseSchema = z.strictObject({
     ]),
     items: z.array(imagePreflightItemSchema).max(50),
     warningCount: z.number().int().nonnegative(),
+    resizeSpecNote: z.string().min(1).max(1_000).optional(),
+    bleedShortfallNote: z.string().min(1).max(1_000).optional(),
 }).superRefine((value, context) => {
     const actual = value.items.reduce((total, item) => total + item.warnings.length, 0);
     if (value.warningCount !== actual) {

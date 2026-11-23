@@ -54,6 +54,12 @@ export function createWindowsDurationProbe(observer, now = () => performance.now
         },
     };
 }
+export const WINDOWS_TIMING_ENV = 'ILLUSTRATOR_STUDIO_MCP_WINDOWS_TIMING';
+export function windowsTimingObserverFromEnv(env = process.env, write = (line) => { process.stderr.write(line); }) {
+    if (env[WINDOWS_TIMING_ENV] !== '1')
+        return undefined;
+    return (record) => { write(`illustrator-studio-mcp: windows-timing ${JSON.stringify(record)}\n`); };
+}
 export function measureWindowsDuration(phase, work, observer) {
     if (observer === undefined)
         return work();

@@ -4,13 +4,13 @@
 
 作図から修正、結果の確認、入稿データの準備まで、AIアプリに頼んで進められます。
 
-![Status: beta](https://img.shields.io/badge/status-beta-orange.svg) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg) ![Illustrator: 2026 (30.8)](https://img.shields.io/badge/Illustrator-2026%20%2830.8%29-FF9A00.svg) [![npm beta version](https://img.shields.io/npm/v/illustrator-studio-mcp/beta)](https://www.npmjs.com/package/illustrator-studio-mcp) [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE)
+![Status: beta](https://img.shields.io/badge/status-beta-orange.svg) ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg) ![Illustrator: 2026 (30.8) / 2027 (31.0)](https://img.shields.io/badge/Illustrator-2026%20%2830.8%29%20%7C%202027%20%2831.0%29-FF9A00.svg) [![npm beta version](https://img.shields.io/npm/v/illustrator-studio-mcp/beta)](https://www.npmjs.com/package/illustrator-studio-mcp) [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE)
 
 [English](README.md) | **日本語**
 
 Claude Desktop · ChatGPT Work · Claude Code · Codex CLI
 
-[96の機能](docs/tools.md) · 適用の前に計画 · 結果を読み直して確認
+[111の機能](docs/tools.md) · 適用の前に計画 · 結果を読み直して確認
 
 <!-- demo-video:start -->
 https://github.com/user-attachments/assets/f23a3ad7-65e8-424b-b779-803152c61e2d
@@ -30,7 +30,7 @@ https://github.com/user-attachments/assets/f23a3ad7-65e8-424b-b779-803152c61e2d
 2. **適用** — 書き込む直前にも対象を確かめます。計画の後で誰かが変えていたら、上書きせずに止まります。
 3. **検証** — 書き込んだ後はIllustratorから結果を読み直します。応答が途切れて結果が分からないときは、次の編集を止めます。推測で続けません。見た目や入稿品質は、最後にIllustratorの画面で確認してください。
 
-いまはPublic Beta（0.1.0-beta.6）です。[Illustrator 2026（30.8）で操作ごとに実機確認](docs/compatibility.md)しています。
+いまはPublic Beta（0.1.0-beta.7）です。[Illustrator 2026（30.8）と、確認した操作ではIllustrator 2027（31.0）で、操作ごとに実機確認](docs/compatibility.md)しています。
 
 ## Adobe公式のIllustrator MCP（Beta）との違い
 
@@ -38,16 +38,16 @@ AdobeのIllustrator（Beta）には、MCPサーバーが内蔵されています
 
 | | Adobe内蔵のMCP | Illustrator Studio MCP |
 |---|---|---|
-| Illustratorの版 | Illustrator（Beta） | 通常版のIllustrator 2026（30.8で確認。Betaは確認していません） |
+| Illustratorの版 | Illustrator（Beta） | 通常版のIllustrator 2026・2027（30.8と31.0で確認。Betaは確認していません） |
 | OS | ヘルプにmacOSとWindowsの手順あり | Mac専用 |
 | 範囲と数 | ツールと操作（ヘルプの記載では40）：ドキュメントとアートボード、オブジェクトの確認、レイヤーとグループ、選択と変形、簡単なテキスト編集と見た目の変更、PNG・JPEG・SVG・PDFの書き出し | ツール一覧の機能：図形とテキストの作成、テキストやフォントのまとめて変更、色、バーコードとQRコード、日本語の改行チェック、印刷前チェック、PDFと画像の書き出し、バックアップ。数え方が異なるため、数ではなく範囲で比べてください |
 | 変更の確認 | AIツールが提案された変更の承認・拒否を尋ねる。取り消しはIllustratorでCommand + Z（macOS）／Ctrl + Z（Windows） | まず対象と変更内容を計画として見せ、書き込む直前にもう一度対象を確かめる |
 | 結果の確認 | ヘルプには記載なし | Illustratorから結果を読み直す。結果が分からないときは次の編集を止める |
 | 手で直した箇所 | ヘルプには記載なし | 上書きせずに止まる |
 | 印刷 | PDF・PNG・JPEG・SVGで書き出し | 印刷前チェック、トンボと塗り足しつきのPDF、PDF/Xの明示指定とファイルにPDF/Xの記載があるかの確認（PDF/X準拠の判定ではありません） |
-| 日本語の組版 | ヘルプには記載なし | 改行チェック、フォントの組み合わせの置き換え |
+| 日本語の組版 | ヘルプには記載なし | 改行チェック（大きな書類もページに分けて最後まで）、フォントの組み合わせの置き換え |
 
-「記載なし」は、ヘルプがどちらとも述べていないという意味で、機能がないという意味ではありません。Adobe側の列は、Adobeのヘルプ3ページ（[概要](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/about-using-ai-tools-with-illustrator.html)、[接続](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/connect-illustrator-to-ai-tools.html)、[ドキュメントの操作](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/work-with-illustrator-documents-from-ai-tools.html)）の内容で、Adobeの最終更新は2026年8月18日、確認は2026年10月1日です。Betaの内容は変わる可能性があります。お使いのIllustratorの版と作業に合うほうをお選びください。
+「記載なし」は、ヘルプがどちらとも述べていないという意味で、機能がないという意味ではありません。Adobe側の列は、Adobeのヘルプ3ページ（[概要](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/about-using-ai-tools-with-illustrator.html)、[接続](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/connect-illustrator-to-ai-tools.html)、[ドキュメントの操作](https://helpx.adobe.com/illustrator/desktop/connect-with-other-apps-and-tools/work-with-illustrator-documents-from-ai-tools.html)）の内容で、Adobeの最終更新は2026年8月18日、確認は2026年11月23日です。Betaの内容は変わる可能性があります。お使いのIllustratorの版と作業に合うほうをお選びください。
 
 ## インストール
 
@@ -57,24 +57,24 @@ MacとNode.js 20以上を用意し、通常版Illustratorを前面に表示・�
 
 ```bash
 npx -y illustrator-studio-mcp@beta --version
-npx -y illustrator-studio-mcp@0.1.0-beta.6 doctor
+npx -y illustrator-studio-mcp@0.1.0-beta.7 doctor
 ```
 
-`@beta` はdiscovery用、保存する登録は確認したexact versionです。表示がbeta.6以外なら止まり、その版の案内を確認します。Node/npm/npxのPATHとregistry失敗時の案内、明示更新・rollbackは[導入ガイド](docs/install.md)にあります。読み取り専用の `setup` で、起動した版に固定した登録コマンドも表示できます。空cacheでのversion起動は既存Macの測定で、新品Mac・doctor・client再接続の完了を意味しません。
+`@beta` はdiscovery用、保存する登録は確認したexact versionです。表示がbeta.7以外なら止まり、その版の案内を確認します。Node/npm/npxのPATHとregistry失敗時の案内、明示更新・rollbackは[導入ガイド](docs/install.md)にあります。読み取り専用の `setup` で、起動した版に固定した登録コマンドも表示できます。空cacheでのversion起動は既存Macの測定で、新品Mac・doctor・client再接続の完了を意味しません。
 
 ### Claude Desktop（いちばん簡単・Node.js不要）
 
-1. [illustrator-studio-mcp-0.1.0-beta.6.mcpb をダウンロード](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.6/illustrator-studio-mcp-0.1.0-beta.6.mcpb)して、ダブルクリック →「インストール」を押します。
+1. [illustrator-studio-mcp-0.1.0-beta.7.mcpb をダウンロード](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/download/v0.1.0-beta.7/illustrator-studio-mcp-0.1.0-beta.7.mcpb)して、ダブルクリック →「インストール」を押します。
 2. 拡張が有効になっていることを確かめて、新しいチャットで使い始めます。
 
-ダウンロードしたファイルを確かめたい場合は、[GitHubの配布ページ](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.6)の `SHA256SUMS` と照合できます（手順は[導入ガイド](docs/install.md#desktop拡張mcpb主な手順)）。
+ダウンロードしたファイルを確かめたい場合は、[GitHubの配布ページ](https://github.com/mhimt-lab/illustrator-studio-mcp/releases/tag/v0.1.0-beta.7)の `SHA256SUMS` と照合できます（手順は[導入ガイド](docs/install.md#desktop拡張mcpb主な手順)）。
 
 ### ChatGPT
 
 必要なもの: Node.js 20以上（[公式サイト](https://nodejs.org/ja)のインストーラーで入れます）
 
 1. ChatGPTのサイドバーで「プラグイン」を開き、右上の「追加」→「マーケットプレイスを追加」を選びます。
-2. 「ソース」に `mhimt-lab/illustrator-studio-mcp`、「Git ref」に `v0.1.0-beta.6` を入力し、「マーケットプレイスを追加」を押します。Git ref は版の固定です。
+2. 「ソース」に `mhimt-lab/illustrator-studio-mcp`、「Git ref」に `v0.1.0-beta.7` を入力し、「マーケットプレイスを追加」を押します。Git ref は版の固定です。
 3. 同じ画面で「Illustrator」を検索し、Illustrator Studio MCP の「＋」を押します。「インストールしました」と表示されれば完了です。
 4. 上の「Work」を選び、入力欄の右下のパソコンのアイコンが「お使いのコンピューターで」になっていることを確かめて、新しいチャットで使い始めます。
 
@@ -83,7 +83,7 @@ npx -y illustrator-studio-mcp@0.1.0-beta.6 doctor
 ターミナルに慣れている方は、Codex CLIのコマンド2行でも追加できます（追加後はChatGPTを起動し直します）。
 
 ```bash
-codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.6
+codex plugin marketplace add mhimt-lab/illustrator-studio-mcp --ref v0.1.0-beta.7
 codex plugin add illustrator-studio-mcp@illustrator-studio-mcp
 ```
 
@@ -92,7 +92,7 @@ codex plugin add illustrator-studio-mcp@illustrator-studio-mcp
 Node.js 20以上が必要です。ターミナルで次の1行を実行し、Claude Codeを起動し直します。
 
 ```bash
-claude mcp add --transport stdio --scope user illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.6
+claude mcp add --transport stdio --scope user illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.7
 ```
 
 ### Codex CLI
@@ -100,7 +100,7 @@ claude mcp add --transport stdio --scope user illustrator-studio -- npx -y illus
 Node.js 20以上が必要です。ターミナルで次の1行を実行し、Codex CLIを起動し直します。
 
 ```bash
-codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.6
+codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.7
 ```
 
 ダウンロードしたファイルの確かめ方、更新・削除、ほかの登録方法は[導入ガイド](docs/install.md)にまとめています。
@@ -113,7 +113,7 @@ codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.6
 <tr>
 <td width="33%" valign="top"><img src="docs/images/features/make-with-words-ja.webp" width="260" alt="イメージ図：オープン告知のポスターの依頼、作った図形と文字の一覧（それぞれにチェック）、できあがったポスター。ラベル：図形と文字をまとめて作成"><br><b>話しかけるだけでIllustratorで作図</b><br>作りたいものを言葉で伝えると、AIがIllustratorで図形や文字をまとめて作ります。作ったものは一つずつIllustratorから読み直して確かめます。<br><a href="docs/tools.md#図形と文字をつくる">条件 →</a></td>
 <td width="33%" valign="top"><img src="docs/images/features/batch-changes-ja.webp" width="260" alt="イメージ図：修正リスト（日付・色・店名）を反映したポスターと、チェック済みのリスト。ラベル：3件の修正を一括で"><br><b>修正をまとめて一度に</b><br>クライアントの修正リストのような複数の変更を、1回でまとめて反映します。途中で失敗したら、ほかの変更も元に戻します。<br><a href="docs/tools.md#文字をまとめて差し替える">条件 →</a></td>
-<td width="33%" valign="top"><img src="docs/images/features/jp-typesetting-ja.webp" width="260" alt="イメージ図：「書籍用紙」に分割禁止を設定して泣き別れを直した本文。ラベル：禁則と泣き別れを検出"><br><b>日本語の組版を点検し、分割禁止で直す</b><br>Illustratorが組んだ実際の改行位置を読み、禁則や、分けたくない語の泣き別れを指摘します（文書は変えません）。見つけた語には分割禁止を設定できます。<br><a href="docs/tools.md#日本語の改行を点検する">条件 →</a></td>
+<td width="33%" valign="top"><img src="docs/images/features/jp-typesetting-ja.webp" width="260" alt="イメージ図：「書籍用紙」に分割禁止を設定して泣き別れを直した本文。ラベル：禁則と泣き別れを検出"><br><b>大きな書類でも、日本語の組版を最後まで点検</b><br>Illustratorが組んだ実際の改行位置を読み、禁則や語の泣き別れを種類ごとにまとめて指摘します（文書は変えません）。ページに分けて最後まで進められ、続きのページは読み直しが減って速くなりました。300枠・12,000字の書類をIllustrator 31.0.0で最後まで確かめています。見つけた語には分割禁止を設定できます。<br><a href="docs/tools.md#日本語の改行を点検する">条件 →</a></td>
 </tr>
 <tr>
 <td width="33%" valign="top"><img src="docs/images/features/photo-fit-ja.webp" width="260" alt="イメージ図：写真で枠を覆い、カップを中心に合わせてクリッピングマスクで切り抜いたメニューカード。ラベル：枠に合わせて配置・切り抜き"><br><b>写真を枠いっぱいに配置して切り抜く</b><br>写真で枠を覆うように配置し、見せたいところ（カップなど）が収まる位置に合わせます。はみ出した部分は矩形のクリッピングマスクで切り抜きます。<br><a href="docs/tools.md#写真を枠に合わせて配置する">条件 →</a></td>
@@ -161,8 +161,9 @@ codex mcp add illustrator-studio -- npx -y illustrator-studio-mcp@0.1.0-beta.6
 
 ## 使うときの注意
 
-- **Mac専用です。** 通常版のAdobe Illustrator（2026・30.8で確認）で使います。
+- **Mac専用です。** 通常版のAdobe Illustrator（2026・30.8で確認、2027・31.0は確認した操作のみ）で使います。
 - **Windowsは準備中です。** WindowsとIllustratorをお持ちの方に、検証への協力をお願いしています。手順と検証キットは[Windows検証キット](https://github.com/mhimt-lab/illustrator-studio-mcp/blob/main/windows-probe/README.md)にあります（結果は公開のIssueで提出していただきます）。
+- **Windowsの保証範囲には制限があります。** プロセスの異常終了・例外には、従来のアトミックな rename とファイル同期による保証を維持します。初回作成の親ディレクトリ同期が EPERM を返す場合、NTFS のメタデータジャーナルと既存のファイル同期に依存して進み、電源断に対する新しいディレクトリ項目の永続性は保証しません。電源断・強制再起動直後の state root の消失・巻き戻り、および旧 build との同時実行は Windows では保証外で、この場合は明示的に有効化した変更操作が二重適用される可能性があります。読み取りによる文書保全は変わらず、Windows は既定で読み取り専用です。変更操作を既定で公開する前に、各操作で文書側の前提条件を照合して再適用を拒否する effect 側 CAS を必須とします。
 - **Illustratorを前面に表示し、画面をロックしないでください。** 背面や画面ロック中は、操作が止まったり、理由の分かりにくい失敗になったりします。
 - **まず制作ファイルのコピーで試してください。** 試用版で、本番運用向けの完成版ではありません。
 
@@ -208,7 +209,7 @@ Illustrator Studio MCPは独立したプロジェクトで、Adobeの公式製�
 <details>
 <summary>接続・開発担当者向け：機能の識別名（普段の依頼では入力不要）</summary>
 
-`illustrator_align_objects`, `illustrator_analyze_display_spacing`, `illustrator_apply_character_style`, `illustrator_apply_pathfinder`, `illustrator_audit_typography`, `illustrator_capture_preview`, `illustrator_capture_structure_snapshot`, `illustrator_check_contrast`, `illustrator_check_text_consistency`, `illustrator_close_document`, `illustrator_close_edit_session`, `illustrator_compare_images`, `illustrator_create_area_text`, `illustrator_create_backup`, `illustrator_create_barcode`, `illustrator_create_batch`, `illustrator_create_character_style`, `illustrator_create_clipping_mask`, `illustrator_create_document`, `illustrator_create_layer`, `illustrator_create_point_text`, `illustrator_create_qr_code`, `illustrator_create_rectangle`, `illustrator_create_shape`, `illustrator_create_swatch_resource`, `illustrator_create_trim_marks`, `illustrator_delete_objects`, `illustrator_diff_structure`, `illustrator_duplicate_object`, `illustrator_edit_path_points`, `illustrator_embed_image`, `illustrator_export`, `illustrator_export_outlined`, `illustrator_export_pdf`, `illustrator_extract_design_tokens`, `illustrator_extract_text`, `illustrator_find_color_usages`, `illustrator_find_fonts`, `illustrator_get_area_text_options`, `illustrator_get_context`, `illustrator_get_edit_session`, `illustrator_get_object`, `illustrator_get_path_points`, `illustrator_group_objects`, `illustrator_import_vector_artwork`, `illustrator_list_documents`, `illustrator_list_layers`, `illustrator_list_objects`, `illustrator_list_recipes`, `illustrator_list_selection`, `illustrator_list_swatches`, `illustrator_list_text_styles`, `illustrator_make_compound_path`, `illustrator_move_object_to_layer`, `illustrator_mutate_batch`, `illustrator_open_document`, `illustrator_open_edit_session`, `illustrator_optimize_images`, `illustrator_place_image`, `illustrator_plan_color_replacement`, `illustrator_plan_recipe`, `illustrator_preflight_images`, `illustrator_preflight_print`, `illustrator_read_structure_diff`, `illustrator_reconcile`, `illustrator_reconcile_backup`, `illustrator_reconcile_delete`, `illustrator_reconcile_export`, `illustrator_reconcile_save_as`, `illustrator_release_clipping_mask`, `illustrator_relink_image`, `illustrator_render_artboards`, `illustrator_reorder_layer`, `illustrator_replace_area_text_range`, `illustrator_replace_font`, `illustrator_replace_point_text`, `illustrator_replace_point_text_batch`, `illustrator_replace_text_range`, `illustrator_run_m6_appearance_preview_recipe`, `illustrator_run_recipe`, `illustrator_save_document`, `illustrator_save_document_as`, `illustrator_save_recipe`, `illustrator_set_area_text_columns`, `illustrator_set_layer_state`, `illustrator_set_no_break`, `illustrator_set_object_state`, `illustrator_set_path_appearance`, `illustrator_set_stacking_order`, `illustrator_set_stroke_style`, `illustrator_set_text_orientation`, `illustrator_set_text_style`, `illustrator_transform_object`, `illustrator_transform_path_anchors`, `illustrator_update_artboard`, `illustrator_update_character_style`
+`illustrator_activate_document`, `illustrator_align_objects`, `illustrator_analyze_display_spacing`, `illustrator_apply_character_style`, `illustrator_apply_dataset`, `illustrator_apply_pathfinder`, `illustrator_audit_typography`, `illustrator_bind_variable`, `illustrator_capture_preview`, `illustrator_capture_structure_snapshot`, `illustrator_check_contrast`, `illustrator_check_text_consistency`, `illustrator_close_document`, `illustrator_close_edit_session`, `illustrator_compare_images`, `illustrator_create_area_text`, `illustrator_create_backup`, `illustrator_create_barcode`, `illustrator_create_batch`, `illustrator_create_character_style`, `illustrator_create_clipping_mask`, `illustrator_create_dataset`, `illustrator_create_document`, `illustrator_create_layer`, `illustrator_create_point_text`, `illustrator_create_qr_code`, `illustrator_create_rectangle`, `illustrator_create_shape`, `illustrator_create_swatch_resource`, `illustrator_create_trim_marks`, `illustrator_delete_objects`, `illustrator_diff_structure`, `illustrator_duplicate_artboard`, `illustrator_duplicate_object`, `illustrator_edit_path_points`, `illustrator_embed_image`, `illustrator_export`, `illustrator_export_outlined`, `illustrator_export_pdf`, `illustrator_extract_design_tokens`, `illustrator_extract_text`, `illustrator_find_color_usages`, `illustrator_find_fonts`, `illustrator_get_area_text_options`, `illustrator_get_context`, `illustrator_get_edit_session`, `illustrator_get_object`, `illustrator_get_path_points`, `illustrator_group_objects`, `illustrator_import_vector_artwork`, `illustrator_insert_vertical_space`, `illustrator_list_documents`, `illustrator_list_layers`, `illustrator_list_objects`, `illustrator_list_recipes`, `illustrator_list_selection`, `illustrator_list_swatches`, `illustrator_list_text_styles`, `illustrator_list_variables`, `illustrator_make_compound_path`, `illustrator_measure_scale_reference`, `illustrator_move_object_to_layer`, `illustrator_mutate_batch`, `illustrator_normalize_stroke_widths`, `illustrator_open_document`, `illustrator_open_edit_session`, `illustrator_optimize_images`, `illustrator_place_image`, `illustrator_plan_color_replacement`, `illustrator_plan_recipe`, `illustrator_plan_text_fit`, `illustrator_plan_text_increment`, `illustrator_preflight_images`, `illustrator_preflight_print`, `illustrator_read_structure_diff`, `illustrator_reconcile`, `illustrator_reconcile_backup`, `illustrator_reconcile_delete`, `illustrator_reconcile_export`, `illustrator_reconcile_save_as`, `illustrator_release_clipping_mask`, `illustrator_relink_image`, `illustrator_render_artboards`, `illustrator_reorder_layer`, `illustrator_replace_area_text_range`, `illustrator_replace_font`, `illustrator_replace_point_text`, `illustrator_replace_point_text_batch`, `illustrator_replace_rgb_converted_black`, `illustrator_replace_text_range`, `illustrator_run_m6_appearance_preview_recipe`, `illustrator_run_recipe`, `illustrator_save_document`, `illustrator_save_document_as`, `illustrator_save_recipe`, `illustrator_scale_artwork`, `illustrator_set_area_text_columns`, `illustrator_set_layer_state`, `illustrator_set_no_break`, `illustrator_set_object_state`, `illustrator_set_path_appearance`, `illustrator_set_stacking_order`, `illustrator_set_stroke_style`, `illustrator_set_text_composition`, `illustrator_set_text_orientation`, `illustrator_set_text_style`, `illustrator_transform_object`, `illustrator_transform_path_anchors`, `illustrator_update_artboard`, `illustrator_update_character_style`, `illustrator_update_dataset`
 
 </details>
 

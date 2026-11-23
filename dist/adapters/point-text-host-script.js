@@ -2,6 +2,9 @@ import { z } from 'zod';
 import { layerPathSchema } from '../mutation-result-schema-core.js';
 export const POINT_TEXT_MAX_CODE_UNITS = 1_000;
 export const POINT_TEXT_PROFILE_NAME = 'plain_point_text_v2';
+export const POINT_TEXT_PROFILE_MOJIKUMI_UNDEFINED = 'plain_point_text_v2_mojikumi_undefined';
+export const POINT_TEXT_PROFILES = [POINT_TEXT_PROFILE_NAME, POINT_TEXT_PROFILE_MOJIKUMI_UNDEFINED];
+export const pointTextProfileSchema = z.enum(POINT_TEXT_PROFILES);
 export const POINT_TEXT_JUSTIFICATIONS = [
     'Justification.LEFT', 'Justification.CENTER', 'Justification.RIGHT',
 ];
@@ -189,7 +192,7 @@ export const pointTextGroupSnapshotSchema = z.strictObject({
     uuid: z.string().min(1).max(255),
     type: z.literal('TextFrame'),
     kind: z.literal('TextType.POINTTEXT'),
-    profile: z.literal(POINT_TEXT_PROFILE_NAME),
+    profile: pointTextProfileSchema,
     frameShape: z.literal('point_text_unthreaded'),
     fontInstalled: z.literal(true),
     storyFrameCount: z.literal(1),
@@ -228,7 +231,7 @@ export const pointTextRangeGroupSnapshotSchema = z.strictObject({
     uuid: z.string().min(1).max(255),
     type: z.literal('TextFrame'),
     kind: z.literal('TextType.POINTTEXT'),
-    profile: z.literal(POINT_TEXT_PROFILE_NAME),
+    profile: pointTextProfileSchema,
     frameShape: z.literal('point_text_unthreaded'),
     storyFrameCount: z.literal(1),
     manualKerning: z.literal('none'),
@@ -250,6 +253,8 @@ export const pointTextRangeSnapshotSchema = pointTextRangeGroupSnapshotSchema.om
 export const POINT_TEXT_SNAPSHOT_SCRIPT = `
 var POINT_TEXT_MAX_CODE_UNITS = ${POINT_TEXT_MAX_CODE_UNITS};
 var POINT_TEXT_PROFILE = ${JSON.stringify(POINT_TEXT_PROFILE_NAME)};
+var POINT_TEXT_PROFILE_MOJIKUMI_UNDEFINED = ${JSON.stringify(POINT_TEXT_PROFILE_MOJIKUMI_UNDEFINED)};
+var POINT_TEXT_UNDEFINED_ATTRIBUTE_ERROR = ${PLAIN_POINT_TEXT_V1.undefinedStyleAttributeErrorNumber};
 var POINT_TEXT_MAX_LAYER_DEPTH = ${POINT_TEXT_MAX_LAYER_DEPTH_LIMIT};
 var POINT_TEXT_PINNED = ${JSON.stringify({
     character: PLAIN_POINT_TEXT_V1.character,
@@ -286,14 +291,21 @@ function pointTextCanonicalValue(value) {
   return "o:" + String(value);
 }
 
-function pointTextAssertPinned(host, table, scope) {
+function pointTextAssertPinned(host, table, scope, skipName) {
   for (var name in table) {
-    if (!table.hasOwnProperty(name)) continue;
+    if (!table.hasOwnProperty(name) || name === skipName) continue;
     var value;
     try { value = host[name]; }
     catch (readError) {
+      if (scope === "paragraph attribute" && name === "mojikumi" && readError && Number(readError.number) === POINT_TEXT_UNDEFINED_ATTRIBUTE_ERROR) {
+        throw mutationError("preflight_failed",
+          "Target paragraph attribute mojikumi is undefined for the text range (Illustrator error " + POINT_TEXT_UNDEFINED_ATTRIBUTE_ERROR + "): the paragraph's " +
+          "character spacing set (\\u6587\\u5B57\\u7D44\\u307F) is not set, as for text whose set was chosen as none. This operation does not support it; the state is common to " +
+          "the text of such a document and can be worked around with a script outside this server (check the result with the read tools).");
+      }
       throw mutationError("preflight_failed",
-        "Target " + scope + " " + name + " is unreadable, so the point-text state cannot be bound.");
+        "Target " + scope + " " + name + " is unreadable" + (readError && typeof readError.number === "number" ? " (Illustrator error " + readError.number + ")" : "") +
+        ", so the point-text state cannot be bound.");
     }
     if (pointTextCanonicalValue(value) !== table[name]) {
       throw mutationError("preflight_failed",
@@ -384,11 +396,32 @@ function pointTextFrameState(target) {
   };
 }
 
-function pointTextParagraphState(range) {
+/**
+ * (#767) The profile of a paragraph, from ONE read of mojikumi: { name, checked }. A read that fails with error 9563 and no other number gives the
+ * undefined profile; a read that returns the pinned value gives the plain profile and is already checked; any other value or failure gives the plain
+ * profile unchecked, so pointTextParagraphState reads and refuses it with its own message. Nothing here refuses, and a caller that does not
+ * record the name in its snapshot must not use it.
+ */
+function pointTextParagraphProfile(range) {
   var paragraph;
   try { paragraph = range.paragraphAttributes; }
   catch (paragraphError) { throw mutationError("preflight_failed", "Target paragraph attributes are unavailable."); }
-  pointTextAssertPinned(paragraph, POINT_TEXT_PINNED.paragraph, "paragraph attribute");
+  var value;
+  try { value = paragraph.mojikumi; }
+  catch (readError) {
+    if (readError && Number(readError.number) === POINT_TEXT_UNDEFINED_ATTRIBUTE_ERROR) return { name: POINT_TEXT_PROFILE_MOJIKUMI_UNDEFINED, checked: true };
+    return { name: POINT_TEXT_PROFILE, checked: false };
+  }
+  return { name: POINT_TEXT_PROFILE, checked: pointTextCanonicalValue(value) === POINT_TEXT_PINNED.paragraph.mojikumi };
+}
+
+/** paragraphProfile: the result of pointTextParagraphProfile for this range; its mojikumi was read there, so it is not read again. Without it every pin is read. */
+function pointTextParagraphState(range, paragraphProfile) {
+  var paragraph;
+  try { paragraph = range.paragraphAttributes; }
+  catch (paragraphError) { throw mutationError("preflight_failed", "Target paragraph attributes are unavailable."); }
+  var skipName = paragraphProfile && paragraphProfile.checked === true ? "mojikumi" : undefined;
+  pointTextAssertPinned(paragraph, POINT_TEXT_PINNED.paragraph, "paragraph attribute", skipName);
   var listStyle;
   try { listStyle = paragraph.listStyle; }
   catch (listStyleError) { throw mutationError("preflight_failed", "Target paragraph list style is unavailable."); }
@@ -609,7 +642,8 @@ function pointTextStyle(target) {
   };
 }
 
-function pointTextSnapshot(document, target, expectedUuid) {
+/** admitUndefinedMojikumi: only a reader that records the profile name in what it returns may pass true (replace operations); creation keeps the strict pin. */
+function pointTextSnapshot(document, target, expectedUuid, admitUndefinedMojikumi) {
   if (!target || target.typename !== "TextFrame") {
     throw mutationError("preflight_failed", "Point-text operations support TextFrame targets only.");
   }
@@ -646,17 +680,18 @@ function pointTextSnapshot(document, target, expectedUuid) {
   if (typeof firstRunLength !== "number" || firstRunLength !== textRange.length) {
     throw mutationError("preflight_failed", "Point-text operations support one complete native text style run only.");
   }
+  var paragraphProfile = admitUndefinedMojikumi === true ? pointTextParagraphProfile(textRange) : undefined;
   return {
     uuid: target.uuid,
     type: target.typename,
     kind: "TextType.POINTTEXT",
-    profile: POINT_TEXT_PROFILE,
+    profile: paragraphProfile ? paragraphProfile.name : POINT_TEXT_PROFILE,
     frameShape: pointTextFrameShape(target),
     fontInstalled: true,
     storyFrameCount: 1,
     textRunCount: 1,
     manualKerning: pointTextManualKerning(textRange),
-    tabStopCount: pointTextParagraphState(textRange),
+    tabStopCount: pointTextParagraphState(textRange, paragraphProfile),
     style: pointTextStyle(target),
     frame: pointTextFrameState(target),
     layerPath: layerPath,
@@ -837,7 +872,7 @@ function pointTextAncestryWithGroups(target, groups) {
  */
 function pointTextGroupSnapshot(document, target, expectedUuid) {
   var groups = pointTextGroupAncestry(target);
-  if (groups.length === 0) return pointTextSnapshot(document, target, expectedUuid);
+  if (groups.length === 0) return pointTextSnapshot(document, target, expectedUuid, true);
   if (!target || target.typename !== "TextFrame") {
     throw mutationError("preflight_failed", "Point-text operations support TextFrame targets only.");
   }
@@ -871,17 +906,18 @@ function pointTextGroupSnapshot(document, target, expectedUuid) {
   if (typeof firstRunLength !== "number" || firstRunLength !== textRange.length) {
     throw mutationError("preflight_failed", "Point-text operations support one complete native text style run only.");
   }
+  var paragraphProfile = pointTextParagraphProfile(textRange);
   return pointTextWithGroups({
     uuid: target.uuid,
     type: target.typename,
     kind: "TextType.POINTTEXT",
-    profile: POINT_TEXT_PROFILE,
+    profile: paragraphProfile.name,
     frameShape: pointTextFrameShape(target),
     fontInstalled: true,
     storyFrameCount: 1,
     textRunCount: 1,
     manualKerning: pointTextManualKerning(textRange),
-    tabStopCount: pointTextParagraphState(textRange),
+    tabStopCount: pointTextParagraphState(textRange, paragraphProfile),
     style: pointTextStyle(target),
     frame: pointTextFrameState(target),
     layerPath: layerPath,

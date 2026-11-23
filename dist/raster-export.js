@@ -1,6 +1,7 @@
-import { evaluateHostVersion } from './host-version-policy.js';
+import { evaluateHostVersion, hostVersionAdmitted } from './host-version-policy.js';
+import { admitHostVersionPlan, hostVersionNoteSchema } from './host-version-admission.js';
 import { pathComparisonParams, sameFilePath } from './file-path.js';
-import { matchingDocumentPaths, withFilePathComparisons } from './file-path-identity.js';
+import { matchingDocumentScope, withFilePathComparisons } from './file-path-identity.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { link, lstat, mkdir, open, readdir, rmdir, unlink } from 'node:fs/promises';
 import { basename, dirname, extname, join } from 'node:path';
@@ -11,17 +12,26 @@ import { STABLE_ILLUSTRATOR_BUNDLE_ID } from './illustrator-application.js';
 import { callTimingEnabled } from './call-timing.js';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from './command-id.js';
 import { BackupCopyError, BackupPreconditionError, copyErrorCreatedDestination, copyFileExclusive, hostDocumentIdentitySchema, inspectSourceFile, resolveBackupRoot, CTIME_ONLY_READ_ATTEMPTS, onlyCtimeDiffers, sameFileIdentity, sameFileOrSameBytes, serializeFileIdentity, verifyTrackedFile, withBackupRootScope, } from './document-backup.js';
-import { assertOutputAbsent, EXPORT_CLOSE_WORK_COPY_SCRIPT, EXPORT_HELPERS, EXPORT_HOST_TIMEOUT_MS, EXPORT_INVENTORY_SCRIPT, EXPORT_OPEN_PRE_ATTEMPT_CODES, EXPORT_OPEN_WORK_COPY_SCRIPT, ExportPreconditionError, parseExportHostError, STAGING_DIRECTORY_PREFIX, createOnceLinkAllowance, validateOutputLocation, withOutputParentScope, workCopyFileName, } from './document-export.js';
+import { assertOutputAbsent, EXPORT_CLOSE_WORK_COPY_SCRIPT, EXPORT_HELPERS, EXPORT_HOST_TIMEOUT_MS, EXPORT_INVENTORY_SCRIPT, EXPORT_OPEN_PRE_ATTEMPT_CODES, EXPORT_OPEN_WORK_COPY_SCRIPT, ExportPreconditionError, OutputPreLinkCheckError, parseExportHostError, STAGING_DIRECTORY_PREFIX, createOnceLinkAllowance, validateOutputLocation, withOutputParentScope, workCopyFileName, } from './document-export.js';
+import { DEFAULT_DURABLE_FILE_POLICY } from './durable-file-policy.js';
 import { ARTBOARD_INTEGER_TOLERANCE, isIntegerWithinTolerance } from './artboard-integer.js';
 import { summarizeValidationFailure } from './tool-arguments.js';
 import { documentKeyMatches } from './document-key.js';
+import { RASTER_READ_LINKS_SCRIPT, admitLinkedFiles, rasterLinkFactSchema } from './raster-linked-files.js';
 import { IndeterminateExecutionError } from './domain.js';
+import { EXCLUDE_NON_PRINTING_LAYERS_DESCRIPTION, NON_PRINTING_LAYER_HELPERS, nonPrintingLayerWarning, nonPrintingLayerWarningSchema, } from './non-printing-layers.js';
 import { canonicalSha256 } from './mutation-canonical.js';
 import { documentContextSchema } from './mutation-result-schema-core.js';
 import { atomicCreatePrivateRecord, atomicReplacePrivateRecord, readSecurePrivateRecord } from './private-record.js';
 import { temporaryTwinPattern } from './state-quarantine.js';
-import { assessRasterRecordSet, RASTER_EXPORT_KIND, RASTER_EXPORT_RECORD_SUFFIXES, RASTER_EXPORT_RECORD_VERSION, RASTER_EXACT_PX_RECORD_VERSION, rasterExportArtifactSchema, rasterExportOptionsSchema, singleRasterExportOptionsSchema, } from './raster-export-records.js';
+import { assessRasterRecordSet, RASTER_EXPORT_KIND, RASTER_EXPORT_RECORD_SUFFIXES, RASTER_EXPORT_RECORD_VERSION, RASTER_EXACT_PX_RECORD_VERSION, RASTER_SVG_RECORD_VERSION, rasterExportArtifactSchema, rasterExportOptionsSchema, singleRasterExportOptionsSchema, } from './raster-export-records.js';
+import { svgArtifactSchema, svgExpectedSchema, svgExportOptionsSchema } from './svg-export-records.js';
+import { SvgArtifactError, SVG_EXPORT_LIMITS, svgArtboardNameMeasured, verifySvgArtifact } from './svg-export-verification.js';
 import { noFollowReadFlags, noFollowNonBlockingReadFlags, noFollowDirectoryFlags, currentUid } from './platform-primitives.js';
+import { isSvgExportRecord, isExactExportRecord } from './raster-export-records.js';
+import { expectedOutputSchema, replacementSummarySchema, captureExpectedOutput, assertExpectedOutput, previousOutputLimit, prepareReplacementIntent, detachPreviousOutput, cleanupPreviousSlot, restorePreviousOutput, replacementSummary, assertReplacementScopes, syncReplacementDirectory, verifyReplacementFile, OutputReplacementError, } from './output-replacement.js';
+import { PUBLISHED_DEPTH_KEY } from './published-tool-schema.js';
+import { assessReplacementTerminal, requireReplacementTerminal, replacementPublicationPayload, replacementTerminalEvidence, ReplacementTerminalInvalidError } from './raster-overwrite-terminal.js';
 export const RASTER_EXPORT_TOOL = 'illustrator_export';
 export const RASTER_EXPORT_PROFILE = 'raster_export_v1';
 export const RASTER_MAX_SIDE_PX = 4000;
@@ -150,18 +160,30 @@ export function exactPixelRasterDimensions(input) {
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 export const rasterExportInputSchema = z.strictObject({
     expected_document_key: z.string().min(1).max(16_384),
-    format: z.enum(['png', 'jpeg']),
-    output_path: z.string().min(1).max(4_096).describe('Absolute path of a new file (.png, or .jpg/.jpeg) in an existing folder; it must not exist.'),
+    format: z.enum(['png', 'jpeg', 'svg']),
+    output_path: z.string().min(1).max(4_096).describe('Absolute path of a new file (.png, .jpg/.jpeg or .svg) in an existing folder; it must not exist.'),
     artboard_index: z.number().int().nonnegative().describe('0-based index of the one artboard to export (it need not be active).'),
     scale: z.union([z.literal(1), z.literal(2)]).optional().describe('1 (default) or 2: 1 pt becomes 1 or 2 px.'),
     width_px: z.number().int().min(1).max(4000).optional().describe('Single artboard: exact width in px, preserving aspect ratio. Not with height_px or scale; both output sides must be integer px.'),
     height_px: z.number().int().min(1).max(4000).optional().describe('Single artboard: exact height in px. Not with width_px or scale; both output sides must be integer px.'),
     transparent: z.boolean().optional().describe('PNG only; default true. false gives a white background (legacy 1x or measured exact-px).'),
     quality: z.number().int().min(0).max(100).optional().describe('JPEG only; default 80.'),
+    exclude_non_printing_layers: z.boolean().optional().describe(EXCLUDE_NON_PRINTING_LAYERS_DESCRIPTION),
     apply: z.boolean().default(false),
     command_id: applyCommandIdSchema.optional(),
     confirm_export_hash: sha256Schema.optional().describe('The plan\'s planDigest, as in its nextCall arguments.'),
+    overwrite: z.boolean().optional().describe('Single artboard only: back up the existing output before replacing it; default false.'),
+    expected_output: z.union([expectedOutputSchema]).meta({ [PUBLISHED_DEPTH_KEY]: 0 }).optional().describe('Echo unchanged from the overwrite plan nextCall.'),
 }).superRefine((input, context) => {
+    if (input.expected_output !== undefined && (input.overwrite !== true || !input.apply))
+        context.addIssue({ code: 'custom', path: ['expected_output'], message: 'expected_output is only accepted in an overwrite apply nextCall.' });
+    if (input.overwrite === true && input.apply && input.expected_output === undefined)
+        context.addIssue({ code: 'custom', path: ['expected_output'], message: 'Overwrite apply requires expected_output from the plan nextCall.' });
+    if (input.format === 'svg')
+        for (const key of ['scale', 'width_px', 'height_px', 'transparent', 'quality', 'exclude_non_printing_layers']) {
+            if (input[key] !== undefined)
+                context.addIssue({ code: 'custom', path: [key], message: `${key} cannot be combined with format "svg".` });
+        }
     if (input.width_px !== undefined && input.height_px !== undefined)
         context.addIssue({ code: 'custom', path: ['width_px'], message: 'width_px and height_px are mutually exclusive.' });
     if ((input.width_px !== undefined || input.height_px !== undefined) && input.scale !== undefined)
@@ -178,6 +200,8 @@ export const rasterExportInputSchema = z.strictObject({
     }
 });
 export function rasterOptionsOf(input) {
+    if (input.format === 'svg')
+        throw new Error('SVG has its own measured options, not raster options.');
     const scale = input.scale ?? 1;
     return input.format === 'png'
         ? { format: 'png', scale, transparent: input.transparent ?? true }
@@ -195,7 +219,8 @@ export const rasterExportRejectionSchema = z.enum([
     'export_root_unavailable', 'output_path_invalid', 'output_exists', 'output_cross_device', 'plan_changed',
     'dimension_contract_unavailable', 'command_id_conflict', 'command_id_in_use', 'export_records_invalid',
     'artifact_unavailable', 'artifact_identity_mismatch', 'too_many_artboards', 'output_dir_invalid',
-    'host_not_foreground', 'host_screen_locked', 'host_profile_unknown',
+    'host_not_foreground', 'host_screen_locked', 'host_profile_unknown', 'linked_file_unavailable',
+    'output_changed_since_plan', 'output_previous_unsafe', 'output_previous_too_large', 'output_changed', 'replacement_unresolved', 'overwrite_not_supported_on_platform',
 ]);
 const contextSchema = documentContextSchema;
 const timingSchema = z.strictObject({ totalMs: z.number().nonnegative(), hostCalls: z.number().int().nonnegative(), hostMs: z.number().nonnegative() });
@@ -228,6 +253,8 @@ export const rasterExportResultSchema = z.discriminatedUnion('outcome', [
         outcome: z.literal('planned_batch'),
         options: rasterExportOptionsSchema,
         items: z.array(batchPlannedItemSchema),
+        links: z.array(rasterLinkFactSchema).optional(),
+        warnings: z.array(nonPrintingLayerWarningSchema).optional(),
         planDigest: sha256Schema,
         nextCall: z.strictObject({ tool: z.literal(RASTER_EXPORT_TOOL), arguments: z.record(z.string(), z.unknown()) }),
     }),
@@ -242,14 +269,18 @@ export const rasterExportResultSchema = z.discriminatedUnion('outcome', [
     }),
     z.strictObject({
         outcome: z.literal('planned'),
+        existingOutput: expectedOutputSchema.optional(),
         document: contextSchema,
         artboard: artboardSchema,
-        options: singleRasterExportOptionsSchema,
+        options: z.union([singleRasterExportOptionsSchema, svgExportOptionsSchema]),
         outputPath: z.string().min(1),
-        expected: z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() }),
+        expected: z.union([z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() }), svgExpectedSchema]),
         ...expectedRangeFields,
         roundedEdges: roundedEdgesSchema.optional(),
         ...edgeWarningFields,
+        links: z.array(rasterLinkFactSchema).optional(),
+        warnings: z.array(nonPrintingLayerWarningSchema).optional(),
+        host_version: hostVersionNoteSchema.optional(),
         planDigest: sha256Schema,
         nextCall: z.strictObject({ tool: z.literal(RASTER_EXPORT_TOOL), arguments: z.record(z.string(), z.unknown()) }),
     }),
@@ -257,6 +288,7 @@ export const rasterExportResultSchema = z.discriminatedUnion('outcome', [
         outcome: z.literal('blocked'),
         reason: z.string().min(1),
         message: z.string(),
+        next_steps: z.array(z.string()).optional(),
         document: contextSchema,
         items: z.array(batchBlockedItemSchema).optional(),
     }),
@@ -268,15 +300,17 @@ export const rasterExportResultSchema = z.discriminatedUnion('outcome', [
     }),
     z.strictObject({
         outcome: z.literal('verified'),
+        replacement: replacementSummarySchema.optional(),
         exportId: z.uuid(),
         delivery: z.enum(['original', 'replay']),
-        artifact: rasterExportArtifactSchema,
+        artifact: z.union([rasterExportArtifactSchema, svgArtifactSchema]),
         sourcePreserved: z.literal(true),
         cleanup: z.array(z.strictObject({ path: z.string().min(1), removed: z.boolean(), reason: z.string() })),
         timing: timingSchema,
     }),
     z.strictObject({
         outcome: z.literal('failed'),
+        replacement: replacementSummarySchema.optional(),
         exportId: z.uuid(),
         delivery: z.enum(['original', 'replay']),
         stage: z.string().min(1),
@@ -287,6 +321,7 @@ export const rasterExportResultSchema = z.discriminatedUnion('outcome', [
     }),
     z.strictObject({
         outcome: z.literal('indeterminate'),
+        replacement: replacementSummarySchema.optional(),
         exportId: z.uuid(),
         stage: z.string().min(1),
         message: z.string(),
@@ -369,6 +404,22 @@ var result = {
 };
 `;
 export const RASTER_EXACT_EXPORT_SCRIPT = RASTER_EXPORT_SCRIPT.replace('rasterOptions.horizontalScale = params.scale * 100;\nrasterOptions.verticalScale = params.scale * 100;', 'rasterOptions.horizontalScale = params.renderScalePercent;\nrasterOptions.verticalScale = params.renderScalePercent;');
+export const RASTER_READ_SOURCE_LAYERS_SCRIPT = (() => {
+    const helpered = RASTER_READ_SOURCE_SCRIPT.replace(EXPORT_HELPERS, `${EXPORT_HELPERS}${NON_PRINTING_LAYER_HELPERS}`);
+    const scanning = helpered.replace('  placedItems: rasterReadDocument.placedItems.length\n};', '  placedItems: rasterReadDocument.placedItems.length,\n  nonPrintingLayers: nplScanSafe(rasterReadDocument)\n};');
+    if (helpered === RASTER_READ_SOURCE_SCRIPT || scanning === helpered)
+        throw new Error('The raster read-source script no longer has the expected shape.');
+    return scanning;
+})();
+function excludingNonPrintingLayers(script) {
+    const helpered = script.replace(`${EXPORT_HELPERS}\nvar rasterTarget`, `${EXPORT_HELPERS}${NON_PRINTING_LAYER_HELPERS}\nvar rasterTarget`);
+    const hiding = helpered.replace('try {\n  rasterDocument.exportFile(', 'try {\n  nplScan(rasterDocument, true);\n  rasterDocument.exportFile(');
+    if (helpered === script || hiding === helpered)
+        throw new Error('The raster export script no longer has the expected shape.');
+    return hiding;
+}
+export const RASTER_EXPORT_EXCLUDING_SCRIPT = excludingNonPrintingLayers(RASTER_EXPORT_SCRIPT);
+export const RASTER_EXACT_EXPORT_EXCLUDING_SCRIPT = excludingNonPrintingLayers(RASTER_EXACT_EXPORT_SCRIPT);
 export const RASTER_RECONCILE_CLOSE_SCRIPT = `${EXPORT_HELPERS}
 var rasterReconcileMatches = exportMatchesByPath(params.sessionPaths);
 if (rasterReconcileMatches.length > 1) throw new Error("MCP_ERROR:" + stringifyJson({ code: "RASTER_RECONCILE_NOT_UNIQUE", count: rasterReconcileMatches.length }));
@@ -394,21 +445,154 @@ finally { app.userInteractionLevel = rasterReconcileInteraction; }
 var result = { closed: rasterReconcileEntry, documents: exportRawInventory(), documentCount: app.documents.length };
 }
 `;
-export async function closeRasterWorkCopy(bridge, sessionPaths, expected, lease) {
+const EXPORT_MATCHES_BY_SCOPE = `function exportMatchesByScope(paths, directories) {
+  var exportScopeMatches = exportMatchesByPath(paths);
+  var exportScopeForms = params.hostFilePathForms;
+  for (var exportScopeScan = 0; exportScopeScan < app.documents.length; exportScopeScan++) {
+    var exportScopeDoc = app.documents[exportScopeScan];
+    var exportScopeSeen = false;
+    for (var exportScopeKnown = 0; exportScopeKnown < exportScopeMatches.length; exportScopeKnown++) {
+      if (exportScopeMatches[exportScopeKnown].doc === exportScopeDoc) exportScopeSeen = true;
+    }
+    if (exportScopeSeen) continue;
+    var exportScopePath = exportPathOf(exportScopeDoc);
+    var exportScopeUnder = false;
+    for (var exportScopeDir = 0; exportScopeDir < directories.length && !exportScopeUnder; exportScopeDir++) {
+      var exportScopeCandidates = [directories[exportScopeDir]];
+      if (exportScopeForms && Object.prototype.hasOwnProperty.call(exportScopeForms, directories[exportScopeDir])) exportScopeCandidates = exportScopeForms[directories[exportScopeDir]];
+      for (var exportScopeForm = 0; exportScopeForm < exportScopeCandidates.length; exportScopeForm++) {
+        if (String(exportScopePath).indexOf(exportScopeCandidates[exportScopeForm] + "/") === 0) { exportScopeUnder = true; break; }
+      }
+    }
+    if (exportScopeUnder) exportScopeMatches.push({ doc: exportScopeDoc, index: exportScopeScan, entry: exportInventoryEntry(exportScopeDoc, exportScopeScan) });
+  }
+  return exportScopeMatches;
+}
+`;
+export const RASTER_RECONCILE_CLOSE_SCOPE_SCRIPT = (() => {
+    const helpered = RASTER_RECONCILE_CLOSE_SCRIPT.replace(EXPORT_HELPERS, `${EXPORT_HELPERS}${EXPORT_MATCHES_BY_SCOPE}`);
+    const scoped = helpered.replace('var rasterReconcileMatches = exportMatchesByPath(params.sessionPaths);', 'var rasterReconcileMatches = exportMatchesByScope(params.sessionPaths, params.sessionDirectoryPaths);');
+    if (helpered === RASTER_RECONCILE_CLOSE_SCRIPT || scoped === helpered)
+        throw new Error('The raster reconcile-close script no longer has the expected shape.');
+    return scoped;
+})();
+function svgDerive(script, before, after) {
+    if (script.split(before).length !== 2)
+        throw new Error('The SVG host-script derivation no longer matches its pinned baseline.');
+    return script.replace(before, after);
+}
+export const SVG_SOURCE_SCAN_LIMITS = { entries: 2000, layers: 64, depth: 8 };
+const SVG_READ_SOURCE_SCRIPT = svgDerive(RASTER_READ_SOURCE_LAYERS_SCRIPT, 'var result = {', `
+var svgItems = [], svgLayers = [], svgLayerStack = [], svgScanLimitReason = null;
+var svgScan = { entries: 0, layers: 0, itemDepth: 0, layerDepth: 0, layerComparisons: 0, boundsReads: 0 };
+var svgMaxEntries = ${SVG_SOURCE_SCAN_LIMITS.entries}, svgMaxLayers = ${SVG_SOURCE_SCAN_LIMITS.layers}, svgMaxDepth = ${SVG_SOURCE_SCAN_LIMITS.depth};
+var svgRootLayers = rasterReadDocument.layers;
+var svgRootLayerCount = svgRootLayers.length, svgReservedLayers = svgRootLayerCount;
+if (svgRootLayerCount > svgMaxLayers) svgScanLimitReason = "layers";
+else for (var svgRootLayer = 0; svgRootLayer < svgRootLayerCount; svgRootLayer++) svgLayerStack.push({ layer: svgRootLayers[svgRootLayer], hidden: false, depth: 1 });
+while (svgLayerStack.length > 0 && svgScanLimitReason === null) {
+  var svgLayerEntry = svgLayerStack.pop();
+  var svgLayer = svgLayerEntry.layer;
+  svgScan.layers++;
+  if (svgLayerEntry.depth > svgScan.layerDepth) svgScan.layerDepth = svgLayerEntry.depth;
+  var svgHiddenLayer = svgLayerEntry.hidden || svgLayer.visible !== true;
+  // Layer.template is absent in the 30.8.2 DOM (#853); non-printing admission uses nplScanSafe below.
+  svgLayers.push({ layer: svgLayer, hidden: svgHiddenLayer });
+  var svgChildren = svgLayer.layers;
+  var svgChildCount = svgChildren.length;
+  if (svgReservedLayers + svgChildCount > svgMaxLayers) { svgScanLimitReason = "layers"; break; }
+  if (svgChildCount > 0 && svgLayerEntry.depth >= svgMaxDepth) { svgScanLimitReason = "depth"; break; }
+  svgReservedLayers += svgChildCount;
+  for (var svgChild = 0; svgChild < svgChildCount; svgChild++) svgLayerStack.push({ layer: svgChildren[svgChild], hidden: svgHiddenLayer, depth: svgLayerEntry.depth + 1 });
+}
+var svgItemStack = [], svgCandidates = [], svgReservedEntries = 0;
+if (svgScanLimitReason === null) {
+  var svgPageItems = rasterReadDocument.pageItems;
+  var svgPageItemCount = svgPageItems.length;
+  if (svgPageItemCount > svgMaxEntries) svgScanLimitReason = "entries";
+  else { svgReservedEntries = svgPageItemCount; svgItemStack.push({ collection: svgPageItems, count: svgPageItemCount, depth: 1 }); }
+}
+while (svgItemStack.length > 0 && svgScanLimitReason === null) {
+  var svgItemFrame = svgItemStack.pop();
+  for (var svgItemIndex = 0; svgItemIndex < svgItemFrame.count; svgItemIndex++) {
+    var svgItem = svgItemFrame.collection[svgItemIndex];
+    svgScan.entries++;
+    if (svgItemFrame.depth > svgScan.itemDepth) svgScan.itemDepth = svgItemFrame.depth;
+    var svgKind = String(svgItem.typename), svgParent = svgItem.parent, svgNonrendering = false;
+    if (svgKind === "GroupItem" || svgKind === "CompoundPathItem") {
+      var svgItemChildren = svgKind === "GroupItem" ? svgItem.pageItems : svgItem.pathItems;
+      var svgItemChildCount = svgItemChildren.length;
+      if (svgKind === "GroupItem") svgNonrendering = svgItemChildCount === 0;
+      if (svgReservedEntries + svgItemChildCount > svgMaxEntries) { svgScanLimitReason = "entries"; break; }
+      if (svgItemChildCount > 0 && svgItemFrame.depth >= svgMaxDepth) { svgScanLimitReason = "depth"; break; }
+      svgReservedEntries += svgItemChildCount;
+      if (svgItemChildCount > 0) svgItemStack.push({ collection: svgItemChildren, count: svgItemChildCount, depth: svgItemFrame.depth + 1 });
+    }
+    if (svgParent.typename === "Layer") svgCandidates.push({ item: svgItem, parent: svgParent, kind: svgKind, nonrendering: svgNonrendering });
+  }
+}
+if (svgScanLimitReason === null) for (var svgCandidateIndex = 0; svgCandidateIndex < svgCandidates.length; svgCandidateIndex++) {
+  var svgCandidate = svgCandidates[svgCandidateIndex], svgItem = svgCandidate.item;
+  var svgHidden = svgItem.hidden === true;
+  for (var svgLayerIndex = 0; svgLayerIndex < svgLayers.length; svgLayerIndex++) {
+    svgScan.layerComparisons++;
+    if (svgLayers[svgLayerIndex].layer === svgCandidate.parent && svgLayers[svgLayerIndex].hidden) svgHidden = true;
+  }
+  var svgNonrendering = svgCandidate.nonrendering;
+  if (svgCandidate.kind === "PathItem") svgNonrendering = svgItem.guides === true;
+  var svgBounds = null;
+  if (!svgNonrendering) {
+    svgScan.boundsReads++;
+    var svgVisibleBounds = svgItem.visibleBounds;
+    svgBounds = [svgVisibleBounds[0], svgVisibleBounds[1], svgVisibleBounds[2], svgVisibleBounds[3]];
+  }
+  svgItems.push({ bounds: svgBounds, hidden: svgHidden, locked: svgItem.locked === true,
+    opacity: Number(svgItem.opacity), nonrendering: svgNonrendering, kind: svgCandidate.kind });
+}
+var svgFacts = { items: svgItems, scanLimit: svgScanLimitReason !== null, scanLimitReason: svgScanLimitReason, scan: svgScan, rasterItems: rasterReadDocument.rasterItems.length };
+var result = {`);
+export const SVG_READ_SOURCE_FACTS_SCRIPT = svgDerive(SVG_READ_SOURCE_SCRIPT, '  nonPrintingLayers: nplScanSafe(rasterReadDocument)', '  nonPrintingLayers: svgScanLimitReason === null ? nplScanSafe(rasterReadDocument) : { layers: [], truncated: true, unavailable: true },\n  svg: svgFacts');
+export const SVG_OPEN_WORK_COPY_SCRIPT = svgDerive(svgDerive(svgDerive(EXPORT_OPEN_WORK_COPY_SCRIPT, EXPORT_HELPERS, `${EXPORT_HELPERS}${EXPORT_MATCHES_BY_SCOPE}`), 'exportMatchesByPath(params.sessionPaths)', 'exportMatchesByScope(params.sessionPaths, params.sessionDirectoryPaths)'), '  opened: exportOpenedIdentity,', '  opened: exportOpenedIdentity,\n  activeArtboardIndex: exportOpenedDocument.artboards.getActiveArtboardIndex(),');
+export const SVG_CLOSE_WORK_COPY_SCRIPT = svgDerive(svgDerive(EXPORT_CLOSE_WORK_COPY_SCRIPT, EXPORT_HELPERS, `${EXPORT_HELPERS}${EXPORT_MATCHES_BY_SCOPE}`), 'exportMatchesByPath(params.sessionPaths)', 'exportMatchesByScope(params.sessionPaths, params.sessionDirectoryPaths)');
+export const SVG_EXPORT_SCRIPT = (() => {
+    const prefix = RASTER_EXPORT_SCRIPT.slice(0, RASTER_EXPORT_SCRIPT.indexOf('if (new File(params.basePath).exists'));
+    const suffix = RASTER_EXPORT_SCRIPT.slice(RASTER_EXPORT_SCRIPT.indexOf('var rasterPreviousInteraction'));
+    if (!prefix.endsWith('\n') || !suffix.startsWith('var rasterPreviousInteraction'))
+        throw new Error('The SVG export derivation no longer matches its baseline.');
+    return `${prefix}
+if (new Folder(params.stagingDirectory).getFiles().length !== 0) throw new Error("MCP_ERROR:" + stringifyJson({ code: "RASTER_STAGE_NOT_EMPTY" }));
+var rasterType = ExportType.WOSVG;
+var rasterOptions = new ExportOptionsWebOptimizedSVG();
+rasterOptions.saveMultipleArtboards = true;
+rasterOptions.artboardRange = String(params.artboardIndex + 1);
+rasterOptions.fontType = SVGFontType.OUTLINEFONT;
+rasterOptions.rasterImageLocation = RasterImageLocation.EMBED;
+rasterOptions.svgResponsive = false;
+rasterOptions.svgMinify = false;
+rasterOptions.coordinatePrecision = 3;
+if (rasterOptions.saveMultipleArtboards !== true || rasterOptions.artboardRange !== String(params.artboardIndex + 1) ||
+    rasterOptions.fontType !== SVGFontType.OUTLINEFONT || rasterOptions.rasterImageLocation !== RasterImageLocation.EMBED ||
+    rasterOptions.svgResponsive !== false || rasterOptions.svgMinify !== false || rasterOptions.coordinatePrecision !== 3) {
+  throw new Error("MCP_ERROR:" + stringifyJson({ code: "RASTER_EXPORT_OPTIONS_NOT_APPLIED" }));
+}
+${suffix}`;
+})();
+export async function closeRasterWorkCopy(bridge, sessionScope, expected, lease) {
     let matches = [];
-    const close = async (paths, binding) => await bridge.execute(withFilePathComparisons({
-        kind: 'read', script: RASTER_RECONCILE_CLOSE_SCRIPT,
-        params: pathComparisonParams({ sessionPaths: paths, expected: binding }), timeoutMs: EXPORT_HOST_TIMEOUT_MS,
+    const scope = Array.isArray(sessionScope) ? { paths: sessionScope, directories: [] } : sessionScope;
+    const close = async (paths, binding, directories = []) => await bridge.execute(withFilePathComparisons({
+        kind: 'read', script: directories.length === 0 ? RASTER_RECONCILE_CLOSE_SCRIPT : RASTER_RECONCILE_CLOSE_SCOPE_SCRIPT,
+        params: pathComparisonParams({ sessionPaths: paths, ...(directories.length === 0 ? {} : { sessionDirectoryPaths: directories }), expected: binding }), timeoutMs: EXPORT_HOST_TIMEOUT_MS,
         hostGate: {
             beforeHost: async () => {
                 if (recordSetFingerprint(await lease.records.readRasterRecordSet(lease.exportId)) !== lease.fingerprint) {
                     throw new Error('The export records changed; nothing was closed.');
                 }
             },
-            afterHost: async ({ data }) => { matches = await matchingDocumentPaths(data, sessionPaths); },
+            afterHost: async ({ data }) => { matches = await matchingDocumentScope(data, scope); },
         },
     }));
-    let result = await close(sessionPaths, expected);
+    let result = await close(scope.paths, expected, scope.directories);
     if (result.data.closed === null && matches.length === 1) {
         const target = matches[0];
         if (target.path !== expected.path || target.key.replace(/\|index=-?\d+\|/u, '|index=*|') !== expected.key.replace(/\|index=-?\d+\|/u, '|index=*|') ||
@@ -423,6 +607,39 @@ export class RasterArtifactError extends Error {
     constructor(message) {
         super(message);
         this.name = 'RasterArtifactError';
+    }
+}
+async function inspectSvgArtifact(path, plan, artboards) {
+    const handle = await open(path, noFollowReadFlags());
+    try {
+        const before = await handle.stat({ bigint: true });
+        if (!before.isFile() || before.nlink !== 1n)
+            throw new SvgArtifactError('svg_artifact_invalid', 'SVG must be a single regular file.');
+        const bytes = await readBounded(handle, SVG_EXPORT_LIMITS.bytes);
+        if (bytes === null)
+            throw new SvgArtifactError('svg_limit', 'SVG exceeds 8 MiB.');
+        const after = await handle.stat({ bigint: true });
+        if (!sameFileIdentity(fileIdentityOf(before), fileIdentityOf(after)) || BigInt(bytes.length) !== after.size)
+            throw new SvgArtifactError('svg_artifact_changed', 'SVG changed while being read.');
+        let source;
+        try {
+            source = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        }
+        catch {
+            throw new SvgArtifactError('svg_xml_invalid', 'SVG is not valid UTF-8.');
+        }
+        const target = artboards[plan.artboard.index];
+        if (target === undefined || target.index !== plan.artboard.index || target.name.normalize('NFC') !== plan.artboard.name.normalize('NFC') ||
+            artboards.filter((board) => board.name.normalize('NFC') === target.name.normalize('NFC')).length !== 1) {
+            throw new SvgArtifactError('svg_output_index_mismatch', 'The work-copy artboard name does not uniquely bind the planned target.');
+        }
+        const verified = verifySvgArtifact(source, { name: basename(path), artboardIndex: target.index, artboardName: target.name, expected: plan.expected, expectedBounds: plan.svg.bounds });
+        await handle.sync();
+        return { path, mediaType: 'image/svg+xml', bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+            width: verified.width, height: verified.height, viewBox: verified.viewBox, identity: fileIdentityOf(before) };
+    }
+    finally {
+        await handle.close();
     }
 }
 export function jpegFrame(bytes) {
@@ -560,12 +777,60 @@ export async function syncDirectory(path) {
         await handle.close();
     }
 }
+function svgPlanFacts(source, artboard) {
+    const blocked = (reason, message) => ({ reason, message });
+    const name = artboard.name.normalize('NFC');
+    const defaultName = /^アートボード (\d+)$/u.exec(name);
+    if (!svgArtboardNameMeasured(name) || (defaultName !== null && Number(defaultName[1]) !== artboard.index + 1) ||
+        source.artboards.filter((board) => board.name.normalize('NFC') === name).length !== 1) {
+        return { reason: 'svg_artboard_name_unmeasured', message: 'The SVG output name is unmeasured for this artboard name, or the name is duplicated.',
+            next_steps: ['Rename the artboard to a unique, nonempty name using only Kanji, Katakana, ASCII letters/digits and spaces, save the document, then plan again. Leading/trailing whitespace, symbols, English defaults (Artboard N) and Japanese default names whose number does not match index + 1 are not admitted.'] };
+    }
+    const facts = source.svg;
+    if (facts === undefined)
+        throw new Error('The SVG read-source response has no scan facts.');
+    if (source.placedItems > 0 || facts.rasterItems > 0)
+        return blocked('svg_images_unmeasured', 'SVG export does not admit placed or raster images.');
+    if (facts.scanLimit || facts.items.length > SVG_SOURCE_SCAN_LIMITS.entries)
+        return blocked('svg_item_scan_limit', `SVG source scan exceeds ${facts.scanLimitReason ?? 'entries'}: at most 2,000 collection visits, 64 layers and depth 8. Descendant and repeated visits count toward the limit.`);
+    if (source.nonPrintingLayers.layers.length > 0 || source.nonPrintingLayers.truncated || source.nonPrintingLayers.unavailable === true || facts.items.some((item) => item.nonrendering)) {
+        return { reason: 'svg_nonrendering_item_unmeasured', message: 'Guides, empty groups, and template or non-printing layers are unmeasured for SVG.',
+            next_steps: ['Make non-printing layers (including template layers) printable or move their contents to printable layers, save the document, then plan again. Guides and empty groups must also be removed before planning again.'] };
+    }
+    if (facts.items.some((item) => item.hidden || item.opacity === 0))
+        return blocked('svg_hidden_item_unmeasured', 'Hidden or zero-opacity items are unmeasured for SVG.');
+    const [left, top, right, bottom] = artboard.rect;
+    const expected = { width: Number((right - left).toFixed(12)), height: Number((top - bottom).toFixed(12)) };
+    if (!svgExpectedSchema.safeParse(expected).success)
+        return blocked('svg_dimensions_unmeasured', 'SVG artboard sides must be between 0.001 and 16,383 pt.');
+    if (source.artboards.some((board) => board.index !== artboard.index && Math.min(right, board.rect[2]) > Math.max(left, board.rect[0]) && Math.min(top, board.rect[1]) > Math.max(bottom, board.rect[3])))
+        return blocked('svg_artboards_overlap_unmeasured', 'The target artboard overlaps another artboard.');
+    const bounds = [];
+    let union = null;
+    for (const item of facts.items) {
+        const b = item.bounds;
+        if (!Number.isFinite(item.opacity) || b === null || b.length !== 4 || b.some((v) => !Number.isFinite(v) || Math.abs(v) > SVG_EXPORT_LIMITS.coordinate) || b[2] < b[0] || b[1] < b[3])
+            return blocked('svg_item_bounds_unmeasured', 'An item has unavailable or unmeasured bounds.');
+        if (b[2] < left || b[0] > right || b[3] > top || b[1] < bottom)
+            continue;
+        if (b[0] < left || b[2] > right || b[1] > top || b[3] < bottom)
+            return blocked('svg_item_crosses_artboard_unmeasured', 'A top-level item crosses the target artboard.');
+        const boardBounds = [b[0] - left, top - b[1], b[2] - left, top - b[3]];
+        bounds.push(boardBounds);
+        union = union === null ? [...boardBounds] : [Math.min(union[0], boardBounds[0]), Math.min(union[1], boardBounds[1]), Math.max(union[2], boardBounds[2]), Math.max(union[3], boardBounds[3])];
+    }
+    return { expected, svg: { bounds, expectedBounds: { union, itemCount: bounds.length, digest: canonicalSha256(bounds) }, expectedActive: source.activeArtboardIndex } };
+}
 class ExactHostProfileRefusal extends Error {
     reason;
     constructor(reason, message) {
         super(message);
         this.reason = reason;
     }
+}
+export function nonPrintingWarnings(scan, excluded) {
+    const warning = nonPrintingLayerWarning(scan, excluded ? 'excluded' : 'warn_with_option');
+    return warning === null ? {} : { warnings: [warning] };
 }
 export async function hashWholeFile(path) {
     const handle = await open(path, noFollowReadFlags());
@@ -626,8 +891,10 @@ export class RasterExportOperation {
     async run(raw) {
         const started = performance.now();
         const input = rasterExportInputSchema.parse(raw);
+        if (input.overwrite === true && process.platform === 'win32')
+            return this.rejected('overwrite_not_supported_on_platform', 'Overwrite export is not supported on Windows.');
         const meter = { calls: 0, ms: 0,
-            ...(input.width_px !== undefined || input.height_px !== undefined ? { exactProfilePending: true } : {}) };
+            ...(input.format === 'svg' || input.width_px !== undefined || input.height_px !== undefined ? { exactProfilePending: true } : {}) };
         try {
             if (!input.apply) {
                 const planned = await this.plan(input, meter);
@@ -635,9 +902,11 @@ export class RasterExportOperation {
             }
             const exportId = input.command_id;
             const confirm = input.confirm_export_hash;
-            const existing = await this.existingOutcome(exportId, confirm);
+            const existing = await this.existingOutcome(exportId, confirm, input);
             if (existing !== null)
                 return existing;
+            if (input.overwrite === true)
+                await assertExpectedOutput(input.expected_output, previousOutputLimit(input.format));
             const planned = await this.plan(input, meter);
             if (planned.kind === 'result') {
                 const result = planned.result;
@@ -648,10 +917,17 @@ export class RasterExportOperation {
             if (planned.plan.digest !== confirm) {
                 return this.rejected('plan_changed', 'The document, file, output or options changed since the plan; plan again and use its next_call.', planned.plan.document);
             }
+            if (input.overwrite === true && canonicalSha256(input.expected_output) !== canonicalSha256(planned.plan.expectedOutput)) {
+                return this.rejected('output_changed_since_plan', 'expected_output must be echoed unchanged from the overwrite plan.');
+            }
+            if (input.overwrite === true)
+                planned.plan.requestDigest = canonicalSha256(input);
             return await this.apply(exportId, planned.plan, meter, started);
         }
         catch (error) {
             if (error instanceof ExactHostProfileRefusal)
+                return this.rejected(error.reason, error.message);
+            if (error instanceof OutputReplacementError)
                 return this.rejected(error.reason, error.message);
             throw error;
         }
@@ -665,15 +941,19 @@ export class RasterExportOperation {
             format: plan.options.format,
             output_path: input.output_path,
             artboard_index: plan.artboard.index,
-            ...('scale' in plan.options ? { scale: plan.options.scale } : plan.options.sizeIntent.mode === 'width_px' ? { width_px: plan.options.sizeIntent.widthPx } : { height_px: plan.options.sizeIntent.heightPx }),
-            ...(plan.options.format === 'png' ? { transparent: plan.options.transparent } : { quality: plan.options.quality }),
+            ...(plan.options.format === 'svg' ? {} : 'scale' in plan.options ? { scale: plan.options.scale } : plan.options.sizeIntent.mode === 'width_px' ? { width_px: plan.options.sizeIntent.widthPx } : { height_px: plan.options.sizeIntent.heightPx }),
+            ...(plan.options.format === 'svg' ? {} : plan.options.format === 'png' ? { transparent: plan.options.transparent } : { quality: plan.options.quality }),
+            ...(plan.excludeNonPrintingLayers ? { exclude_non_printing_layers: true } : {}),
             apply: true,
             command_id: randomUUID(),
             confirm_export_hash: plan.digest,
+            ...(plan.expectedOutput === undefined ? {} : { overwrite: true, expected_output: plan.expectedOutput }),
         };
         return {
             outcome: 'planned', document: plan.document, artboard: plan.artboard, options: plan.options, outputPath: plan.output.path,
-            expected: plan.expected, ...(plan.expectedRange === undefined ? {} : { expectedRange: plan.expectedRange }), ...(plan.roundedEdges === undefined ? {} : { roundedEdges: plan.roundedEdges }), ...(plan.edgeWarnings === undefined ? {} : { edgeWarnings: plan.edgeWarnings }), planDigest: plan.digest, nextCall: { tool: RASTER_EXPORT_TOOL, arguments: args },
+            ...(plan.expectedOutput === undefined ? {} : { existingOutput: plan.expectedOutput }),
+            expected: plan.expected, ...(plan.expectedRange === undefined ? {} : { expectedRange: plan.expectedRange }), ...(plan.roundedEdges === undefined ? {} : { roundedEdges: plan.roundedEdges }), ...(plan.edgeWarnings === undefined ? {} : { edgeWarnings: plan.edgeWarnings }), ...(plan.links.length === 0 ? {} : { links: plan.links }),
+            ...nonPrintingWarnings(plan.source.nonPrintingLayers, plan.excludeNonPrintingLayers), ...(plan.hostVersion === undefined ? {} : { host_version: plan.hostVersion }), planDigest: plan.digest, nextCall: { tool: RASTER_EXPORT_TOOL, arguments: args },
         };
     }
     async plan(input, meter) {
@@ -682,7 +962,7 @@ export class RasterExportOperation {
         try {
             source = await this.host(meter, {
                 kind: 'read',
-                script: RASTER_READ_SOURCE_SCRIPT,
+                script: input.format === 'svg' ? SVG_READ_SOURCE_FACTS_SCRIPT : RASTER_READ_SOURCE_LAYERS_SCRIPT,
                 params: { expectedDocumentKey: input.expected_document_key },
                 hostGate: { beforeHost: async () => { await this.deps.assertNoUnresolvedLease(); } },
             });
@@ -700,7 +980,29 @@ export class RasterExportOperation {
         if (document.path === null || document.fileRevision === null) {
             return result(this.rejected('document_not_saved', 'この文書はまだ保存されていません。AI 形式で保存してから、もう一度お試しください。', document));
         }
+        const admitLinks = async () => {
+            try {
+                return await admitLinkedFiles({
+                    placedItems: source.placedItems, documentKey: document.key,
+                    readLinks: async () => await this.host(meter, {
+                        kind: 'read', script: RASTER_READ_LINKS_SCRIPT, params: { expectedDocumentKey: input.expected_document_key },
+                        hostGate: { beforeHost: async () => { await this.deps.assertNoUnresolvedLease(); } },
+                    }),
+                });
+            }
+            catch (error) {
+                if (parseExportHostError(error)?.code === 'DOCUMENT_MISMATCH')
+                    return { kind: 'rejected', reason: 'document_key_mismatch', message: 'The active document key does not match expected_document_key.' };
+                throw error;
+            }
+        };
+        let linked = null;
         if (!document.saved) {
+            if (source.placedItems > 0) {
+                linked = await admitLinks();
+                if (linked.kind === 'rejected' && linked.reason === 'linked_file_unavailable')
+                    return result(this.rejected(linked.reason, linked.message, document));
+            }
             return result(this.rejected('document_dirty', 'この書き出しでは未保存の変更を含められません。現在の内容を書き出すには、変更を保存してからもう一度お試しください。元ファイルを更新したくない場合は、別名で保存した文書から書き出してください。', document));
         }
         if (document.mutationProfile !== 'saved_file') {
@@ -708,14 +1010,18 @@ export class RasterExportOperation {
         }
         if (document.colorSpace !== 'RGB')
             return result(this.rejected('color_space_not_admitted', 'Only RGB documents are measured for this export.', document));
-        if (source.placedItems !== 0)
-            return result(this.rejected('artwork_not_admitted', 'Linked (placed) images are not measured for this export; embed them first.', document));
+        if (input.format === 'svg' && source.placedItems > 0)
+            return result({ outcome: 'blocked', reason: 'svg_images_unmeasured', message: 'SVG export does not admit placed images.', document });
+        linked ??= await admitLinks();
+        if (linked.kind === 'rejected')
+            return result(this.rejected(linked.reason, linked.message, document));
         const artboard = source.artboards[input.artboard_index];
         if (artboard === undefined) {
             return result(this.rejected('artboard_out_of_range', `artboard_index ${input.artboard_index} is outside the ${source.artboards.length} artboard(s).`, document));
         }
         let sourceFile;
         let output;
+        let expectedOutput;
         try {
             const facts = await inspectSourceFile(document.path);
             sourceFile = { ...facts, sha256: await hashWholeFile(facts.path) };
@@ -727,15 +1033,19 @@ export class RasterExportOperation {
                 return result(this.rejected('edit_session_open', '編集中のセッションでは書き出せません。変更を保存し、編集セッションを終了してから、もう一度お試しください。', document));
             }
             await this.deps.exportStore.ensure();
-            const extensions = input.format === 'png' ? ['.png'] : ['.jpg', '.jpeg'];
+            const extensions = input.format === 'svg' ? ['.svg'] : input.format === 'png' ? ['.png'] : ['.jpg', '.jpeg'];
             if (!extensions.includes(extname(input.output_path).toLowerCase()) || extensions.includes(basename(input.output_path).toLowerCase())) {
                 return result(this.rejected('output_path_invalid', `output_path must end with ${extensions.join(' or ')} for format "${input.format}".`, document));
             }
-            output = await validateOutputLocation(input.output_path, sourceFile.path, this.deps.exportStore.stateRootPath);
+            output = await validateOutputLocation(input.output_path, sourceFile.path, this.deps.exportStore.stateRootPath, input.overwrite === true);
+            if (input.overwrite === true)
+                expectedOutput = await captureExpectedOutput(output.path, previousOutputLimit(input.format));
         }
         catch (error) {
             if (error instanceof BackupPreconditionError)
                 return result(this.rejected('source_file_unavailable', error.message, document));
+            if (error instanceof OutputReplacementError)
+                return result(this.rejected(error.reason, error.message, document));
             if (error instanceof ExportPreconditionError) {
                 const reason = error.reason === 'output_exists' || error.reason === 'output_cross_device' ? error.reason : 'output_path_invalid';
                 return result(this.rejected(reason, error.message, document));
@@ -744,6 +1054,23 @@ export class RasterExportOperation {
         }
         const sizeIntent = input.width_px !== undefined ? { mode: 'width_px', widthPx: input.width_px }
             : input.height_px !== undefined ? { mode: 'height_px', heightPx: input.height_px } : null;
+        if (input.format === 'svg') {
+            const target = this.deps.bridge.applicationTarget?.();
+            if (!hostVersionAdmitted('svg_export', document.appVersion) || target?.channel !== 'stable' || target.bundleId !== STABLE_ILLUSTRATOR_BUNDLE_ID)
+                return result({ outcome: 'blocked', reason: 'svg_host_unmeasured', message: 'SVG export needs the configured macOS stable Illustrator bundle with a readable version that the host version policy admits.', document });
+            const svgHostVersion = admitHostVersionPlan('svg_export', document.appVersion, target.channel);
+            const facts = svgPlanFacts(source, artboard);
+            if ('reason' in facts)
+                return result({ outcome: 'blocked', ...facts, document });
+            const options = svgExportOptionsSchema.parse({ format: 'svg', exportType: 'WOSVG', saveMultipleArtboards: true, artboardRange: String(artboard.index + 1), fontType: 'OUTLINEFONT', rasterImageLocation: 'EMBED', svgResponsive: false, svgMinify: false, coordinatePrecision: 3 });
+            const digest = canonicalSha256({ profile: 'svg_export_v1', appVersion: document.appVersion,
+                ...(expectedOutput === undefined ? {} : { overwrite: true, expectedOutput }),
+                source: { key: document.key, path: sourceFile.path, fileRevision: document.fileRevision, sha256: sourceFile.sha256, identity: serializeFileIdentity(sourceFile.identity) },
+                artboards: source.artboards, rulerOrigin: source.rulerOrigin, target: artboard.index, expectedActive: facts.svg.expectedActive,
+                destination: { parent: output.parent, leaf: basename(output.path) }, options, expected: facts.expected, expectedBounds: facts.svg.expectedBounds,
+            });
+            return { kind: 'plan', plan: { document, source, artboard, options, sourceFile, output, expected: facts.expected, svg: facts.svg, links: [], linkBinding: [], excludeNonPrintingLayers: false, ...(expectedOutput === undefined ? {} : { expectedOutput }), ...(svgHostVersion === null ? {} : { hostVersion: svgHostVersion }), digest } };
+        }
         const legacyOptions = rasterOptionsOf(input);
         const dimensions = sizeIntent === null
             ? this.contract({ options: legacyOptions, artboard: { index: artboard.index, rect: artboard.rect, origin: artboard.origin }, documentRulerOrigin: source.rulerOrigin })
@@ -761,27 +1088,41 @@ export class RasterExportOperation {
         const expected = { width: dimensions.width, height: dimensions.height };
         const digest = canonicalSha256({
             profile: RASTER_EXPORT_PROFILE,
+            ...(expectedOutput === undefined ? {} : { overwrite: true, expectedOutput }),
             appVersion: document.appVersion,
             source: { key: document.key, path: sourceFile.path, fileRevision: document.fileRevision, sha256: sourceFile.sha256, identity: serializeFileIdentity(sourceFile.identity) },
             artboards: source.artboards,
             rulerOrigin: source.rulerOrigin,
             target: artboard.index,
+            ...(linked.binding.length === 0 ? {} : { links: linked.binding }),
+            ...(input.exclude_non_printing_layers === true ? { excludeNonPrintingLayers: true } : {}),
             destination: { parent: output.parent, leaf: basename(output.path) },
             options,
             expected,
             ...(!('range' in dimensions) || dimensions.range === undefined ? {} : { expectedRange: dimensions.range }),
         });
-        return { kind: 'plan', plan: { document, source, artboard, options, sourceFile, output, expected,
+        return { kind: 'plan', plan: { document, source, artboard, options, sourceFile, output, expected, links: linked.links, linkBinding: linked.binding, excludeNonPrintingLayers: input.exclude_non_printing_layers === true,
+                ...(expectedOutput === undefined ? {} : { expectedOutput }),
                 ...('range' in dimensions && dimensions.range !== undefined ? { expectedRange: dimensions.range } : {}),
                 ...('roundedEdges' in dimensions && dimensions.roundedEdges !== undefined ? { roundedEdges: dimensions.roundedEdges } : {}),
                 ...('edgeWarnings' in dimensions && dimensions.edgeWarnings !== undefined ? { edgeWarnings: dimensions.edgeWarnings } : {}), digest } };
     }
-    async existingOutcome(exportId, planDigest) {
+    async existingOutcome(exportId, planDigest, input) {
         if (await pathTaken(rasterQuarantinePaths(this.deps.exportStore.stateRootPath, exportId).manifest)) {
             return this.rejected('export_records_invalid', `The records of export ${exportId} were moved to quarantine; use a new command_id.`);
         }
         const set = await this.deps.exportStore.readRasterRecordSet(exportId);
+        if (input.overwrite === true && set.prepare.state === 'v2' && set.prepare.record.version !== 5)
+            return this.rejected('command_id_conflict', 'This command_id belongs to a non-overwrite export.');
+        if (set.prepare.state === 'v2' && set.prepare.record.version === 5 && set.prepare.record.requestDigest !== canonicalSha256(input)) {
+            return this.rejected('command_id_conflict', 'This command_id belongs to different overwrite arguments.');
+        }
         const state = assessRasterRecordSet(set, planDigest);
+        if (set.prepare.state === 'v2' && set.prepare.record.version === 5 && state.state !== 'invalid' && state.state !== 'published' && state.state !== 'failed') {
+            const terminal = await assessReplacementTerminal(this.deps.exportStore, set);
+            if (terminal.state === 'invalid')
+                return this.rejected('export_records_invalid', `${terminal.reason}: ${terminal.detail}; the lease is retained.`);
+        }
         switch (state.state) {
             case 'none': return null;
             case 'invalid':
@@ -801,16 +1142,29 @@ export class RasterExportOperation {
     cleanupEntries(set) {
         return set.cleanup.state === 'v2' ? set.cleanup.record.entries : [];
     }
-    failedResult(set, delivery) {
+    async failedResult(set, delivery) {
         if (set.failed.state !== 'v2')
             throw new Error('No failed record.');
         const failed = set.failed.record;
-        return { outcome: 'failed', exportId: failed.exportId, delivery, stage: failed.stage, reason: failed.reason, message: failed.message, cleanup: this.cleanupEntries(set) };
+        if (failed.version === 5) {
+            const terminal = await assessReplacementTerminal(this.deps.exportStore, set);
+            if (terminal.state === 'invalid' || terminal.disposition !== 'failed')
+                return this.rejected('export_records_invalid', terminal.state === 'invalid' ? `${terminal.reason}: ${terminal.detail}` : 'The failed replacement is not terminal.');
+        }
+        return { outcome: 'failed', exportId: failed.exportId, delivery, stage: failed.stage, reason: failed.reason, message: failed.message, cleanup: this.cleanupEntries(set), ...(failed.version === 5 ? { replacement: failed.replacement } : {}) };
     }
     async replayPublished(exportId, set) {
         if (set.published.state !== 'v2')
             throw new Error('No published record.');
         const published = set.published.record;
+        if (published.version === 5) {
+            const started = performance.now();
+            const terminal = await assessReplacementTerminal(this.deps.exportStore, set);
+            if (terminal.state === 'invalid' || terminal.disposition !== 'published')
+                return this.rejected('export_records_invalid', terminal.state === 'invalid' ? `${terminal.reason}: ${terminal.detail}` : 'The replacement is not published.');
+            return { outcome: 'verified', exportId, delivery: 'replay', artifact: published.artifact, sourcePreserved: true,
+                replacement: terminal.summary, cleanup: this.cleanupEntries(set), timing: { totalMs: performance.now() - started, hostCalls: 0, hostMs: 0 } };
+        }
         const started = performance.now();
         let handle;
         const flags = noFollowReadFlags();
@@ -840,7 +1194,13 @@ export class RasterExportOperation {
     async apply(exportId, plan, meter, started) {
         const store = this.deps.exportStore;
         const recordedAt = () => this.now().toISOString();
-        const common = { version: 'scale' in plan.options ? RASTER_EXPORT_RECORD_VERSION : RASTER_EXACT_PX_RECORD_VERSION, kind: RASTER_EXPORT_KIND, exportId, planDigest: plan.digest };
+        const svg = plan.options.format === 'svg';
+        const renderVersion = svg ? RASTER_SVG_RECORD_VERSION : 'scale' in plan.options ? RASTER_EXPORT_RECORD_VERSION : RASTER_EXACT_PX_RECORD_VERSION;
+        const common = { version: plan.expectedOutput === undefined ? renderVersion : 5, kind: RASTER_EXPORT_KIND, exportId, planDigest: plan.digest,
+            ...(plan.expectedOutput === undefined ? {} : { renderVersion, expectedOutput: plan.expectedOutput, requestDigest: plan.requestDigest }) };
+        const assertDestination = async () => plan.expectedOutput === undefined ? await assertOutputAbsent(plan.output.path) : await assertExpectedOutput(plan.expectedOutput, previousOutputLimit(plan.options.format));
+        let replacement;
+        let replacementIntent = null;
         let stage = 'prepare';
         let prepared = false;
         let leaseHeld = false;
@@ -851,8 +1211,11 @@ export class RasterExportOperation {
                 throw new RasterStateChangedError(`The records of export ${exportId} changed outside this apply (a reconcile ran); nothing more is written.`);
             }
         };
-        const indeterminate = (message, commandId = null) => ({ outcome: 'indeterminate', exportId, stage, message, commandId });
-        const asIndeterminate = (error) => indeterminate(error instanceof Error ? error.message : String(error), error instanceof IndeterminateExecutionError || error instanceof RasterAfterHostError ? error.commandId : null);
+        const indeterminate = (message, commandId = null) => ({ outcome: 'indeterminate', exportId, stage, message, commandId, ...(replacement === undefined ? {} : { replacement }) });
+        const asIndeterminate = (error) => {
+            const invalid = error instanceof ReplacementTerminalInvalidError ? error : error instanceof RasterAfterHostError && error.cause instanceof ReplacementTerminalInvalidError ? error.cause : null;
+            return invalid !== null ? this.rejected('export_records_invalid', invalid.message) : indeterminate(error instanceof Error ? error.message : String(error), error instanceof IndeterminateExecutionError || error instanceof RasterAfterHostError ? error.commandId : null);
+        };
         const recorded = async (step, commandId, body) => {
             try {
                 await body();
@@ -876,8 +1239,10 @@ export class RasterExportOperation {
             const workCopyPath = join(exportRoot, workCopyFileName(exportId, plan.sourceFile.path));
             const stagingDirectory = join(plan.output.parent, `${STAGING_DIRECTORY_PREFIX}${exportId}`);
             const basePath = join(stagingDirectory, 'artifact');
-            const stagedPath = `${basePath}${rasterExtension(plan.options.format)}`;
+            let stagedPath = `${basePath}${plan.options.format === 'svg' ? '.svg' : rasterExtension(plan.options.format)}`;
             const sessionPaths = [workCopyPath, stagedPath, plan.output.path];
+            const sessionScope = svg ? { paths: [workCopyPath, plan.output.path], directories: [stagingDirectory] } : { paths: sessionPaths, directories: [] };
+            const scopeParams = svg ? { sessionPaths: sessionScope.paths, sessionDirectoryPaths: sessionScope.directories } : { sessionPaths };
             const parentIdentity = await lstat(plan.output.parent, { bigint: true });
             const boards = plan.source.artboards.map(({ index, name, rect }) => ({ index, name, rect }));
             let copied = null;
@@ -888,8 +1253,8 @@ export class RasterExportOperation {
             try {
                 opened = await this.host(meter, {
                     kind: 'read',
-                    script: EXPORT_OPEN_WORK_COPY_SCRIPT,
-                    params: { expectedDocumentKey: plan.document.key, workCopyPath, stagedPath, outputPath: plan.output.path, sessionPaths },
+                    script: svg ? SVG_OPEN_WORK_COPY_SCRIPT : EXPORT_OPEN_WORK_COPY_SCRIPT,
+                    params: { expectedDocumentKey: plan.document.key, workCopyPath, stagedPath, outputPath: plan.expectedOutput === undefined ? plan.output.path : stagedPath, ...scopeParams },
                     timeoutMs: EXPORT_HOST_TIMEOUT_MS,
                     hostGate: {
                         beforeHost: async ({ commandId }) => {
@@ -902,7 +1267,7 @@ export class RasterExportOperation {
                             if (await pathTaken(workCopyPath) || await pathTaken(stagingDirectory)) {
                                 throw new RasterPrepareRefusal('command_id_in_use', `command_id ${exportId} already has a work copy or stage; use a new command_id.`);
                             }
-                            await assertOutputAbsent(plan.output.path);
+                            await assertDestination();
                             await store.writeRasterRecord('prepare', {
                                 ...common, recordType: 'prepare', recordedAt: recordedAt(),
                                 sourcePath: plan.sourceFile.path, sourceSha256: plan.sourceFile.sha256, sourceIdentity: serializeFileIdentity(plan.sourceFile.identity),
@@ -924,6 +1289,7 @@ export class RasterExportOperation {
                                 documentKey: plan.document.key, sourcePath: plan.sourceFile.path, sourceSha256: plan.sourceFile.sha256,
                                 sourceIdentity: serializeFileIdentity(plan.sourceFile.identity), artboardIndex: plan.artboard.index, options: plan.options,
                                 ...('scale' in plan.options ? {} : { expected: plan.expected }),
+                                ...(plan.svg === undefined ? {} : { expectedBounds: plan.svg.expectedBounds, expectedActive: plan.svg.expectedActive }),
                                 workCopyPath, workCopyIdentity: serializeFileIdentity(copy.identity), stagingDirectory, stagedBasePath: basePath,
                                 outputPath: plan.output.path, createdAt: recordedAt(),
                             });
@@ -942,6 +1308,7 @@ export class RasterExportOperation {
                                 ...common, recordType: 'host_open', recordedAt: recordedAt(),
                                 open: { commandId, completedInactive: true }, workCopy: hostDocumentIdentitySchema.parse(result.opened), sourceKey: result.source.key,
                                 artboards: boards, documentCountBefore: result.documentCountBefore, documentCountAfter: result.documentCountAfter,
+                                ...(svg ? { activeArtboardIndex: result.activeArtboardIndex } : {}),
                             });
                             await refresh();
                         }),
@@ -961,7 +1328,7 @@ export class RasterExportOperation {
                 }
                 const detail = parseExportHostError(error);
                 if (!(error instanceof IndeterminateExecutionError) && detail?.code !== undefined && EXPORT_OPEN_PRE_ATTEMPT_CODES.includes(detail.code)) {
-                    return await this.failBeforeWriting(exportId, common, meter, { stage, reason: 'work_copy_open_failed', message: `The work copy was not opened (${detail.code}).` }, sessionPaths, ownedWorkCopy(), assertUnchanged);
+                    return await this.failBeforeWriting(exportId, common, meter, { stage, reason: 'work_copy_open_failed', message: `The work copy was not opened (${detail.code}).` }, sessionScope, ownedWorkCopy(), assertUnchanged);
                 }
                 return asIndeterminate(error);
             }
@@ -973,32 +1340,46 @@ export class RasterExportOperation {
             try {
                 const exported = await this.host(meter, {
                     kind: 'read',
-                    script: 'scale' in plan.options ? RASTER_EXPORT_SCRIPT : RASTER_EXACT_EXPORT_SCRIPT,
+                    script: svg ? SVG_EXPORT_SCRIPT : 'scale' in plan.options
+                        ? (plan.excludeNonPrintingLayers ? RASTER_EXPORT_EXCLUDING_SCRIPT : RASTER_EXPORT_SCRIPT)
+                        : (plan.excludeNonPrintingLayers ? RASTER_EXACT_EXPORT_EXCLUDING_SCRIPT : RASTER_EXACT_EXPORT_SCRIPT),
                     params: {
                         workCopyPath, workCopyKey: opened.opened.key, artboards: boards, artboardIndex: plan.artboard.index, basePath, stagedPath,
-                        format: plan.options.format, ...('scale' in plan.options ? { scale: plan.options.scale } : { renderScalePercent: plan.options.renderScalePercent }),
+                        ...(svg ? { stagingDirectory } : {}),
+                        format: plan.options.format, ...(plan.options.format === 'svg' ? {} : 'scale' in plan.options ? { scale: plan.options.scale } : { renderScalePercent: plan.options.renderScalePercent }),
                         transparent: plan.options.format === 'png' ? plan.options.transparent : false,
                         quality: plan.options.format === 'jpeg' ? plan.options.quality : 0,
+                        excludeNonPrintingLayers: plan.excludeNonPrintingLayers,
                     },
                     timeoutMs: EXPORT_HOST_TIMEOUT_MS,
                     hostGate: {
                         beforeHost: async () => {
                             await rootScope.assertStable();
                             await parentScope.assertStable();
-                            await assertOutputAbsent(plan.output.path);
+                            await assertDestination();
                             await assertUnchanged();
                         },
                         afterHost: async ({ commandId, data }) => await recorded('export', commandId, async () => {
                             const result = data;
-                            if ((result.workCopy.path === null || !sameFilePath(result.workCopy.path, workCopyPath)) || result.activeArtboardIndex !== plan.artboard.index) {
+                            if ((result.workCopy.path === null || !sameFilePath(result.workCopy.path, workCopyPath)) || (!svg && result.activeArtboardIndex !== plan.artboard.index)) {
                                 throw new Error('Illustrator reported an unexpected work-copy state after the export.');
                             }
                             await assertUnchanged();
-                            const verified = await this.verifyStage(stagingDirectory, stagedPath, plan);
+                            if (svg && result.activeArtboardIndex !== opened.activeArtboardIndex) {
+                                failure = { stage: 'export', reason: 'svg_active_artboard_changed', message: 'WOSVG changed the work copy active artboard.' };
+                                return;
+                            }
+                            if (svg && result.workCopy.saved !== true) {
+                                failure = { stage: 'export', reason: 'svg_copy_state_changed', message: 'WOSVG left the work copy dirty, outside the measured profile.' };
+                                return;
+                            }
+                            const verified = await this.verifyStage(stagingDirectory, stagedPath, plan, result.artboards);
                             if ('failure' in verified) {
                                 failure = verified.failure;
                                 return;
                             }
+                            if ('path' in verified.artifact)
+                                stagedPath = verified.artifact.path;
                             const session = await store.readRasterRecord(exportId, 'session');
                             if (session.state !== 'v2')
                                 throw new Error('The lease could not be read back before binding.');
@@ -1006,6 +1387,7 @@ export class RasterExportOperation {
                                 ...common, recordType: 'artifact_binding', recordedAt: recordedAt(), export: { commandId, completedInactive: true }, sessionDigest: session.digest,
                                 stagedPath, stagedIdentity: serializeFileIdentity(verified.artifact.identity), mediaType: verified.artifact.mediaType, bytes: verified.artifact.bytes,
                                 sha256: verified.artifact.sha256, width: verified.artifact.width, height: verified.artifact.height,
+                                ...('viewBox' in verified.artifact ? { viewBox: verified.artifact.viewBox } : {}),
                                 copyAfterExport: { identity: hostDocumentIdentitySchema.parse(result.workCopy), activeArtboardIndex: result.activeArtboardIndex, artboards: result.artboards },
                             });
                             artifact = verified.artifact;
@@ -1021,7 +1403,7 @@ export class RasterExportOperation {
                     return asIndeterminate(error);
                 if (detail.code === 'EXPORT_WORK_COPY_NOT_UNIQUE' || detail.code === 'EXPORT_WORK_COPY_IDENTITY_MISMATCH')
                     return asIndeterminate(error);
-                if (RASTER_EXPORT_PRE_ATTEMPT_CODES.includes(detail.code)) {
+                if (RASTER_EXPORT_PRE_ATTEMPT_CODES.includes(detail.code) || (svg && detail.code === 'RASTER_EXPORT_OPTIONS_NOT_APPLIED')) {
                     failure = { stage: 'export', reason: 'export_refused', message: `The export was refused before any write (${detail.code}).` };
                 }
                 else if (detail.code === RASTER_EXPORT_FAILED_CODE) {
@@ -1036,9 +1418,9 @@ export class RasterExportOperation {
             try {
                 await this.host(meter, {
                     kind: 'read',
-                    script: EXPORT_CLOSE_WORK_COPY_SCRIPT,
+                    script: svg ? SVG_CLOSE_WORK_COPY_SCRIPT : EXPORT_CLOSE_WORK_COPY_SCRIPT,
                     params: {
-                        workCopyPath, workCopyKey: closeKey, sessionPaths, sourcePath: plan.sourceFile.path,
+                        workCopyPath, workCopyKey: closeKey, ...scopeParams, sourcePath: plan.sourceFile.path,
                         expectedDocumentKey: plan.document.key, sourceFileRevision: plan.document.fileRevision,
                     },
                     timeoutMs: EXPORT_HOST_TIMEOUT_MS,
@@ -1050,7 +1432,7 @@ export class RasterExportOperation {
                                 throw new Error('Illustrator reported an unexpected document inventory after closing the work copy.');
                             }
                             await assertUnchanged();
-                            if ((await matchingDocumentPaths(result, sessionPaths)).length !== 0)
+                            if ((await matchingDocumentScope(result, sessionScope)).length !== 0)
                                 throw new Error('A session document remains open; the export evidence is kept.');
                             await store.writeRasterRecord('host_terminal', {
                                 ...common, recordType: 'host_terminal', recordedAt: recordedAt(), close: { commandId, completedInactive: true },
@@ -1079,15 +1461,62 @@ export class RasterExportOperation {
                             await parentScope.assertStable();
                             let outputIdentity;
                             try {
+                                await (this.deps.durableFilePolicy ?? DEFAULT_DURABLE_FILE_POLICY).checkOutputParentCheckpoint('beforeLink', parentScope, { staging: stagingDirectory, files: [stagedPath] });
+                                if (plan.expectedOutput !== undefined) {
+                                    const records = await store.readRasterRecordSet(exportId);
+                                    if (records.prepare.state !== 'v2' || records.artifact_binding.state !== 'v2' || records.host_terminal.state !== 'v2')
+                                        throw new Error('Overwrite requires the full pre-publication record chain.');
+                                    replacementIntent = await prepareReplacementIntent({ version: 5, kind: RASTER_EXPORT_KIND, recordType: 'replacement_intent', exportId, planDigest: plan.digest, renderVersion,
+                                        publicationDigest: canonicalSha256(replacementPublicationPayload(records)),
+                                        expected: plan.expectedOutput, staged: { path: stagedPath, identity: serializeFileIdentity(bound.identity), bytes: bound.bytes, sha256: bound.sha256 },
+                                        prepareDigest: records.prepare.digest, bindingDigest: records.artifact_binding.digest, hostTerminalDigest: records.host_terminal.digest }, store.stateRootPath, this.deps.replacementHook);
+                                    await store.writeReplacementIntent(replacementIntent);
+                                    replacement = replacementSummary(replacementIntent);
+                                    await this.deps.replacementHook?.('intent_ready');
+                                    await requireReplacementTerminal(store, await store.readRasterRecordSet(exportId));
+                                    await detachPreviousOutput(replacementIntent, this.deps.replacementHook);
+                                    await this.deps.replacementHook?.('before_publish');
+                                    await requireReplacementTerminal(store, await store.readRasterRecordSet(exportId));
+                                }
                                 outputIdentity = await linkBoundArtifact(stagedPath, plan.output.path, bound, parentScope);
+                                if (replacementIntent !== null) {
+                                    await syncReplacementDirectory(stagingDirectory);
+                                    const terminal = await requireReplacementTerminal(store, await store.readRasterRecordSet(exportId));
+                                    if (terminal.filesystem !== 'published')
+                                        throw new ReplacementTerminalInvalidError('The new output does not match the replacement intent.');
+                                    await this.deps.replacementHook?.('published');
+                                }
                             }
                             catch (error) {
+                                if (plan.expectedOutput !== undefined && error instanceof OutputReplacementError && await store.readReplacementIntent(exportId) === null) {
+                                    const beforeIntent = await requireReplacementTerminal(store, await store.readRasterRecordSet(exportId));
+                                    outcome = await this.recordFailure(exportId, common, { stage, reason: error.reason, message: error.message }, ownedWorkCopy(), beforeIntent.summary);
+                                    return;
+                                }
+                                if (replacementIntent !== null && (error instanceof OutputReplacementError || error instanceof RasterPublishError)) {
+                                    const retained = error instanceof OutputReplacementError && error.retained.length ? error.retained : replacementIntent.slot === null ? [] : [{ path: replacementIntent.slot, reason: 'Previous or foreign output retained pending reconciliation.' }];
+                                    replacement = replacementSummary(replacementIntent, retained);
+                                    if (error instanceof OutputReplacementError && error.restoredForeign !== undefined)
+                                        replacement.restoredForeign = error.restoredForeign;
+                                    if (error instanceof OutputReplacementError && error.foreignRestored) {
+                                        outcome = await this.recordFailure(exportId, common, { stage, reason: 'output_changed', message: error.message }, ownedWorkCopy(), replacement);
+                                    }
+                                    else {
+                                        await store.writeRasterRecord('quarantine', { ...common, recordType: 'quarantine', recordedAt: recordedAt(), reason: error.message });
+                                        outcome = indeterminate(`${error.message} Run illustrator_reconcile_export inspect; retained paths are included in replacement.`);
+                                    }
+                                    return;
+                                }
+                                if (error instanceof OutputPreLinkCheckError) {
+                                    outcome = await this.recordFailure(exportId, common, { stage: 'pre_link_check', reason: 'output_verification_failed', message: error.message }, ownedWorkCopy());
+                                    return;
+                                }
                                 if (!(error instanceof RasterPublishError))
                                     throw error;
                                 outcome = await this.recordFailure(exportId, common, { stage, reason: error.reason, message: error.message }, ownedWorkCopy());
                                 return;
                             }
-                            const artifactRecord = { path: plan.output.path, mediaType: bound.mediaType, bytes: bound.bytes, sha256: bound.sha256, width: bound.width, height: bound.height };
+                            const artifactRecord = z.union([rasterExportArtifactSchema, svgArtifactSchema]).parse({ path: plan.output.path, mediaType: bound.mediaType, bytes: bound.bytes, sha256: bound.sha256, width: bound.width, height: bound.height, ...('viewBox' in bound ? { viewBox: bound.viewBox } : {}) });
                             const set = await store.readRasterRecordSet(exportId);
                             if (set.artifact_binding.state !== 'v2' || set.host_terminal.state !== 'v2')
                                 throw new Error('The binding or host evidence could not be read back before publishing.');
@@ -1096,17 +1525,28 @@ export class RasterExportOperation {
                                 hostTerminalDigest: set.host_terminal.digest, artifact: artifactRecord, outputIdentity: serializeFileIdentity(outputIdentity),
                                 sourcePath: plan.sourceFile.path, artboardIndex: plan.artboard.index, options: plan.options,
                                 ...('scale' in plan.options ? {} : { expected: plan.expected }),
+                                ...(plan.svg === undefined ? {} : { expectedBounds: plan.svg.expectedBounds }),
+                                ...(replacementIntent === null ? {} : replacementPublicationPayload(set)),
+                                ...(replacement === undefined ? {} : { replacement }),
                             });
                             stage = 'cleanup';
+                            if (replacementIntent !== null) {
+                                await requireReplacementTerminal(store, await store.readRasterRecordSet(exportId), 'published');
+                                await cleanupPreviousSlot(replacementIntent, this.deps.replacementHook);
+                                await requireReplacementTerminal(store, await store.readRasterRecordSet(exportId), 'published');
+                            }
                             const entries = await this.cleanup([
                                 { path: stagedPath, remove: async () => await unlinkStagedName(stagedPath, outputIdentity, parentScope) },
                                 { path: stagingDirectory, remove: async () => await removeEmptyDirectory(stagingDirectory, plan.output.parent) },
                                 ...ownedWorkCopy(),
-                            ]);
+                            ], replacementIntent === null ? undefined : async () => { await requireReplacementTerminal(store, await store.readRasterRecordSet(exportId), 'published'); });
                             await store.writeRasterRecord('cleanup', { ...common, recordType: 'cleanup', recordedAt: recordedAt(), disposition: 'published', entries });
+                            if (replacementIntent !== null)
+                                await requireReplacementTerminal(store, await store.readRasterRecordSet(exportId), 'published');
                             await store.releaseRasterSession(exportId);
                             outcome = {
                                 outcome: 'verified', exportId, delivery: 'original', artifact: artifactRecord, sourcePreserved: true, cleanup: entries,
+                                ...(replacement === undefined ? {} : { replacement }),
                                 timing: { totalMs: 0, hostCalls: 0, hostMs: 0 },
                             };
                         }),
@@ -1124,9 +1564,23 @@ export class RasterExportOperation {
                 : final;
         }));
     }
-    async verifyStage(stagingDirectory, stagedPath, plan) {
+    async verifyStage(stagingDirectory, stagedPath, plan, artboards) {
         const stage = 'verify_output';
         const names = await readdir(stagingDirectory);
+        if (plan.options.format === 'svg') {
+            if (names.length !== 1)
+                return { failure: { stage, reason: 'unexpected_output_files', message: `The SVG stage must contain exactly one file; found ${JSON.stringify(names)}.` } };
+            try {
+                const artifact = await inspectSvgArtifact(join(stagingDirectory, names[0]), plan, artboards);
+                await syncDirectory(stagingDirectory);
+                return { artifact };
+            }
+            catch (error) {
+                if (error instanceof SvgArtifactError)
+                    return { failure: { stage, reason: error.reason, message: error.message } };
+                throw error;
+            }
+        }
         if (names.length !== 1 || names[0] !== basename(stagedPath)) {
             return { failure: { stage, reason: 'unexpected_output_files', message: `The stage holds ${JSON.stringify(names)} instead of one ${basename(stagedPath)}.` } };
         }
@@ -1145,35 +1599,42 @@ export class RasterExportOperation {
         }
         return { artifact };
     }
-    async cleanup(targets) {
+    async cleanup(targets, beforeRemove) {
         const entries = [];
         for (const target of targets) {
+            await beforeRemove?.();
             const removed = await target.remove();
             entries.push(removed ? { path: target.path, removed, reason: 'owned' } : await retainedEntry(target.path, 'retained: ownership not proven'));
         }
         return entries;
     }
-    async recordFailure(exportId, common, failure, owned) {
+    async recordFailure(exportId, common, failure, owned, replacement) {
         const store = this.deps.exportStore;
         const set = await store.readRasterRecordSet(exportId);
-        const evidenceDigests = {};
-        for (const [type, read] of Object.entries(set))
-            if (read.state === 'v2')
-                evidenceDigests[type] = read.digest;
-        await store.writeRasterRecord('failed', { ...common, recordType: 'failed', recordedAt: this.now().toISOString(), ...failure, evidenceDigests });
-        const entries = await this.cleanup(owned);
+        const evidenceDigests = common.version === 5 ? replacementTerminalEvidence(set) : {};
+        if (common.version !== 5)
+            for (const [type, read] of Object.entries(set))
+                if (read.state === 'v2')
+                    evidenceDigests[type] = read.digest;
+        const summary = common.version !== 5 ? undefined : replacement ?? (await requireReplacementTerminal(store, set)).summary;
+        await store.writeRasterRecord('failed', { ...common, recordType: 'failed', recordedAt: this.now().toISOString(), ...failure, evidenceDigests, ...(summary === undefined ? {} : { replacement: summary }) });
+        if (common.version === 5)
+            await requireReplacementTerminal(store, await store.readRasterRecordSet(exportId), 'failed');
+        const entries = await this.cleanup(owned, common.version !== 5 ? undefined : async () => { await requireReplacementTerminal(store, await store.readRasterRecordSet(exportId), 'failed'); });
         await store.writeRasterRecord('cleanup', { ...common, recordType: 'cleanup', recordedAt: this.now().toISOString(), disposition: 'failed', entries });
+        if (common.version === 5)
+            await requireReplacementTerminal(store, await store.readRasterRecordSet(exportId), 'failed');
         await store.releaseRasterSession(exportId);
         return this.failedResult(await store.readRasterRecordSet(exportId), 'original');
     }
-    async failBeforeWriting(exportId, common, meter, failure, sessionPaths, owned, assertUnchanged) {
+    async failBeforeWriting(exportId, common, meter, failure, sessionScope, owned, assertUnchanged) {
         let outcome = null;
         try {
             await this.host(meter, {
-                kind: 'read', script: EXPORT_INVENTORY_SCRIPT, params: { sessionPaths },
+                kind: 'read', script: EXPORT_INVENTORY_SCRIPT, params: { sessionPaths: sessionScope.paths, ...(sessionScope.directories.length === 0 ? {} : { sessionDirectoryPaths: sessionScope.directories }) },
                 hostGate: {
                     afterHost: async ({ data }) => {
-                        if ((await matchingDocumentPaths(data, sessionPaths)).length !== 0)
+                        if ((await matchingDocumentScope(data, sessionScope)).length !== 0)
                             return;
                         await assertUnchanged();
                         outcome = await this.recordFailure(exportId, common, failure, owned);
@@ -1435,12 +1896,12 @@ export async function moveRasterExportToQuarantine(stateRoot, exportsDirectory, 
         await move(lease);
     return moved;
 }
-export const RASTER_RECONCILE_ACTIONS = ['inspect', 'close_work_copy', 'finalize', 'abandon', 'release_quarantined'];
+export const RASTER_RECONCILE_ACTIONS = ['inspect', 'close_work_copy', 'finalize', 'abandon', 'release_quarantined', 'restore_previous', 'finalize_publish'];
 const residueSchema = z.strictObject({ path: z.string(), present: z.boolean(), owned: z.boolean(), reason: z.string() });
 export const rasterReconcileResultSchema = z.discriminatedUnion('status', [
     z.strictObject({ status: z.literal('no_records'), exportId: z.string() }),
     z.strictObject({ status: z.literal('invalid'), exportId: z.string(), reason: z.string() }),
-    z.strictObject({ status: z.literal('closed'), exportId: z.string() }),
+    z.strictObject({ status: z.literal('closed'), exportId: z.string(), replacement: replacementSummarySchema.optional(), disposition: z.enum(['published', 'failed']).optional() }),
     z.strictObject({
         status: z.literal('unresolved'), exportId: z.string(), window: z.string(), action: z.enum(RASTER_RECONCILE_ACTIONS),
         reason: z.string().nullable(), documents: z.number().int().nonnegative().nullable(), residue: z.array(residueSchema),
@@ -1529,11 +1990,27 @@ export class RasterExportReconciler {
     get store() { return this.deps.exportStore; }
     now() { return (this.deps.now ?? (() => new Date()))().toISOString(); }
     async reconcile(input) {
+        try {
+            return await this.reconcileInternal(input);
+        }
+        catch (error) {
+            if (error instanceof ReplacementTerminalInvalidError)
+                return { status: 'invalid', exportId: input.exportId, reason: error.message };
+            throw error;
+        }
+    }
+    async reconcileInternal(input) {
         const exportId = canonicalCommandIdSchema.parse(input.exportId);
         const leasePresent = await pathTaken(this.store.rasterRecordPath(exportId, 'session'));
         const moved = await readRasterQuarantineManifest(this.store.stateRootPath, exportId);
         const set = await this.store.readRasterRecordSet(exportId);
         const state = assessRasterRecordSet(set);
+        const overwrite = Object.values(set).some(read => read.state === 'v2' && read.record.version === 5) || await pathTaken(this.store.replacementIntentPath(exportId));
+        if (!overwrite && (input.action === 'restore_previous' || input.action === 'finalize_publish'))
+            throw new Error('This action applies only to an overwrite export (version 5).');
+        const replacementTerminal = overwrite ? await assessReplacementTerminal(this.store, set) : null;
+        if (replacementTerminal?.state === 'invalid')
+            return { status: 'invalid', exportId, reason: `${replacementTerminal.reason}: ${replacementTerminal.detail}` };
         if (leasePresent && (state.state === 'invalid' || moved.state !== 'missing')) {
             return await this.moveToQuarantine(input, exportId, set, state.state === 'invalid' ? state.reason : 'quarantine move in progress');
         }
@@ -1547,23 +2024,26 @@ export class RasterExportReconciler {
         if (state.state === 'invalid')
             return { status: 'invalid', exportId, reason: state.reason };
         if (state.state === 'published' || state.state === 'failed' || (state.state === 'prepared' && state.abandoned) ||
-            (state.state === 'quarantined' && state.released))
-            return { status: 'closed', exportId };
+            (state.state === 'quarantined' && state.released)) {
+            return { status: 'closed', exportId, ...(replacementTerminal?.state === 'valid' && replacementTerminal.disposition !== null ? { replacement: replacementTerminal.summary } : {}) };
+        }
         const prepare = set.prepare.state === 'v2' ? set.prepare.record : null;
         if (prepare === null)
             return { status: 'invalid', exportId, reason: 'records without prepare' };
         const stageFiles = await readdir(prepare.stagingDirectory).then((names) => names.length > 0, () => false);
         const window = rasterWindow(set, stageFiles);
-        const common = { version: prepare.version, kind: RASTER_EXPORT_KIND, exportId, planDigest: prepare.planDigest };
-        const sessionPaths = [prepare.workCopyPath, join(prepare.stagingDirectory, `artifact${rasterExtensionOf(set)}`), prepare.outputPath];
+        const common = commonForRecord(prepare);
+        const scope = sessionScopeOf(prepare, set);
         const fingerprint = recordSetFingerprint(set);
         const unresolved = (reason, documents = null, residue = [], message = null) => ({
             status: 'unresolved', exportId, window, action: input.action, reason, documents,
             residue: residue.map(({ path, present, owned, reason: why }) => ({ path, present, owned, reason: why })), message,
         });
         const unchanged = async () => recordSetFingerprint(await this.store.readRasterRecordSet(exportId)) === fingerprint;
+        if (prepare.version === 5 && window !== 'W0' && (input.action !== 'close_work_copy' || window === 'Q'))
+            return await this.reconcileOverwrite(input, set, prepare, scope);
         if (window === 'Q') {
-            const residue = await presence([prepare.workCopyPath, prepare.stagingDirectory, sessionPaths[1], prepare.outputPath]);
+            const residue = await presence([prepare.workCopyPath, prepare.stagingDirectory, ...(scope.stagedPath === null ? [] : [scope.stagedPath]), prepare.outputPath]);
             const guidance = `Export ${exportId} is quarantined. Check ${prepare.outputPath} and the retained files, then run release_quarantined with confirm_export_id equal to the export id.`;
             if (input.action !== 'release_quarantined')
                 return unresolved('quarantined', null, residue, guidance);
@@ -1571,7 +2051,7 @@ export class RasterExportReconciler {
                 return unresolved('confirm_export_id_mismatch', null, residue, guidance);
             let released = false;
             let refusal = null;
-            const documents = await this.inventory(sessionPaths, async (count) => {
+            const documents = await this.inventory(scope, async (count) => {
                 if (count !== 0) {
                     refusal = 'session_document_open';
                     return;
@@ -1595,7 +2075,7 @@ export class RasterExportReconciler {
                 return unresolved('prepared_before_open', null, residue);
             let entries = null;
             let refusal = null;
-            await this.inventory(sessionPaths, async (count) => {
+            await this.inventory(scope, async (count) => {
                 if (count !== 0) {
                     refusal = 'session_document_open';
                     return;
@@ -1604,11 +2084,15 @@ export class RasterExportReconciler {
                     refusal = 'state_changed';
                     return;
                 }
+                if (prepare.version === 5)
+                    await requireReplacementTerminal(this.store, await this.store.readRasterRecordSet(exportId));
                 const removed = [];
                 for (const check of await w0Residue(prepare)) {
                     const done = check.remove ? await check.remove() : false;
                     removed.push({ path: check.path, removed: done, reason: done ? 'owned' : `retained: ${check.reason}` });
                 }
+                if (prepare.version === 5)
+                    await requireReplacementTerminal(this.store, await this.store.readRasterRecordSet(exportId));
                 await this.store.writeRasterRecord('cleanup', { ...common, recordType: 'cleanup', recordedAt: this.now(), disposition: 'abandoned_before_open', entries: removed });
                 entries = removed;
             });
@@ -1626,7 +2110,7 @@ export class RasterExportReconciler {
                     ? 'This copy cannot be closed automatically; close it in Illustrator without saving, then run abandon.' : null);
             }
             try {
-                const closed = await closeRasterWorkCopy(this.deps.bridge, sessionPaths, { path: expected.identity.path, key: expected.identity.key, saved: expected.identity.saved, fileRevision: expected.identity.fileRevision,
+                const closed = await closeRasterWorkCopy(this.deps.bridge, scope, { path: expected.identity.path, key: expected.identity.key, saved: expected.identity.saved, fileRevision: expected.identity.fileRevision,
                     artboards: expected.artboards.map((board) => ({ rect: board.rect })) }, { records: this.store, exportId, fingerprint });
                 return unresolved(closed.remaining === 0 ? 'work_copy_closed' : 'work_copy_still_open', closed.remaining);
             }
@@ -1639,7 +2123,7 @@ export class RasterExportReconciler {
         }
         let released = null;
         let refusal = null;
-        const documents = await this.inventory(sessionPaths, async (count) => {
+        const documents = await this.inventory(scope, async (count) => {
             if (input.action === 'inspect')
                 return;
             if (count !== 0) {
@@ -1660,15 +2144,158 @@ export class RasterExportReconciler {
         });
         return released ?? unresolved(refusal, documents);
     }
-    async inventory(sessionPaths, underLock) {
-        const result = await this.deps.bridge.execute({
-            kind: 'read', script: EXPORT_INVENTORY_SCRIPT, params: { sessionPaths },
+    async reconcileOverwrite(input, set, prepare, scope) {
+        const common = commonForRecord(prepare);
+        const initial = await assessReplacementTerminal(this.store, set);
+        if (initial.state === 'invalid')
+            return { status: 'invalid', exportId: input.exportId, reason: `${initial.reason}: ${initial.detail}` };
+        const intent = initial.intent;
+        const paths = [prepare.workCopyPath, prepare.stagingDirectory, prepare.outputPath,
+            ...(intent?.slot ? [intent.slot] : []), ...(intent?.archive ? [intent.archive.path] : [])];
+        const residue = await presence(paths);
+        for (const r of residue)
+            if (intent?.slot === r.path)
+                r.reason = 'Previous or third-party output retained in the private slot; inspect identity before recovery.';
+        const unresolved = (reason, window = 'Q', documents = null) => ({
+            status: 'unresolved', exportId: input.exportId, window, action: input.action, reason, documents, residue,
+            message: 'Output changes require explicit restore_previous or finalize_publish with confirm_export_id. Foreign slots are retained, never deleted automatically.',
+        });
+        if (set.quarantine.state === 'v2')
+            return unresolved(`quarantined: ${set.quarantine.record.reason}`);
+        const observed = initial.filesystem;
+        const failed = set.failed.state === 'v2' && set.failed.record.version === 5 ? set.failed.record : null;
+        if (observed === 'foreign' && failed === null)
+            return unresolved('output_or_slot_identity_mismatch');
+        if (input.action === 'inspect')
+            return unresolved('explicit_action_required', observed);
+        if (input.action === 'release_quarantined' || input.action === 'close_work_copy')
+            return unresolved('action_not_allowed', observed);
+        if ((input.action === 'restore_previous' || input.action === 'finalize_publish') && input.confirmExportId !== input.exportId)
+            return unresolved('confirm_export_id_mismatch', observed);
+        const fingerprint = recordSetFingerprint(set);
+        const intentDigest = (await this.store.readReplacementIntent(input.exportId))?.digest ?? null;
+        let result = null;
+        const documents = await this.inventory(scope, async (count) => {
+            if (count !== 0) {
+                result = unresolved('session_document_open', observed, count);
+                return;
+            }
+            if (recordSetFingerprint(await this.store.readRasterRecordSet(input.exportId)) !== fingerprint || ((await this.store.readReplacementIntent(input.exportId))?.digest ?? null) !== intentDigest) {
+                result = unresolved('state_changed', observed, count);
+                return;
+            }
+            const ids = new Set();
+            if (set.session.state === 'v2')
+                ids.add(set.session.record.openCommandId);
+            if (set.host_open.state === 'v2')
+                ids.add(set.host_open.record.open.commandId);
+            if (set.artifact_binding.state === 'v2')
+                ids.add(set.artifact_binding.record.export.commandId);
+            if (set.host_terminal.state === 'v2')
+                ids.add(set.host_terminal.record.close.commandId);
+            for (const id of ids)
+                if (await this.deps.bridge.commandExecutionState?.(id) !== 'inactive') {
+                    result = unresolved('host_command_not_inactive', observed, count);
+                    return;
+                }
+            const terminal = await assessReplacementTerminal(this.store, await this.store.readRasterRecordSet(input.exportId));
+            if (terminal.state === 'invalid') {
+                result = { status: 'invalid', exportId: input.exportId, reason: `${terminal.reason}: ${terminal.detail}` };
+                return;
+            }
+            let current = terminal.filesystem;
+            if (failed !== null) {
+                if (!['finalize', 'restore_previous', 'abandon'].includes(input.action)) {
+                    result = unresolved('failed_terminal_requires_finalize', current, count);
+                    return;
+                }
+                await requireReplacementTerminal(this.store, set, 'failed');
+                if (intent !== null && current === 'restored')
+                    await cleanupPreviousSlot(intent);
+                if (set.cleanup.state !== 'v2')
+                    await this.store.writeRasterRecord('cleanup', { ...common, recordType: 'cleanup', recordedAt: this.now(), disposition: 'failed', entries: await Promise.all(paths.map(path => retainedEntry(path, 'retained: failed overwrite evidence'))) });
+                await requireReplacementTerminal(this.store, await this.store.readRasterRecordSet(input.exportId), 'failed');
+                await this.store.releaseRasterSession(input.exportId);
+                result = { status: 'released', exportId: input.exportId, window: current, action: input.action, disposition: 'failed' };
+                return;
+            }
+            const published = async () => {
+                if (intent === null || set.artifact_binding.state !== 'v2' || set.host_terminal.state !== 'v2' || set.session.state !== 'v2')
+                    throw new Error('Replacement publication requires its original record chain.');
+                const metadata = await lstat(prepare.outputPath, { bigint: true });
+                if (set.published.state !== 'v2')
+                    await this.store.writeRasterRecord('published', {
+                        ...common, recordType: 'published', recordedAt: this.now(), bindingDigest: set.artifact_binding.digest, hostTerminalDigest: set.host_terminal.digest,
+                        ...replacementPublicationPayload(set), replacement: terminal.summary,
+                    });
+                await requireReplacementTerminal(this.store, await this.store.readRasterRecordSet(input.exportId), 'published');
+                await cleanupPreviousSlot(intent);
+                await requireReplacementTerminal(this.store, await this.store.readRasterRecordSet(input.exportId), 'published');
+                const entries = [];
+                const removed = await unlinkStagedName(intent.staged.path, fileIdentityOf(metadata), null);
+                entries.push({ path: intent.staged.path, removed, reason: removed ? 'owned' : 'already absent or retained' });
+                await requireReplacementTerminal(this.store, await this.store.readRasterRecordSet(input.exportId), 'published');
+                const stageRemoved = await removeEmptyDirectory(prepare.stagingDirectory, prepare.outputParent);
+                entries.push({ path: prepare.stagingDirectory, removed: stageRemoved, reason: stageRemoved ? 'owned' : 'retained' });
+                entries.push(await retainedEntry(prepare.workCopyPath, 'retained: reconcile does not delete the work copy'));
+                if (set.cleanup.state !== 'v2')
+                    await this.store.writeRasterRecord('cleanup', { ...common, recordType: 'cleanup', recordedAt: this.now(), disposition: 'published', entries });
+                await requireReplacementTerminal(this.store, await this.store.readRasterRecordSet(input.exportId), 'published');
+                await this.store.releaseRasterSession(input.exportId);
+                result = { status: 'released', exportId: input.exportId, window: 'published', action: input.action, disposition: 'published' };
+            };
+            if (input.action === 'finalize_publish' && (current === 'detached' || current === 'create')) {
+                if (intent === null)
+                    throw new Error('Missing write-ahead replacement intent.');
+                await assertReplacementScopes(intent);
+                await withOutputParentScope(prepare.outputParent, async (parent) => {
+                    const i = intent.staged.identity;
+                    await linkBoundArtifact(intent.staged.path, prepare.outputPath, { identity: { dev: BigInt(i.dev), ino: BigInt(i.ino), size: BigInt(i.size), mtimeNs: BigInt(i.mtimeNs), ctimeNs: BigInt(i.ctimeNs) }, bytes: intent.staged.bytes, sha256: intent.staged.sha256 }, parent);
+                    await syncReplacementDirectory(prepare.stagingDirectory);
+                });
+                current = (await requireReplacementTerminal(this.store, await this.store.readRasterRecordSet(input.exportId))).filesystem;
+            }
+            if (current === 'published' && (input.action === 'finalize' || input.action === 'finalize_publish')) {
+                await published();
+                return;
+            }
+            if (intent !== null && input.action === 'restore_previous' && (current === 'detached' || current === 'restored')) {
+                await restorePreviousOutput(intent);
+                current = (await requireReplacementTerminal(this.store, await this.store.readRasterRecordSet(input.exportId))).filesystem;
+            }
+            if ((input.action === 'abandon' && (current === 'previous' || current === 'create' || current === 'before_intent')) || (input.action === 'restore_previous' && current === 'restored')) {
+                const assessment = await requireReplacementTerminal(this.store, await this.store.readRasterRecordSet(input.exportId));
+                const summary = assessment.summary;
+                if (set.failed.state !== 'v2')
+                    await this.store.writeRasterRecord('failed', { ...common, recordType: 'failed', recordedAt: this.now(), stage: 'reconcile',
+                        reason: current === 'restored' ? 'previous_restored' : 'not_published', message: 'No new output is published; retained evidence is kept.', evidenceDigests: replacementTerminalEvidence(set), replacement: summary });
+                await requireReplacementTerminal(this.store, await this.store.readRasterRecordSet(input.exportId), 'failed');
+                if (intent !== null && current === 'restored')
+                    await cleanupPreviousSlot(intent);
+                if (set.cleanup.state !== 'v2')
+                    await this.store.writeRasterRecord('cleanup', { ...common, recordType: 'cleanup', recordedAt: this.now(), disposition: 'failed', entries: await Promise.all(paths.map(path => retainedEntry(path, 'retained: overwrite recovery evidence'))) });
+                await requireReplacementTerminal(this.store, await this.store.readRasterRecordSet(input.exportId), 'failed');
+                await this.store.releaseRasterSession(input.exportId);
+                result = { status: 'released', exportId: input.exportId, window: current, action: input.action, disposition: 'failed' };
+                return;
+            }
+            result = unresolved(`action_not_allowed_in_${current}`, current, count);
+        });
+        return result ?? unresolved('not_released', observed, documents);
+    }
+    async inventory(scope, underLock) {
+        let matched = null;
+        await this.deps.bridge.execute({
+            kind: 'read', script: EXPORT_INVENTORY_SCRIPT, params: { sessionPaths: scope.paths },
             hostGate: { afterHost: async ({ data }) => {
                     const inventory = data;
-                    await underLock((await matchingDocumentPaths(inventory, sessionPaths)).length, inventory.documentCount);
+                    matched = (await matchingDocumentScope(inventory, scope)).length;
+                    await underLock(matched, inventory.documentCount);
                 } },
         });
-        return (await matchingDocumentPaths(result.data, sessionPaths)).length;
+        if (matched === null)
+            throw new Error('The export inventory was not verified under the host lock.');
+        return matched;
     }
     async quarantineCandidateState(exportId) {
         const leasePresent = await pathTaken(this.store.rasterRecordPath(exportId, 'session'));
@@ -1683,7 +2310,7 @@ export class RasterExportReconciler {
     }
     async moveToQuarantine(input, exportId, set, why) {
         const prepare = set.prepare.state === 'v2' ? set.prepare.record : null;
-        const sessionPaths = prepare === null ? [] : [prepare.workCopyPath, join(prepare.stagingDirectory, `artifact${rasterExtensionOf(set)}`), prepare.outputPath];
+        const scope = prepare === null ? { paths: [], directories: [], stagedPath: null } : sessionScopeOf(prepare, set);
         const guidance = `The records of export ${exportId} are not a legal state (${why}). Check the export folder and the files, then run release_quarantined with confirm_export_id equal to the export id; the records are moved unread into quarantine/exports/ and the lease last.`;
         const unresolved = (reason, documents = null) => ({ status: 'unresolved', exportId, window: 'I', action: input.action, reason, documents, residue: [], message: guidance });
         if (Object.values(set).some((read) => read.state === 'v1'))
@@ -1695,7 +2322,7 @@ export class RasterExportReconciler {
         const observedState = await this.quarantineCandidateState(exportId);
         let refusal = null;
         let moved = false;
-        const documents = await this.inventory(sessionPaths, async (count, documentCount) => {
+        const documents = await this.inventory(scope, async (count, documentCount) => {
             if (prepare !== null ? count !== 0 : documentCount !== 0) {
                 refusal = prepare !== null ? 'session_document_open' : 'documents_open_without_prepare';
                 return;
@@ -1790,11 +2417,16 @@ export class RasterExportReconciler {
                 if (isBound(staged) && staged.nlink === 2n && isBound(output) && await hashWholeFile(prepare.outputPath) === binding.sha256) {
                     if (action !== 'finalize')
                         return null;
-                    await this.store.writeRasterRecord('published', {
+                    await this.store.writeRasterRecord('published', isSvgExportRecord(session) && isSvgExportRecord(binding) ? {
+                        ...common, recordType: 'published', recordedAt: this.now(), bindingDigest: set.artifact_binding.digest, hostTerminalDigest: set.host_terminal.digest,
+                        artifact: { path: prepare.outputPath, mediaType: binding.mediaType, bytes: binding.bytes, sha256: binding.sha256, width: binding.width, height: binding.height, viewBox: binding.viewBox },
+                        outputIdentity: serializeFileIdentity(fileIdentityOf(output)), sourcePath: prepare.sourcePath, artboardIndex: session.artboardIndex, options: session.options,
+                        expected: session.expected, expectedBounds: session.expectedBounds,
+                    } : {
                         ...common, recordType: 'published', recordedAt: this.now(), bindingDigest: set.artifact_binding.digest, hostTerminalDigest: set.host_terminal.digest,
                         artifact: { path: prepare.outputPath, mediaType: binding.mediaType, bytes: binding.bytes, sha256: binding.sha256, width: binding.width, height: binding.height },
                         outputIdentity: serializeFileIdentity(fileIdentityOf(output)), sourcePath: prepare.sourcePath, artboardIndex: session.artboardIndex, options: session.options,
-                        ...(session.version === 3 ? { expected: session.expected } : {}),
+                        ...(isExactExportRecord(session) ? { expected: session.expected } : {}),
                     });
                     return await this.resolveWindow('W7', 'finalize', await this.store.readRasterRecordSet(exportId), prepare, common);
                 }
@@ -1816,6 +2448,14 @@ export class RasterExportReconciler {
 function rasterExtensionOf(set) {
     return set.session.state === 'v2' && set.session.record.options.format === 'jpeg' ? '.jpg' : '.png';
 }
+export function sessionScopeOf(prepare, set) {
+    if (isSvgExportRecord(prepare)) {
+        const stagedPath = set.artifact_binding.state === 'v2' ? set.artifact_binding.record.stagedPath : null;
+        return { paths: [prepare.workCopyPath, prepare.outputPath, ...(stagedPath === null ? [] : [stagedPath])], directories: [prepare.stagingDirectory], stagedPath };
+    }
+    const stagedPath = join(prepare.stagingDirectory, `artifact${rasterExtensionOf(set)}`);
+    return { paths: [prepare.workCopyPath, stagedPath, prepare.outputPath], directories: [], stagedPath };
+}
 export class RasterPublishError extends Error {
     reason;
     constructor(reason, message) {
@@ -1824,7 +2464,7 @@ export class RasterPublishError extends Error {
         this.name = 'RasterPublishError';
     }
 }
-export async function linkBoundArtifact(stagedPath, outputPath, bound, parentScope, linkImpl = link) {
+export async function linkBoundArtifact(stagedPath, outputPath, bound, parentScope, linkImpl = link, streamingByteLimit) {
     const handle = await open(stagedPath, noFollowReadFlags());
     try {
         const before = await handle.stat({ bigint: true });
@@ -1846,9 +2486,10 @@ export async function linkBoundArtifact(stagedPath, outputPath, bound, parentSco
         const published = await open(outputPath, noFollowReadFlags());
         try {
             const metadata = await published.stat({ bigint: true });
-            const bytes = await readBounded(published, RASTER_MAX_ARTIFACT_BYTES) ?? Buffer.alloc(0);
-            if (!metadata.isFile() || metadata.dev !== before.dev || metadata.ino !== before.ino || metadata.nlink !== 2n ||
-                createHash('sha256').update(bytes).digest('hex') !== bound.sha256) {
+            const hashMatches = streamingByteLimit === undefined
+                ? createHash('sha256').update(await readBounded(published, RASTER_MAX_ARTIFACT_BYTES) ?? Buffer.alloc(0)).digest('hex') === bound.sha256
+                : bound.bytes <= streamingByteLimit && await verifyReplacementFile({ path: outputPath, identity: serializeFileIdentity(bound.identity), bytes: bound.bytes, sha256: bound.sha256 }, [2]);
+            if (!metadata.isFile() || metadata.dev !== before.dev || metadata.ino !== before.ino || metadata.nlink !== 2n || !hashMatches) {
                 throw new BackupCopyError('The published output does not resolve to the bound staged inode and bytes.');
             }
             return fileIdentityOf(metadata);
@@ -1877,4 +2518,8 @@ export async function unlinkStagedName(stagedPath, outputIdentity, parentScope) 
     await unlink(stagedPath);
     await syncDirectory(dirname(stagedPath));
     return true;
+}
+function commonForRecord(prepare) {
+    return { version: prepare.version, kind: RASTER_EXPORT_KIND, exportId: prepare.exportId, planDigest: prepare.planDigest,
+        ...(prepare.version === 5 ? { renderVersion: prepare.renderVersion, expectedOutput: prepare.expectedOutput, requestDigest: prepare.requestDigest } : {}) };
 }

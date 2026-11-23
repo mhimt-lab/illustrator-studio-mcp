@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { takeHostPhases } from './call-timing.js';
 export { CREATE_RECTANGLE_MUTATION_VALIDATOR } from './adapters/create-rectangle/identity.js';
 export function parseCompletedResultEnvelope(rawResult, expectedCommandId) {
     let parsed;
@@ -16,6 +17,7 @@ export function parseCompletedResultEnvelope(rawResult, expectedCommandId) {
     return parsed;
 }
 export function validateMutationResult(registry, operation, ref, adapterIdentity, value) {
+    takeHostPhases(`illustrator_${operation}`, value);
     return registry.resolveIdentity(operation, ref, adapterIdentity).resultSchema.parse(value);
 }
 function classifyValidatedMutationResult(registry, context, value) {

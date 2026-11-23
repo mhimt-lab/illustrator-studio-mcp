@@ -61,6 +61,14 @@ public static class McpWindowsProbe {
       return QueryFullProcessImageNameW(process, 0, name, ref size) ? name.ToString(0, (int)size) : null;
     } finally { CloseHandle(process); }
   }
+  // Process id that owns the foreground window; 0 when there is no foreground window (GetForegroundWindow returns NULL) or no owner.
+  public static uint ForegroundProcessId() {
+    IntPtr window = GetForegroundWindow();
+    if (window == IntPtr.Zero) return 0;
+    uint processId;
+    GetWindowThreadProcessId(window, out processId);
+    return processId;
+  }
   // Null when there is no foreground window (GetForegroundWindow returns NULL) or its process cannot be named.
   public static string ForegroundImagePath() {
     IntPtr window = GetForegroundWindow();
@@ -114,13 +122,18 @@ switch ($action) {
     Write-ProbeJson ([ordered]@{ started = [McpWindowsProbe]::LockWorkStation() })
     exit 0
   }
-  # Foreground observation: exactly {"foregroundExecutablePath":...,"illustratorExecutablePaths":[...]}. Timing goes to stderr.
+  # Foreground observation: exactly {"foregroundExecutablePath":...,"illustratorExecutablePaths":[...],"foregroundProcessId":n,"illustratorProcessIds":[...]}. Timing goes to stderr.
   'foreground' {
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    $foreground = [McpWindowsProbe]::ForegroundImagePath()
+    $foregroundPid = [McpWindowsProbe]::ForegroundProcessId()
+    $foreground = $null
+    if ($foregroundPid -ne 0) { $foreground = [McpWindowsProbe]::ImagePath($foregroundPid) }
     $paths = Get-IllustratorPaths
+    $illustratorPids = @()
+    foreach ($process in @(Get-Process -Name 'Illustrator' -ErrorAction SilentlyContinue)) { $illustratorPids += [int]$process.Id }
     $elapsed = $watch.Elapsed.TotalMilliseconds
-    Write-ProbeJson ([ordered]@{ foregroundExecutablePath = $foreground; illustratorExecutablePaths = $paths })
+    Write-ProbeJson ([ordered]@{ foregroundExecutablePath = $foreground; illustratorExecutablePaths = $paths;
+      foregroundProcessId = [int]$foregroundPid; illustratorProcessIds = $illustratorPids })
     [Console]::Error.WriteLine('observeMs=' + $elapsed.ToString([Globalization.CultureInfo]::InvariantCulture))
     exit 0
   }

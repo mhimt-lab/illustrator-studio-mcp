@@ -7,7 +7,10 @@ import { ARTBOARD_INTEGER_TOLERANCE, artboardRectsEqual } from './artboard-integ
 import { documentContextSchema } from './mutation-result-schema-core.js';
 import { BackupCopyError, captureFileIdentity, fileIdentitySchema, hostDocumentIdentitySchema, CTIME_ONLY_READ_ATTEMPTS, onlyCtimeDiffers, sameContentIdentity, sameFileIdentity, serializeFileIdentity, } from './document-backup.js';
 import { atomicCreatePrivateRecord, readSecurePrivateRecord, unlinkPrivateRecord } from './private-record.js';
-import { classifyExportEntry, ExportSessionFormatError, RASTER_EXPORT_RECORD_MAX_BYTES, RASTER_EXPORT_RECORD_SCHEMAS, RASTER_EXACT_RECORD_SCHEMAS, RASTER_EXPORT_RECORD_SUFFIXES, RASTER_EXPORT_SESSION_MAX_BYTES, rasterExportSessionSchema, rasterExactSessionSchema, } from './raster-export-records.js';
+import { classifyExportEntry, ExportSessionFormatError, RASTER_EXPORT_RECORD_MAX_BYTES, RASTER_EXPORT_RECORD_SCHEMAS, RASTER_EXACT_RECORD_SCHEMAS, RASTER_EXPORT_RECORD_SUFFIXES, RASTER_EXPORT_SESSION_MAX_BYTES, RASTER_SVG_RECORD_VERSION, rasterExportSessionSchema, rasterExactSessionSchema, } from './raster-export-records.js';
+import { SVG_EXPORT_RECORD_SCHEMAS, svgSessionSchema } from './svg-export-records.js';
+import { OVERWRITE_RECORD_SCHEMAS } from './raster-overwrite-records.js';
+import { replacementIntentSchema } from './output-replacement.js';
 import { ensurePrivateDirectory, ensurePrivateStateRoot, isMissingPath } from './private-state.js';
 import { temporaryTwinPattern } from './state-quarantine.js';
 import { noFollowReadFlags, noFollowDirectoryFlags, currentUid } from './platform-primitives.js';
@@ -69,6 +72,7 @@ export const exportStageSchema = z.enum([
     'verify_output',
     'close_work_copy',
     'verify_source',
+    'pre_link_check',
     'publish_output',
     'write_record',
 ]);
@@ -242,6 +246,14 @@ export class OutputPublishError extends Error {
         super(message);
         this.reason = reason;
         this.name = 'OutputPublishError';
+    }
+}
+export class OutputPreLinkCheckError extends Error {
+    code;
+    constructor(code, message, options) {
+        super(message, options);
+        this.code = code;
+        this.name = 'OutputPreLinkCheckError';
     }
 }
 export const EXPORT_REGISTRATION_SCAN_LIMITS = { pathItems: 5_000 };
@@ -632,7 +644,7 @@ export async function validateOutputPath(outputPath, format, sourceRealPath, sta
         throw invalid('output_path needs a file name before the extension.');
     return await validateOutputLocation(outputPath, sourceRealPath, stateRoot);
 }
-export async function validateOutputLocation(outputPath, sourceRealPath, stateRoot) {
+export async function validateOutputLocation(outputPath, sourceRealPath, stateRoot, allowExisting = false) {
     const invalid = (message) => new ExportPreconditionError('output_path_invalid', message);
     if (!isAbsolute(outputPath))
         throw invalid('output_path must be an absolute path.');
@@ -667,7 +679,8 @@ export async function validateOutputLocation(outputPath, sourceRealPath, stateRo
     if ((parentMetadata.mode & 0o022) !== 0 && (parentMetadata.mode & 0o1000) === 0) {
         throw invalid('The output directory is writable by group or others without the sticky bit, so another account could replace the output.');
     }
-    await assertOutputAbsent(path);
+    if (!allowExisting)
+        await assertOutputAbsent(path);
     return { path, parent };
 }
 export async function assertOutputAbsent(path) {
@@ -989,9 +1002,9 @@ export class DocumentExportStore {
     }
     async openRasterSession(session) {
         const version = session !== null && typeof session === 'object' ? Reflect.get(session, 'version') : undefined;
-        if (version !== 2 && version !== 3)
+        if (version !== 2 && version !== 3 && version !== RASTER_SVG_RECORD_VERSION && version !== 5)
             throw new Error('Unsupported raster session version.');
-        const validated = (version === 2 ? rasterExportSessionSchema : rasterExactSessionSchema).parse(session);
+        const validated = (version === 5 ? OVERWRITE_RECORD_SCHEMAS.session : version === 2 ? rasterExportSessionSchema : version === 3 ? rasterExactSessionSchema : svgSessionSchema).parse(session);
         const contents = `${JSON.stringify(validated, null, 2)}\n`;
         if (Buffer.byteLength(contents) > RASTER_EXPORT_SESSION_MAX_BYTES)
             throw new Error('The export session exceeds its size limit.');
@@ -1015,7 +1028,7 @@ export class DocumentExportStore {
             return null;
         if (record.state === 'invalid')
             return { format: 'invalid', reason: 'unsafe_file' };
-        const entry = classifyExportEntry(record.text, { exportId, recordType: 'session' }, { v1: exportSessionSchema, v2: rasterExportSessionSchema, v3: rasterExactSessionSchema });
+        const entry = classifyExportEntry(record.text, { exportId, recordType: 'session' }, { v1: exportSessionSchema, v2: rasterExportSessionSchema, v3: rasterExactSessionSchema, v4: svgSessionSchema, v5: OVERWRITE_RECORD_SCHEMAS.session });
         if (entry.format === 'v1' && record.bytes.length > EXPORT_SESSION_MAX_BYTES)
             return { format: 'invalid', reason: 'unsafe_file' };
         return entry;
@@ -1027,9 +1040,9 @@ export class DocumentExportStore {
     }
     async writeRasterRecord(recordType, record) {
         const version = record !== null && typeof record === 'object' ? Reflect.get(record, 'version') : undefined;
-        if (version !== 2 && version !== 3)
+        if (version !== 2 && version !== 3 && version !== RASTER_SVG_RECORD_VERSION && version !== 5)
             throw new Error('Unsupported raster record version.');
-        const validated = (version === 2 ? RASTER_EXPORT_RECORD_SCHEMAS[recordType] : RASTER_EXACT_RECORD_SCHEMAS[recordType]).parse(record);
+        const validated = (version === 5 ? OVERWRITE_RECORD_SCHEMAS[recordType] : version === 2 ? RASTER_EXPORT_RECORD_SCHEMAS[recordType] : version === 3 ? RASTER_EXACT_RECORD_SCHEMAS[recordType] : SVG_EXPORT_RECORD_SCHEMAS[recordType]).parse(record);
         if (validated.recordType !== recordType)
             throw new Error('The record type does not match its file.');
         const contents = `${JSON.stringify(validated, null, 2)}\n`;
@@ -1057,7 +1070,7 @@ export class DocumentExportStore {
         const v1 = recordType === 'session' ? exportSessionSchema : recordType === 'host_open' ? exportHostRecordSchema
             : recordType === 'published' ? exportRecordSchema : null;
         const v2 = RASTER_EXPORT_RECORD_SCHEMAS[recordType];
-        const entry = classifyExportEntry(record.text, { exportId, recordType }, { v1, v2, v3: RASTER_EXACT_RECORD_SCHEMAS[recordType] });
+        const entry = classifyExportEntry(record.text, { exportId, recordType }, { v1, v2, v3: RASTER_EXACT_RECORD_SCHEMAS[recordType], v4: SVG_EXPORT_RECORD_SCHEMAS[recordType], v5: OVERWRITE_RECORD_SCHEMAS[recordType] });
         if (entry.format === 'invalid')
             return { state: 'invalid', reason: entry.reason };
         if (entry.format === 'v1')
@@ -1072,13 +1085,39 @@ export class DocumentExportStore {
     async releaseRasterSession(exportId) {
         await unlinkPrivateRecord(this.rasterRecordPath(exportId, 'session'));
     }
+    replacementIntentPath(exportId) {
+        if (!/^[0-9a-f-]{36}$/.test(exportId))
+            throw new Error('export_id must be a UUID.');
+        return join(this.recordDirectory, `${exportId}.replacement-intent.json`);
+    }
+    async writeReplacementIntent(intent) {
+        const validated = replacementIntentSchema.parse(intent);
+        const contents = `${JSON.stringify(validated, null, 2)}\n`;
+        if (Buffer.byteLength(contents) > RASTER_EXPORT_RECORD_MAX_BYTES)
+            throw new Error('The replacement intent exceeds its size limit.');
+        const path = this.replacementIntentPath(validated.exportId);
+        await atomicCreatePrivateRecord(path, contents);
+        return createHash('sha256').update(contents).digest('hex');
+    }
+    async readReplacementIntent(exportId) {
+        const path = this.replacementIntentPath(exportId);
+        const read = await readSecurePrivateRecord(path, RASTER_EXPORT_RECORD_MAX_BYTES, { maxLinkCount: await createOnceLinkAllowance(path) });
+        if (read.state === 'missing')
+            return null;
+        if (read.state !== 'valid')
+            throw new Error('The replacement intent is unsafe or unreadable.');
+        const intent = replacementIntentSchema.parse(JSON.parse(read.text));
+        if (intent.exportId !== exportId)
+            throw new Error('The replacement intent belongs to another export.');
+        return { intent, digest: createHash('sha256').update(read.bytes).digest('hex') };
+    }
     async readSession(exportId) {
         const entry = await this.readSessionEntry(exportId);
         if (entry === null)
             return null;
         if (entry.format === 'v1')
             return entry.record;
-        throw new ExportSessionFormatError(exportId, entry.format === 'v2' || entry.format === 'v3' ? 'raster_vector_export_session' : entry.reason);
+        throw new ExportSessionFormatError(exportId, entry.format === 'v2' || entry.format === 'v3' || entry.format === 'v4' || entry.format === 'v5' ? 'raster_vector_export_session' : entry.reason);
     }
     hostRecordPath(exportId) {
         return join(this.recordDirectory, `${exportId}.session-host.json`);

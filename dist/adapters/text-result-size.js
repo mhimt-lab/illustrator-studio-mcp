@@ -55,10 +55,10 @@ export const textResultJsonBytes = counters.bytes;
 export const textResultBytes = counters.result;
 export const recordedTextJsonBytes = textResultJsonBytes;
 export const recordedTextResultBytes = textResultBytes;
-export function textResultSizeMessage(plan) {
+export function textResultSizeMessage(plan, estimate = textResultBytes(plan)) {
     const groups = plan.before.groupAncestry?.length ?? 0;
     const where = groups === 0 ? '' : ` in ${groups} enclosing group${groups === 1 ? '' : 's'}, whose child lists are part of the evidence`;
-    return `result_too_large: estimated ${textResultBytes(plan)} UTF-8 bytes for ${Math.max(plan.before.contents.length, plan.after.contents.length)} UTF-16 units${where}; limit ${TEXT_RESULT_ADMISSION_BYTES} bytes (80% of ${PRIVATE_RECORD_LIMITS.result}). Split the range or frame`
+    return `result_too_large: estimated ${estimate} UTF-8 bytes for ${Math.max(plan.before.contents.length, plan.after.contents.length)} UTF-16 units${where}; limit ${TEXT_RESULT_ADMISSION_BYTES} bytes (80% of ${PRIVATE_RECORD_LIMITS.result}). Split the range or frame`
         + (groups === 0 ? '. 範囲を分けるか、枠を分けてください。' : ', or edit the frame outside groups with many children. 範囲や枠を分けるか、子の多いグループの外で編集してください。');
 }
 export const TEXT_RESULT_SIZE_SCRIPT = `

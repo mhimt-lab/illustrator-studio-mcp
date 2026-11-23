@@ -1,41 +1,45 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { z } from 'zod';
+import { HOST_VERSION_POLICY_JSX, hostVersionAdmitted } from './host-version-policy.js';
 const exec = promisify(execFile);
 const bindingEqual = (left, right) => left !== null && right !== null && left.pid === right.pid && left.processStart === right.processStart &&
     left.version === right.version && left.bundlePath === right.bundlePath;
-export const observeFontInventoryIdentity = async (target) => {
-    if (process.platform !== 'darwin' || target.bundleId !== 'com.adobe.illustrator' || target.channel !== 'stable')
-        return null;
-    const run = async (file, args) => (await exec(file, args, { timeout: 5_000, maxBuffer: 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } })).stdout.trim();
-    try {
-        const pidText = await run('lsappinfo', ['info', '-only', 'pid', '-app', target.bundleId]);
-        const pid = Number(/pid = (\d+)/u.exec(pidText)?.[1]);
-        const bundlePath = /bundle path="([^"]+)"/u.exec(await run('lsappinfo', ['info', '-only', 'bundlepath', '-app', target.bundleId]))?.[1];
-        if (!Number.isSafeInteger(pid) || pid <= 0 || bundlePath === undefined)
+const runCommand = async (file, args) => (await exec(file, args, { timeout: 5_000, maxBuffer: 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } })).stdout.trim();
+export function createFontInventoryIdentityProbe(run = runCommand) {
+    return async (target) => {
+        if (process.platform !== 'darwin' || target.bundleId !== 'com.adobe.illustrator' || target.channel !== 'stable')
             return null;
-        const processStart = await run('/bin/ps', ['-o', 'lstart=', '-p', String(pid)]);
-        const version = await run('/usr/bin/defaults', ['read', bundlePath + '/Contents/Info', 'CFBundleShortVersionString']);
-        if (!Number.isFinite(Date.parse(processStart)) || version !== '30.8.2')
+        try {
+            const pidText = await run('lsappinfo', ['info', '-only', 'pid', '-app', target.bundleId]);
+            const pid = Number(/pid = (\d+)/u.exec(pidText)?.[1]);
+            const bundlePath = /bundle path="([^"]+)"/u.exec(await run('lsappinfo', ['info', '-only', 'bundlepath', '-app', target.bundleId]))?.[1];
+            if (!Number.isSafeInteger(pid) || pid <= 0 || bundlePath === undefined)
+                return null;
+            const processStart = await run('ps', ['-o', 'lstart=', '-p', String(pid)]);
+            const version = await run('defaults', ['read', bundlePath + '/Contents/Info', 'CFBundleShortVersionString']);
+            if (!Number.isFinite(Date.parse(processStart)) || !hostVersionAdmitted('font_inventory', version))
+                return null;
+            if (Number(/pid = (\d+)/u.exec(await run('lsappinfo', ['info', '-only', 'pid', '-app', target.bundleId]))?.[1]) !== pid)
+                return null;
+            return { pid, processStart, version, bundlePath };
+        }
+        catch {
             return null;
-        if (Number(/pid = (\d+)/u.exec(await run('lsappinfo', ['info', '-only', 'pid', '-app', target.bundleId]))?.[1]) !== pid)
-            return null;
-        return { pid, processStart, version, bundlePath };
-    }
-    catch {
-        return null;
-    }
-};
+        }
+    };
+}
+export const observeFontInventoryIdentity = createFontInventoryIdentityProbe();
 const captureSchema = z.strictObject({
-    documents: z.literal(0), version: z.literal('30.8.2'),
+    documents: z.literal(0), version: z.string().min(1).max(64),
     count: z.number().int().nonnegative(), names: z.array(z.string().min(1).max(255)),
 }).superRefine((value, context) => {
     if (value.count !== value.names.length)
         context.addIssue({ code: 'custom', message: 'Incomplete Illustrator font inventory.' });
 });
-export const CAPTURE_CLEAN_FONT_INVENTORY_SCRIPT = `
+export const CAPTURE_CLEAN_FONT_INVENTORY_SCRIPT = `${HOST_VERSION_POLICY_JSX}
 var mcpCleanFontInventory = null;
-if (app.documents.length === 0 && String(app.version) === "30.8.2") {
+if (app.documents.length === 0 && hostVersionAdmitted("font_inventory", String(app.version))) {
   var mcpFontCount = app.textFonts.length;
   var mcpFontNames = [];
   for (var mcpFontIndex = 0; mcpFontIndex < mcpFontCount; mcpFontIndex++) {

@@ -8,6 +8,11 @@ export const DIRTY_FILE_ADMISSION_OPERATIONS = new Set([
     'replace_text_range',
     'transform_object',
     'set_path_appearance',
+    'insert_vertical_space',
+    'scale_artwork',
+    'apply_dataset',
+    'create_dataset', 'update_dataset',
+    'bind_variable',
 ]);
 export async function buildDirtyFileAdmission(barriers, sessions, allowDirtyFile = false) {
     const listing = await barriers.prepare({ uncapped: true });
@@ -46,9 +51,10 @@ export async function saveBarrierRefusal(barriers, document, options) {
         return null;
     const listing = options.prepare ? await barriers.prepare({ uncapped: true }) : await barriers.list({ uncapped: true });
     let invalid = listing.invalid !== null;
-    const candidates = barrierPathCandidates(document.path);
+    const pathCandidates = options.pathCandidates ?? barrierPathCandidates;
+    const candidates = pathCandidates(document.path);
     for (const record of listing.paths) {
-        if (barrierPathCandidates(record.sourcePath).some((candidate) => candidates.includes(candidate)))
+        if (pathCandidates(record.sourcePath).some((candidate) => candidates.includes(candidate)))
             return SAVE_REFUSED_BARRIER_MESSAGE;
     }
     for (const form of hostPathForms(document.path)) {

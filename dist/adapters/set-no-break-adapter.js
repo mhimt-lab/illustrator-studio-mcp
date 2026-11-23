@@ -477,16 +477,7 @@ function normalizedRequest(input) {
 export const setNoBreakToolContract = {
     name: 'illustrator_set_no_break',
     title: 'Plan or Set No Break (分割禁止) on a Text Range',
-    description: 'Plan or apply the no-break (分割禁止) attribute to a bounded UTF-16 range of one layer-direct, '
-        + 'unthreaded, horizontal text frame: a single-line POINTTEXT frame, or a one-paragraph AREATEXT frame whose '
-        + 'whole text is visible. Bound by explicit document key and native UUID. Only `noBreak` inside the range '
-        + 'moves; every character outside it stays unchanged. Ranges that would split a character are refused, as '
-        + 'are vertical text, several paragraphs, a frame that already overflows, threaded frames and frames with '
-        + 'manual pair kerning. For area text the plan and the verified result report the composed lines before and '
-        + 'after (observed, not predicted); a change that makes the text overflow its frame fails verification and is '
-        + 'rolled back. Apply performs exact compare-and-set over a per-character fingerprint, native read-back '
-        + 'verification, and a per-character verified inverse. Estimated stored result must be <=209715 UTF-8 bytes; '
-        + 'result_too_large requires a smaller frame or fewer distinct style runs (splitting only the range does not shrink the frame evidence).',
+    description: 'Plan or apply the no-break (分割禁止) attribute to a bounded UTF-16 range of one layer-direct, unthreaded, horizontal text frame: a single-line POINTTEXT frame, or an AREATEXT frame with one paragraph whose whole text is visible. Bound by expected_document_key and native UUID. Only noBreak inside the range changes; other characters are unchanged. Ranges that split a character are refused, as are vertical text, several paragraphs, frames that already overflow, threaded frames and frames with manual pair kerning. For area text the plan and result report composed lines; a change that makes the text overflow fails verification and is rolled back. Apply uses compare-and-set with a verified per-character inverse. If the estimated stored result exceeds 209715 UTF-8 bytes (result_too_large), use a smaller frame or fewer distinct style runs; splitting only the range does not help.',
     inputSchema,
     publicInputSchema: setNoBreakPublicInputSchema,
     outputSchema: setNoBreakResponseSchema,

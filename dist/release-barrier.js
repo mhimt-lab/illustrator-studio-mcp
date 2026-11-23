@@ -320,7 +320,8 @@ export class ReleaseBarrierStore {
                 complete = true;
             }
             else if (source === 'document' || source === 'context') {
-                const parsed = documentContextSchema.safeParse(source === 'document' ? value.document : value);
+                const { preferences: _preferences, ...contextOnly } = value;
+                const parsed = documentContextSchema.safeParse(source === 'document' ? value.document : contextOnly);
                 if (!parsed.success)
                     return;
                 documents.push(parsed.data);

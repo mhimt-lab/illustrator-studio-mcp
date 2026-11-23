@@ -79,7 +79,11 @@ while ($pending.Count -gt 0) {
     if ($null -eq $observed) { continue }
     $childAcl = $observed.acl
     $attributes = $observed.attributes
-    $explicit = $childAcl.GetAccessRules($true, $false, $sidType).Count
+    # An inherited rule is trusted only when it is exactly what the root hands down (owner-only full control). A file
+    # moved in from elsewhere keeps the rules it inherited there, still flagged inherited, so IsInherited alone proves nothing.
+    $explicit = @($childAcl.GetAccessRules($true, $true, $sidType) | Where-Object {
+      -not ($_.IsInherited -and $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -eq $me.Value -and [int64]$_.FileSystemRights -eq ${FULL_CONTROL})
+    }).Count
     # Only candidates are reported (own ACL, or reparse / cloud bits); the caller judges them again.
     if ($childAcl.AreAccessRulesProtected -or $explicit -ne 0 -or ($attributes -band ${DISQUALIFYING_ATTRIBUTE_MASK}) -ne 0) {
       $entries.Add([pscustomobject]@{ path = $child.FullName; attributes = $attributes; protected = [bool]$childAcl.AreAccessRulesProtected; explicitRules = $explicit })

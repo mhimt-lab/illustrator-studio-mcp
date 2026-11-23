@@ -228,6 +228,8 @@ async function createWindowsStateRoot(root) {
         await syncWindowsDirectory(dirname(root));
     }
     catch (originalError) {
+        if (hasCode(originalError, 'EPERM'))
+            return;
         const rootPresent = await rollbackWindowsStateRoot(root, initIdentity);
         const error = windowsParentSyncError(originalError, rootPresent, initIdentity);
         parentSyncFailures.set(root, { stage: 'parent_sync', rootIdentity: initIdentity, error });

@@ -1,11 +1,11 @@
 import { z } from 'zod';
-import { RASTER_DOCUMENT_CHANGED, readRasterAfterApply, rasterMismatchReport } from '../raster-post-step.js';
+import { appliedInEditSession, RASTER_DOCUMENT_CHANGED, readRasterAfterApply, rasterMismatchReport } from '../raster-post-step.js';
 import { resolveBarcode } from './plan.js';
 import { decodePlannedBarcode } from './raster-decode.js';
 const verifiedBarcodeResponseSchema = z.object({
     outcome: z.object({
         applied: z.literal(true),
-        document: z.object({ key: z.string() }),
+        document: z.object({ key: z.string(), mutationProfile: z.string().nullable().optional() }),
         plan: z.object({ targetBounds: z.array(z.number()).length(4) }),
         item: z.object({ uuid: z.string(), name: z.string() }),
     }),
@@ -42,7 +42,7 @@ export async function barcodePostStep(operations, pre, response) {
     return {
         decode,
         mismatch: rasterMismatchReport({
-            code: 'BARCODE_DECODE_MISMATCH', group, raster,
+            code: 'BARCODE_DECODE_MISMATCH', group, raster, inEditSession: appliedInEditSession(outcome.document.mutationProfile),
             message: `The symbol was drawn and its geometry verified, but a raster of it ${raster.reason === 'glyphs' ? 'shows numerals that differ from their planned shapes' : 'does not decode to the requested GTIN'} (${raster.detail}). It is NOT a success: remove the group before using the document.`,
         }),
     };

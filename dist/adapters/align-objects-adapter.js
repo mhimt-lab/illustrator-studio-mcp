@@ -5,8 +5,10 @@ import { mutationAdapterIdentity, } from '../mutation-operation-adapter.js';
 import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { documentContextSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
-import { snapshotsWithinTolerance, TRANSFORM_BOUNDS_TOLERANCE_PT, TRANSFORM_OBJECT_MODULE_SCRIPT, transformPathSnapshotSchema, } from './transform-object-adapter.js';
-import { TRANSFORM_TEXT_MAX_CHARACTERS, TRANSFORM_TEXT_MAX_EVIDENCE_UNITS, TRANSFORM_TEXT_SCRIPT, translateTextFrame } from './transform-text-snapshot.js';
+import { snapshotsWithinTolerance, TRANSFORM_BOUNDS_TOLERANCE_PT, TRANSFORM_OBJECT_MODULE_SCRIPT, transformObjectSnapshotSchema, } from './transform-object-adapter.js';
+import { TRANSFORM_GROUP_SCRIPT, translateGroupRows } from './transform-group-snapshot.js';
+import { TRANSFORM_IMAGE_SCRIPT } from './transform-image-snapshot.js';
+import { TRANSFORM_TEXT_SCRIPT, translateTextFrame } from './transform-text-snapshot.js';
 export const ALIGN_OBJECTS_OPERATION = 'align_objects';
 export const ALIGN_OBJECTS_VALIDATOR = { kind: ALIGN_OBJECTS_OPERATION, version: 1 };
 export const ALIGN_MIN_TARGETS = 2;
@@ -16,26 +18,11 @@ export const ALIGN_PRECISION_DIGITS = 6;
 export const ALIGN_GAP_CALC_TOLERANCE_PT = 1e-6;
 export const ALIGN_GAP_VERIFY_TOLERANCE_PT = 2 * TRANSFORM_BOUNDS_TOLERANCE_PT;
 const CANONICAL_VERSION = 2;
-const RESULT_SCHEMA_VERSION = 3;
+const RESULT_SCHEMA_VERSION = 4;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
 const ERROR_MAPPING_VERSION = 1;
 const uuidSchema = z.string().min(1).max(255);
-const pointSchema = z.tuple([z.number().finite(), z.number().finite()]);
-const alignTextFrameSchema = z.strictObject({
-    kind: z.literal('point'), orientation: z.literal('horizontal'),
-    characterCount: z.number().int().min(1).max(TRANSFORM_TEXT_MAX_CHARACTERS),
-    anchor: pointSchema, matrixTranslation: pointSchema,
-    attributes: z.string().min(2).max(TRANSFORM_TEXT_MAX_EVIDENCE_UNITS),
-});
-const transformObjectSnapshotSchema = transformPathSnapshotSchema.omit({ nestedGroup: true }).extend({
-    type: z.enum(['PathItem', 'TextFrame']),
-    textFrame: alignTextFrameSchema.optional(),
-}).superRefine((snapshot, context) => {
-    if (snapshot.type === 'TextFrame' ? snapshot.textFrame === undefined || snapshot.pathGeometry !== null || snapshot.stroke !== null : snapshot.textFrame !== undefined) {
-        context.addIssue({ code: 'custom', message: 'Only TextFrame snapshots carry text evidence, and they require it.' });
-    }
-});
 const documentKeySchema = z.string().min(1).max(16_384);
 export const ALIGN_AXES = ['left', 'center_x', 'right', 'top', 'center_y', 'bottom'];
 export const DISTRIBUTE_AXES = ['x', 'y'];
@@ -60,9 +47,24 @@ export function boundsEdge(bounds, axis) {
         return bounds[3];
     return (bounds[1] + bounds[3]) / 2;
 }
+export function alignBoundsOf(snapshot) {
+    const rows = snapshot.groupRows;
+    if (snapshot.type === 'GroupItem' && rows !== undefined) {
+        const root = JSON.parse(rows[0].attributes);
+        if (root.clipped === true) {
+            const mask = rows[1];
+            const attributes = mask === undefined ? null : JSON.parse(mask.attributes);
+            if (mask === undefined || mask.parentUuid !== snapshot.uuid || mask.type !== 'PathItem' || attributes?.clipping !== true) {
+                throw new Error('A clipped group must list its mask path as the first direct child.');
+            }
+            return { bounds: [...mask.bounds], basis: 'clip_mask' };
+        }
+    }
+    return { bounds: [...snapshot.geometricBounds], basis: 'geometric' };
+}
 const alignLayoutSchema = z.strictObject({
     kind: z.literal('align'), axis: z.enum(ALIGN_AXES), reference: z.enum(['first', 'artboard']),
-    artboardIndex: z.number().int().safe().nonnegative().optional(),
+    artboardIndex: z.number().int().safe().nonnegative().optional(), asGroup: z.literal(true).optional(),
 }).superRefine((layout, context) => {
     if (layout.reference === 'artboard' && layout.artboardIndex === undefined) {
         context.addIssue({ code: 'custom', message: 'Aligning to the artboard needs an artboard index.' });
@@ -96,7 +98,7 @@ const internalInputSchema = z.discriminatedUnion('apply', [
 ]);
 const publicAlignLayoutSchema = z.strictObject({
     kind: z.literal('align'), axis: z.enum(ALIGN_AXES), reference: z.enum(['first', 'artboard']),
-    artboard_index: z.number().int().safe().nonnegative().optional(),
+    artboard_index: z.number().int().safe().nonnegative().optional(), as_group: z.boolean().optional(),
 }).superRefine((layout, context) => {
     if (layout.reference === 'artboard' && layout.artboard_index === undefined) {
         context.addIssue({ code: 'custom', message: 'Aligning to the artboard needs an artboard index.' });
@@ -115,7 +117,8 @@ function normalizeLayout(layout) {
     if (layout.kind === 'distribute')
         return layout.spacing === 'gaps' ? { kind: 'distribute', axis: layout.axis, spacing: 'gaps' } : { kind: 'distribute', axis: layout.axis };
     return { kind: 'align', axis: layout.axis, reference: layout.reference,
-        ...(layout.artboard_index === undefined ? {} : { artboardIndex: layout.artboard_index }) };
+        ...(layout.artboard_index === undefined ? {} : { artboardIndex: layout.artboard_index }),
+        ...(layout.as_group === true ? { asGroup: true } : {}) };
 }
 export const alignObjectsPublicInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({ expected_document_key: documentKeySchema, layout: publicLayoutSchema,
@@ -129,7 +132,8 @@ export const alignObjectsPublicInputSchema = z.discriminatedUnion('apply', [
 const inputSchema = z.strictObject({
     expected_document_key: documentKeySchema,
     layout: z.strictObject({ kind: z.enum(['align', 'distribute']), axis: z.string().min(1).max(16),
-        reference: z.enum(['first', 'artboard']).optional(), spacing: z.enum(['centers', 'gaps']).optional(), artboard_index: z.number().int().safe().nonnegative().optional() }),
+        reference: z.enum(['first', 'artboard']).optional(), spacing: z.enum(['centers', 'gaps']).optional(), artboard_index: z.number().int().safe().nonnegative().optional(),
+        as_group: z.boolean().optional() }),
     targets: z.array(z.strictObject({ target_uuid: uuidSchema, expected_before: transformObjectSnapshotSchema.optional(),
         confirmed_after: transformObjectSnapshotSchema.optional() })).min(ALIGN_MIN_TARGETS).max(ALIGN_MAX_TARGETS),
     apply: z.boolean().default(false),
@@ -196,6 +200,13 @@ export function deriveGapDistribution(axis, befores) {
     }
     return { deltas, distribution: { order: rows.map((row) => row.uuid), gap: round(gap) } };
 }
+export function unionEdge(rows, axis) {
+    const left = Math.min(...rows.map((bounds) => bounds[0]));
+    const right = Math.max(...rows.map((bounds) => bounds[2]));
+    const top = Math.max(...rows.map((bounds) => bounds[1]));
+    const bottom = Math.min(...rows.map((bounds) => bounds[3]));
+    return boundsEdge([left, top, right, bottom], axis);
+}
 export function deriveAlignPlan(layout, befores, artboardBounds) {
     if (layout.kind === 'align') {
         const horizontal = isHorizontal(layout.axis);
@@ -207,10 +218,13 @@ export function deriveAlignPlan(layout, befores, artboardBounds) {
                 throw new Error('Aligning to the artboard needs artboard bounds.');
             reference = boundsEdge(artboardBounds, layout.axis);
         }
-        return { distribution: null, deltas: befores.map((before) => {
-                const delta = round(reference - boundsEdge(before.geometricBounds, layout.axis));
-                return horizontal ? { deltaX: delta, deltaY: 0 } : { deltaX: 0, deltaY: delta };
-            }) };
+        const toDelta = (value) => (horizontal ? { deltaX: value, deltaY: 0 } : { deltaX: 0, deltaY: value });
+        if (layout.asGroup === true) {
+            const movingFrom = layout.reference === 'first' ? 1 : 0;
+            const delta = round(reference - unionEdge(befores.slice(movingFrom).map((before) => before.geometricBounds), layout.axis));
+            return { distribution: null, deltas: befores.map((_, index) => (index < movingFrom ? toDelta(0) : toDelta(delta))) };
+        }
+        return { distribution: null, deltas: befores.map((before) => toDelta(round(reference - boundsEdge(before.geometricBounds, layout.axis)))) };
     }
     if (layout.spacing === 'gaps')
         return deriveGapDistribution(layout.axis, befores);
@@ -231,7 +245,7 @@ export function deriveAlignDeltas(layout, befores, artboardBounds) {
     return deriveAlignPlan(layout, befores, artboardBounds).deltas;
 }
 function inAlignProfile(snapshot) {
-    return snapshot.pathGeometry === null && snapshot.stroke === null;
+    return snapshot.pathGeometry === null && snapshot.stroke === null && snapshot.nestedGroup === undefined;
 }
 export function verifyAlignGaps(axis, distribution, befores, afters) {
     const horizontal = axis === 'x';
@@ -239,12 +253,14 @@ export function verifyAlignGaps(axis, distribution, befores, afters) {
     const slots = distribution.order.map((uuid) => index.get(uuid));
     if (slots.some((slot) => slot === undefined) || new Set(slots).size !== befores.length)
         return false;
-    const edge = (snapshot) => horizontal ? { start: snapshot.geometricBounds[0], end: snapshot.geometricBounds[2] }
-        : { start: -snapshot.geometricBounds[1], end: -snapshot.geometricBounds[3] };
+    const edge = (snapshot) => {
+        const bounds = alignBoundsOf(snapshot).bounds;
+        return horizontal ? { start: bounds[0], end: bounds[2] } : { start: -bounds[1], end: -bounds[3] };
+    };
     const ordered = slots.map((slot) => afters[slot]);
     for (const position of [0, ordered.length - 1]) {
-        const fixed = befores[slots[position]];
-        if (ordered[position].geometricBounds.some((value, boundsIndex) => Math.abs(value - fixed.geometricBounds[boundsIndex]) > TRANSFORM_BOUNDS_TOLERANCE_PT))
+        const fixed = alignBoundsOf(befores[slots[position]]).bounds;
+        if (alignBoundsOf(ordered[position]).bounds.some((value, boundsIndex) => Math.abs(value - fixed[boundsIndex]) > TRANSFORM_BOUNDS_TOLERANCE_PT))
             return false;
     }
     for (let position = 1; position < ordered.length; position += 1) {
@@ -255,10 +271,11 @@ export function verifyAlignGaps(axis, distribution, befores, afters) {
     return true;
 }
 function translatedSnapshot(before, deltaX, deltaY) {
-    const moved = { ...before,
+    return { ...before,
         geometricBounds: [before.geometricBounds[0] + deltaX, before.geometricBounds[1] + deltaY, before.geometricBounds[2] + deltaX, before.geometricBounds[3] + deltaY],
-        position: [before.position[0] + deltaX, before.position[1] + deltaY] };
-    return before.textFrame === undefined ? moved : { ...moved, textFrame: translateTextFrame(before.textFrame, deltaX, deltaY) };
+        position: [before.position[0] + deltaX, before.position[1] + deltaY],
+        ...(before.groupRows === undefined ? {} : { groupRows: translateGroupRows(before.groupRows, deltaX, deltaY) }),
+        ...(before.textFrame === undefined ? {} : { textFrame: translateTextFrame(before.textFrame, deltaX, deltaY) }) };
 }
 const blockerSchema = z.enum(['document_mutation_not_allowed', 'target_locked', 'target_hidden', 'target_not_editable', 'layer_hidden', 'layer_locked',
     'ancestor_hidden', 'ancestor_locked']);
@@ -290,15 +307,17 @@ function targetBlockers(mutationAllowed, before) {
         blockers.push('ancestor_locked');
     return blockers;
 }
+const boundsSchema = z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]);
 const planTargetSchema = z.strictObject({
     targetUuid: uuidSchema,
     delta: z.strictObject({ deltaX: z.number().finite(), deltaY: z.number().finite() }),
     moves: z.boolean(),
+    alignBounds: boundsSchema,
+    alignBasis: z.enum(['geometric', 'clip_mask']),
     before: transformObjectSnapshotSchema,
     after: transformObjectSnapshotSchema,
     applyBlockedReasonCodes: z.array(blockerSchema),
 });
-const boundsSchema = z.tuple([z.number().finite(), z.number().finite(), z.number().finite(), z.number().finite()]);
 const gapEvidenceSchema = z.strictObject({ order: z.array(uuidSchema).max(ALIGN_MAX_TARGETS), gap: z.number().finite() });
 const planSchema = z.strictObject({
     operation: z.literal(ALIGN_OBJECTS_OPERATION),
@@ -321,8 +340,10 @@ const planSchema = z.strictObject({
         context.addIssue({ code: 'custom', message: 'Align plan artboard bounds must be present exactly for the artboard reference.' });
     }
     let derived;
+    let derivedBounds;
     try {
-        derived = deriveAlignPlan(plan.layout, plan.targets.map((target) => target.before), plan.artboardBounds);
+        derivedBounds = plan.targets.map((target) => alignBoundsOf(target.before));
+        derived = deriveAlignPlan(plan.layout, plan.targets.map((target, index) => ({ uuid: target.before.uuid, geometricBounds: derivedBounds[index].bounds })), plan.artboardBounds);
     }
     catch {
         context.addIssue({ code: 'custom', message: 'Align plan deltas cannot be derived.' });
@@ -332,18 +353,24 @@ const planSchema = z.strictObject({
     if (!sameCanonical(plan.distribution ?? null, derived.distribution)) {
         context.addIssue({ code: 'custom', message: 'Align plan gap evidence must be present exactly for gap distribution and equal the derived gaps.' });
     }
-    if (new Set(plan.targets.map((target) => target.before.type)).size > 1) {
-        context.addIssue({ code: 'custom', message: 'Align plan targets must be all PathItems or all point text frames.' });
-    }
     plan.targets.forEach((target, index) => {
         if (target.targetUuid !== target.before.uuid || !inAlignProfile(target.before)) {
-            context.addIssue({ code: 'custom', message: 'Align plan target must be a translate-profile layer-direct PathItem or horizontal point text snapshot bound to its UUID.' });
+            context.addIssue({ code: 'custom', message: 'Align plan target must be a translate-profile layer-direct snapshot bound to its UUID.' });
+        }
+        if (!sameCanonical(target.alignBounds, derivedBounds[index].bounds) || target.alignBasis !== derivedBounds[index].basis) {
+            context.addIssue({ code: 'custom', message: 'Align plan bounds and basis must be derived from the before snapshot (the mask outline for a clipped group).' });
         }
         if (!sameCanonical(target.delta, deltas[index]) || target.moves !== (target.delta.deltaX !== 0 || target.delta.deltaY !== 0)) {
             context.addIssue({ code: 'custom', message: 'Align plan delta must equal the delta derived from the before states.' });
         }
         if (!snapshotsWithinTolerance(target.after, translatedSnapshot(target.before, target.delta.deltaX, target.delta.deltaY))) {
             context.addIssue({ code: 'custom', message: 'Align plan after snapshot must be the before snapshot translated by the delta.' });
+        }
+        else {
+            const moved = alignBoundsOf(target.after).bounds;
+            if (moved.some((value, boundsIndex) => Math.abs(value - (target.alignBounds[boundsIndex] + (boundsIndex % 2 === 0 ? target.delta.deltaX : target.delta.deltaY))) > TRANSFORM_BOUNDS_TOLERANCE_PT)) {
+                context.addIssue({ code: 'custom', message: 'Align plan after outline must be the before outline translated by the delta.' });
+            }
         }
     });
     if (!sameCanonical(plan.applyBlockedReasonCodes, unionBlockers(plan.targets.map((target) => target.applyBlockedReasonCodes)))) {
@@ -542,7 +569,9 @@ async function assertSafety(value, requestDigest, attestation, resolver) {
 }
 export const ALIGN_OBJECTS_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
 ${TRANSFORM_OBJECT_MODULE_SCRIPT}
+${TRANSFORM_GROUP_SCRIPT}
 ${TRANSFORM_TEXT_SCRIPT}
+${TRANSFORM_IMAGE_SCRIPT}
 var ALIGN_MIN_TARGETS = ${ALIGN_MIN_TARGETS};
 var ALIGN_MIN_DISTRIBUTE_TARGETS = ${ALIGN_MIN_DISTRIBUTE_TARGETS};
 var ALIGN_MAX_TARGETS = ${ALIGN_MAX_TARGETS};
@@ -595,12 +624,51 @@ function alignGapDistribution(axis, befores) {
   }
   return { deltas: deltas, distribution: { order: order, gap: alignRound(gap) } };
 }
+/** Mirrors alignBoundsOf: the mask outline of a clipped group (its first direct child), else the geometricBounds. */
+function alignBoundsOf(snapshot) {
+  if (snapshot.type === "GroupItem" && snapshot.groupRows) {
+    var root = parseJsonValue(snapshot.groupRows[0].attributes);
+    if (root.clipped === true) {
+      var mask = snapshot.groupRows[1];
+      var attributes = mask ? parseJsonValue(mask.attributes) : null;
+      if (!mask || mask.parentUuid !== snapshot.uuid || mask.type !== "PathItem" || !attributes || attributes.clipping !== true) {
+        throw mutationError("preflight_failed", "unsupported clipped group: the mask path is not the first direct child.");
+      }
+      return { bounds: [mask.bounds[0], mask.bounds[1], mask.bounds[2], mask.bounds[3]], basis: "clip_mask" };
+    }
+  }
+  return { bounds: [snapshot.geometricBounds[0], snapshot.geometricBounds[1], snapshot.geometricBounds[2], snapshot.geometricBounds[3]], basis: "geometric" };
+}
+/** Rows of {uuid, geometricBounds} holding the align bounds, the shape alignDerive and alignGapsHold take. */
+function alignRows(snapshots) {
+  var rows = [];
+  for (var r = 0; r < snapshots.length; r++) rows.push({ uuid: snapshots[r].uuid, geometricBounds: alignBoundsOf(snapshots[r]).bounds });
+  return rows;
+}
+/** Mirrors unionEdge: min left, max right, max top (y is up), min bottom, or the centre of the union. */
+function alignUnionEdge(rows, axis) {
+  var left = rows[0][0], top = rows[0][1], right = rows[0][2], bottom = rows[0][3];
+  for (var u = 1; u < rows.length; u++) {
+    left = Math.min(left, rows[u][0]); right = Math.max(right, rows[u][2]); top = Math.max(top, rows[u][1]); bottom = Math.min(bottom, rows[u][3]);
+  }
+  return alignEdge([left, top, right, bottom], axis);
+}
 /** Mirrors deriveAlignPlan; distribution is null except for gap distribution. */
 function alignDerive(layout, befores, artboardBounds) {
   var deltas = [];
   if (layout.kind === "align") {
     var horizontal = alignIsHorizontal(layout.axis);
     var reference = layout.reference === "first" ? alignEdge(befores[0].geometricBounds, layout.axis) : alignEdge(artboardBounds, layout.axis);
+    if (layout.asGroup === true) {
+      var movingFrom = layout.reference === "first" ? 1 : 0, rows = [];
+      for (var m = movingFrom; m < befores.length; m++) rows.push(befores[m].geometricBounds);
+      var common = alignRound(reference - alignUnionEdge(rows, layout.axis));
+      for (var g = 0; g < befores.length; g++) {
+        var shared = g < movingFrom ? 0 : common;
+        deltas.push(horizontal ? { deltaX: shared, deltaY: 0 } : { deltaX: 0, deltaY: shared });
+      }
+      return { deltas: deltas, distribution: null };
+    }
     for (var i = 0; i < befores.length; i++) {
       var delta = alignRound(reference - alignEdge(befores[i].geometricBounds, layout.axis));
       deltas.push(horizontal ? { deltaX: delta, deltaY: 0 } : { deltaX: 0, deltaY: delta });
@@ -706,7 +774,6 @@ function alignResolve(forApply) {
   var seen = {};
   var steps = [];
   var befores = [];
-  var profileType = null;
   for (var index = 0; index < requested.length; index++) {
     var request = requested[index];
     if (typeof request.targetUuid !== "string" || request.targetUuid.length === 0 || seen["u:" + request.targetUuid] === true) {
@@ -716,34 +783,44 @@ function alignResolve(forApply) {
     var step = { index: index, request: request, params: alignStepParams(batchParams, request, { deltaX: 0, deltaY: 0 }) };
     var target = transformFindTarget(document, request.targetUuid);
     if (target === null) throw new Error("MCP_ERROR:" + stringifyJson({ code: "OBJECT_NOT_FOUND", uuid: request.targetUuid }));
-    // Measured profiles only, never mixed: a standalone PathItem, or horizontal point text, directly on its layer.
-    // Compound paths, clipping paths, guides, sliced or isolated items, group members and every other text kind
-    // are unmeasured for alignment and fail closed.
+    // Measured profiles, kinds may mix: a standalone PathItem, a layer-direct group (a clipped group aligns by its mask outline),
+    // a linked or embedded image, or a point or area text frame of either orientation, each directly on its layer. Compound paths, clipping
+    // paths, guides, sliced or isolated items, group members and clipped groups outside the measured shape fail closed.
     var typename = String(target.typename);
     var layerDirect = !!target.layer && target.parent === target.layer;
+    var scope = "align supports groups, images, point or area text and standalone paths directly on a layer";
     if (typename === "PathItem") {
       if (!layerDirect || target.clipping === true || target.guides === true || target.sliced === true || target.isIsolated === true || target.wrapped === true) {
-        throw mutationError("preflight_failed", alignStepLabel(step) + ": align supports standalone layer-direct PathItems only.");
+        throw mutationError("preflight_failed", alignStepLabel(step) + ": unsupported target: " + scope + ".");
       }
-    } else if (typename === "TextFrame") {
-      if (!layerDirect) throw mutationError("preflight_failed", alignStepLabel(step) + ": align supports layer-direct horizontal point text only.");
+    } else if (typename === "GroupItem") {
+      if (!layerDirect) throw mutationError("preflight_failed", alignStepLabel(step) + ": unsupported target: " + scope + ".");
+    } else if (typename === "TextFrame" || typename === "PlacedItem" || typename === "RasterItem") {
+      if (!layerDirect) throw mutationError("preflight_failed", alignStepLabel(step) + ": unsupported target: " + scope + ".");
     } else {
-      throw mutationError("preflight_failed", alignStepLabel(step) + ": align supports layer-direct PathItems or horizontal point text only.");
+      throw mutationError("preflight_failed", alignStepLabel(step) + ": unsupported target: " + scope + ".");
     }
     var before;
     try { before = withStepParams(step, function () { return transformSnapshot(document, target); }); }
-    catch (snapshotError) { throw alignStepError(step, snapshotError); }
-    if (before.nestedGroup !== undefined) throw mutationError("preflight_failed", alignStepLabel(step) + ": align does not support group members.");
-    if (typename === "TextFrame" && (!before.textFrame || before.textFrame.kind !== "point" || before.textFrame.orientation !== "horizontal")) {
-      throw mutationError("preflight_failed", alignStepLabel(step) + ": align supports layer-direct horizontal point text only.");
+    catch (snapshotError) {
+      // A clipped group aligns by its mask outline only in the measured shape (one frontmost closed mask over embedded images); anything else is refused here.
+      if (typename === "GroupItem" && target.clipped === true) {
+        var detail = snapshotError && snapshotError.mutationPublicMessage ? snapshotError.mutationPublicMessage : "its contents are outside the measured shape";
+        throw mutationError("preflight_failed", alignStepLabel(step) + ": unsupported clipped group: " + detail + " Release the clipping mask, or align the mask path.");
+      }
+      throw alignStepError(step, snapshotError);
     }
-    if (profileType === null) profileType = typename;
-    else if (profileType !== typename) throw mutationError("preflight_failed", alignStepLabel(step) + ": align cannot mix PathItems and text frames.");
+    if (before.nestedGroup !== undefined) throw mutationError("preflight_failed", alignStepLabel(step) + ": unsupported target: align does not move group members.");
     step.target = target;
     steps.push(step);
     befores.push(before);
   }
-  var derived = alignDerive(layout, befores, artboardBounds);
+  var alignBefore = [];
+  for (var ab = 0; ab < befores.length; ab++) {
+    try { alignBefore.push(alignBoundsOf(befores[ab])); }
+    catch (boundsError) { throw alignStepError(steps[ab], boundsError); }
+  }
+  var derived = alignDerive(layout, alignRows(befores), artboardBounds);
   var deltas = derived.deltas;
   var entries = [];
   var perTargetBlockers = [];
@@ -768,7 +845,8 @@ function alignResolve(forApply) {
       if (!transformSnapshotMatches(after, steps[s].request.confirmedAfter)) throw mutationError("preflight_failed", alignStepLabel(steps[s]) + ": confirmed_after does not match the derived state.");
     }
     perTargetBlockers.push(blockers);
-    entries.push({ step: steps[s], resolved: resolved, delta: delta, moves: moves, before: befores[s], after: after, blockers: blockers });
+    entries.push({ step: steps[s], resolved: resolved, delta: delta, moves: moves, before: befores[s], after: after, blockers: blockers,
+      alignBounds: alignBefore[s].bounds, alignBasis: alignBefore[s].basis });
   }
   var union = alignUnionBlockers(perTargetBlockers);
   if (forApply && union.length > 0) {
@@ -783,7 +861,7 @@ function alignPlan(preflight) {
   var targets = [];
   for (var i = 0; i < preflight.entries.length; i++) {
     var entry = preflight.entries[i];
-    targets.push({ targetUuid: entry.step.request.targetUuid, delta: entry.delta, moves: entry.moves, before: entry.before, after: entry.after, applyBlockedReasonCodes: entry.blockers });
+    targets.push({ targetUuid: entry.step.request.targetUuid, delta: entry.delta, moves: entry.moves, alignBounds: entry.alignBounds, alignBasis: entry.alignBasis, before: entry.before, after: entry.after, applyBlockedReasonCodes: entry.blockers });
   }
   var plan = { operation: "align_objects", documentKey: preflight.context.key, layout: preflight.layout, artboardBounds: preflight.artboardBounds, targets: targets,
     applyBlockedReasonCodes: preflight.blockers, confirmationStatus: params.apply === true ? "confirmed" : "required",
@@ -848,7 +926,7 @@ function alignVerify(preflight, plan) {
   if (plan.distribution) {
     var planned = [];
     for (var g = 0; g < plan.targets.length; g++) planned.push(plan.targets[g].before);
-    if (!alignGapsHold(plan.layout.axis, plan.distribution, planned, actual)) throw mutationError("verify_mismatch", "gap distribution does not read back with equal gaps and fixed outer targets.");
+    if (!alignGapsHold(plan.layout.axis, plan.distribution, alignRows(planned), alignRows(actual))) throw mutationError("verify_mismatch", "gap distribution does not read back with equal gaps and fixed outer targets.");
   }
   return actual;
 }
@@ -940,7 +1018,7 @@ function normalizedRequest(input) {
 export const alignObjectsToolContract = {
     name: 'illustrator_align_objects',
     title: 'Plan or Align / Distribute Objects',
-    description: `Plan or apply an alignment of ${ALIGN_MIN_TARGETS}-${ALIGN_MAX_TARGETS} distinct PathItems or horizontal point-text frames (not mixed) to the first target or the artboard on one axis (left, center_x, right, top, center_y, bottom), or an even distribution of ${ALIGN_MIN_DISTRIBUTE_TARGETS}-${ALIGN_MAX_TARGETS} by geometric centre along x or y with the outermost two fixed (spacing "gaps": equal edge-to-edge gaps). Deltas are derived from geometricBounds (stroke excluded). Planning writes nothing; apply compares-and-sets each target, translates the moving ones in one host call, verifies every target by native read-back, and restores attempted moves in reverse order on failure.`,
+    description: `Plan or apply an alignment of ${ALIGN_MIN_TARGETS}-${ALIGN_MAX_TARGETS} distinct objects (paths, groups (a clipped group aligns by its mask), linked or embedded images, point or area text; kinds may mix) to the first target, which stays, or the artboard on one axis (left, center_x, right, top, center_y, bottom); as_group moves the movers by one shared delta so their union meets the reference. Or distribute ${ALIGN_MIN_DISTRIBUTE_TARGETS}-${ALIGN_MAX_TARGETS} by geometric centre along x or y, outermost two fixed (spacing "gaps": equal edge-to-edge gaps). Edges: geometricBounds (stroke excluded). Planning writes nothing; apply compares-and-sets, translates in one host call, verifies by read-back, and restores in reverse order on failure.`,
     inputSchema,
     publicInputSchema: alignObjectsPublicInputSchema,
     outputSchema: alignObjectsResponseSchema,

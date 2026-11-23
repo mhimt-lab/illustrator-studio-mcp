@@ -104,3 +104,28 @@ function hostFilePathMissMayMatch(actual, expected) {
   return true;
 }
 `;
+export const PATH_CONTAINS_PERCENT = 'path_contains_percent';
+const PATH_FIELD_NAME = /(?:^|_)(?:path|paths|dir|directory|file|files|folder|root)$|[a-z](?:Path|Paths|Dir|Directory|File|Files|Folder|Root)$/u;
+const PERCENT_ESCAPE = /%(?:[0-9A-Fa-f]{2}|[uU][0-9A-Fa-f]{4})/u;
+export function pathContainsPercentEscape(path) {
+    return PERCENT_ESCAPE.test(path);
+}
+export function percentPathFields(params, prefix = '') {
+    if (Array.isArray(params))
+        return params.flatMap((item, index) => (typeof item === 'string'
+            ? (PATH_FIELD_NAME.test(prefix.slice(prefix.lastIndexOf('.') + 1)) && pathContainsPercentEscape(item) ? [`${prefix}[${index}]`] : [])
+            : percentPathFields(item, `${prefix}[${index}]`)));
+    if (params === null || typeof params !== 'object')
+        return [];
+    return Object.entries(params).flatMap(([key, value]) => {
+        const name = prefix === '' ? key : `${prefix}.${key}`;
+        if (typeof value === 'string')
+            return PATH_FIELD_NAME.test(key) && pathContainsPercentEscape(value) ? [name] : [];
+        return percentPathFields(value, name);
+    });
+}
+export const PATH_CONTAINS_PERCENT_MESSAGE = "A path that contains '%' followed by two hex digits (such as %20 or %E3%81%82) (or '%u' and four) is refused, and nothing was sent to Illustrator: ExtendScript reads a path as a URI, "
+    + "so the escape becomes another character and the file is written to a different folder (measured on Illustrator 30.8.2, #848). A '%' that is not followed by two hex digits (50%off, 100%.ai) is accepted. "
+    + "Give a path whose folders and file name have no '%' plus two hex digits (rename or move the file). "
+    + "/ パスに '%' と 16 進 2 桁（%20、%E3%81%82 など）が続く部分があるため拒否しました（Illustrator には何も送っていません）。ExtendScript はパスを URI として読むので、その部分が別の文字に変わり、別のフォルダに書き込まれます。"
+    + "'%u' と 16 進 4 桁（%u3042 など）も同様です。'%' の後が 16 進 2 桁でない名前（50%off、100%.ai など）は受け付けます。フォルダ名・ファイル名から '%' と 16 進 2 桁の並びを除いたパスを指定してください（名前を変えるか、移動してから）。";

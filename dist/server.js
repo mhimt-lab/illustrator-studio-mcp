@@ -1,32 +1,39 @@
+import { workCopyOverwriteFields, workCopyPdfResultSchema, workCopyOutlinedResultSchema } from './work-copy-overwrite-public.js';
 import { scanContinuationSchema } from './edit-session-chunked-scan.js';
 import { SvgTextPlanBlockedError } from './adapters/import-vector-artwork-adapter.js';
 import { HOST_VERSION_SCOPE_NOTE, hostVersionPublicFields } from './host-version-consent.js';
 import { McpServer } from '@modelcontextprotocol/server';
 import { createRequire } from 'node:module';
 import { z } from 'zod';
-import { boundsSchema, documentContextSchema, documentContextWithApplicationSchema, documentKeyShortSchema, illustratorApplicationEvidenceSchema, isMutationAuditPrefix, layerStructuralReasonSchema, mutationAuditSchema, toBounds, } from './mutation-result-schema-core.js';
+import { boundsSchema, documentContextSchema, getContextResultSchema, documentKeyShortSchema, illustratorApplicationEvidenceSchema, isMutationAuditPrefix, layerStructuralReasonSchema, mutationAuditSchema, toBounds, } from './mutation-result-schema-core.js';
 export { documentContextSchema } from './mutation-result-schema-core.js';
 export { rectangleResponseSchema, rectangleResultSchema } from './rectangle-result-schema.js';
 export { operationSafetyPlanSchema, operationSafetyPolicySchema, operationSafetyResultSchema, } from './operation-safety-policy-core.js';
 import { textStyleListSchema } from './text-style-resources.js';
-import { FIND_FONTS_QUERY_MAX_LENGTH, FONT_LOOKUP_MAX_NAMES, fontCursorSchema, fontLookupResultSchema, fontPostScriptNameSchema, fontQuerySchema, fontSearchResultSchema } from './font-lookup.js';
+import { FONT_LOOKUP_MAX_NAMES, fontCursorSchema, fontLookupResultSchema, fontPostScriptNameSchema, fontQuerySchema, fontSearchResultSchema } from './font-lookup.js';
 import { getPathPointsResultSchema, PATH_EDIT_MAX_POINTS } from './path-points.js';
+import { measureScaleReferenceResultSchema, SCALE_REFERENCE_MAX_REFERENCES, scaleReferenceInputSchema } from './scale-reference.js';
 import { getAreaTextOptionsResultSchema } from './area-text-options.js';
-import { DISPLAY_SPACING_LIMITS, displaySpacingResultSchema } from './display-spacing.js';
-import { JP_AUDIT_LIMITS, JP_AUDIT_POLICIES, jpAuditJustifyBodySchema, jpAuditParagraphShapeSchema, jpAuditProtectedTermSchema, jpAuditResultSchema, LINE_START_RELAXATIONS } from './jp-typography-audit.js';
+import { displaySpacingResultSchema } from './display-spacing.js';
+import { planTextIncrementResultSchema, textIncrementRuleSchema } from './text-increment.js';
+import { PLAN_TEXT_FIT_LIMITS, planTextFitConstraintSchema, planTextFitResultSchema, planTextFitSearchSchema } from './plan-text-fit.js';
+import { JP_AUDIT_LIMITS, JP_AUDIT_POLICIES, JP_AUDIT_RESPONSE_BYTES, JP_AUDIT_RESULT_FORMATS, jpAuditJustifyBodySchema, jpAuditLatinBodySchema, jpAuditParagraphShapeSchema, jpAuditProtectedTermSchema, jpAuditResultSchema, jpAuditSettingProfileSchema, LINE_START_RELAXATIONS } from './jp-typography-audit.js';
 import { canonicalCommandIdSchema } from './command-id.js';
+import { installPercentPathRefusal } from './percent-path-refusal.js';
 import { installToolValidationErrors } from './tool-validation-errors.js';
+import { variableListSchema } from './variables-read.js';
 import { createBackupResultSchema, reconcileBackupResultSchema } from './document-backup.js';
 import { normalizeReconcileDeletePublicInput, reconcileDeletePublicInputSchema, reconcileDeleteResultSchema } from './delete-recovery.js';
 import { createDocumentPublicInputSchema, createDocumentResultSchema, normalizeCreateDocumentPublicInput } from './document-create.js';
-import { closeDocumentPublicInputSchema, closeDocumentResultSchema, normalizeCloseDocumentPublicInput, normalizeOpenDocumentPublicInput, normalizeSaveDocumentAsPublicInput, normalizeSaveDocumentPublicInput, openDocumentPublicInputSchema, openDocumentResultSchema, saveDocumentAsPublicInputSchema, saveDocumentAsResultSchema, saveDocumentPublicInputSchema, saveDocumentResultSchema, } from './document-lifecycle.js';
+import { activateDocumentPublicInputSchema, activateDocumentResultSchema, closeDocumentPublicInputSchema, closeDocumentResultSchema, normalizeActivateDocumentPublicInput, normalizeCloseDocumentPublicInput, normalizeOpenDocumentPublicInput, normalizeSaveDocumentAsPublicInput, normalizeSaveDocumentPublicInput, openDocumentPublicInputSchema, openDocumentResultSchema, saveDocumentAsPublicInputSchema, saveDocumentAsResultSchema, saveDocumentPublicInputSchema, saveDocumentResultSchema, } from './document-lifecycle.js';
 import { exportOutlinedResultSchema, reconcileExportResultSchema } from './document-export.js';
 import { pdfExportResultSchema, pdfExportBleedInputSchema } from './pdf-export.js';
-import { closeEditSessionResultSchema, EDIT_SESSION_SUPPORT_PROFILE, getEditSessionsResultSchema, openEditSessionResultSchema, sessionIdSchema, } from './edit-session-tools.js';
-import { IMAGE_OPTIMIZE_MAX_PPI, IMAGE_OPTIMIZE_MAX_TARGETS, IMAGE_OPTIMIZE_MIN_PPI, IMAGE_OPTIMIZE_RENDER_MAX_PIXELS, imageOptimizeResultSchema, } from './image-optimize.js';
+import { closeEditSessionResultSchema, getEditSessionsResultSchema, openEditSessionResultSchema, sessionIdSchema, } from './edit-session-tools.js';
+import { IMAGE_OPTIMIZE_MAX_PPI, IMAGE_OPTIMIZE_MAX_TARGETS, IMAGE_OPTIMIZE_MIN_PPI, imageOptimizeResultSchema, } from './image-optimize.js';
 import { m6P0RecipeToolContract } from './m6-p0-recipe.js';
 import { recipeToolContracts } from './recipe.js';
-import { installPublishedToolList, installSharedToolSchemas } from './published-tool-schema.js';
+import { COMPLETE_RESULT_DEPTH } from './published-result-shape.js';
+import { PUBLISHED_DEPTH_KEY, installPublishedToolList, installSharedToolSchemas } from './published-tool-schema.js';
 import { installWindowsReadOnlyRegistration, windowsServerInstructions } from './windows/read-tools.js';
 import { WindowsReadOnlyError } from './windows/com-transport.js';
 import { imagePreflightPageSchema } from './image-preflight-schema.js';
@@ -38,18 +45,21 @@ import { cmykColorSummarySchema, colorSummarySchema, finiteNumberSchema, grayCol
 import { structureDiffIdSchema, structureDiffPageSchema, structureSnapshotIdSchema, structureSnapshotSummarySchema, } from './structure-diff-schema.js';
 import { STRUCTURE_DIFF_DEFAULT_TOLERANCE_PT, STRUCTURE_DIFF_MAX_TOLERANCE_PT, STRUCTURE_SNAPSHOT_LIMITS, } from './structure-diff.js';
 import { comparePngImages, visualDiffResultSchema } from './visual-diff.js';
-import { PREVIEW_MAX_SIDE_PT, previewBoundsSchema, previewResultSchema } from './document-preview.js';
+import { previewBoundsSchema, previewResultSchema } from './document-preview.js';
 import { RENDER_LIMITS, renderResultSchema } from './artboard-render.js';
 import { TEXT_EXTRACT_LIMITS, textExtractResultSchema } from './text-extract.js';
 import { rasterExportResultSchema, rasterReconcileResultSchema } from './raster-export.js';
 import { rasterExportToolInputShape } from './raster-batch-export.js';
-import { buildBackupNextSteps, buildBlockedNextSteps, nextStepsSchema } from './blocked-guidance.js';
+import { GuidedRefusalError, buildBackupNextSteps, buildBlockedNextSteps, nextStepsSchema } from './blocked-guidance.js';
 import { DIRTY_FILE_ADMISSION_OPERATIONS, documentAdmissionNote, documentAdmissionNoteSchema } from './dirty-file-admission.js';
-import { admitHostVersionPlan, describeHostVersionScope, hostVersionNoteSchema } from './host-version-admission.js';
+import { admitHostVersionPlan, hostVersionNoteSchema } from './host-version-admission.js';
 import { saveAsReconcileActionSchema, saveAsReconcileResultSchema } from './save-as-reconcile.js';
 import { rasterToolStep } from './raster-steps.js';
 import { SnapshotRefCache } from './snapshot-ref-cache.js';
+import { createBatchNextCallWithRef, createBatchView, createBatchViewSchema, expandCreateBatchStepsRef } from './adapters/create-batch-view.js';
 import { expandMutateBatchSnapshotRefs, mutateBatchNextCallWithRefs, mutateBatchView, mutateBatchViewSchema } from './adapters/mutate-batch-view.js';
+import { REPLACE_RGB_BLACK_OPERATION } from './adapters/replace-rgb-black-adapter.js';
+import { rgbBlackSelectionSchema } from './rgb-black.js';
 import { NEXT_CALL_BUILDERS, buildNextCall, formatToolArgumentError, nextCallSchema, toolArgumentIssueMessage } from './tool-arguments.js';
 export { imagePreflightItemSchema, imagePreflightPageSchema } from './image-preflight-schema.js';
 export { printPreflightFindingSchema, printPreflightResultSchema } from './print-preflight-schema.js';
@@ -59,14 +69,17 @@ export { previewResultSchema } from './document-preview.js';
 export { contrastResultSchema, designTokensResultSchema, textConsistencyResultSchema } from './design-analysis-schema.js';
 export { backupRecordSchema, backupSessionSchema, createBackupResultSchema, reconcileBackupResultSchema } from './document-backup.js';
 export { exportOutlinedResultSchema, exportRecordSchema, exportSessionSchema, reconcileExportResultSchema } from './document-export.js';
-export { closeDocumentResultSchema, openDocumentResultSchema, saveDocumentAsResultSchema, saveDocumentResultSchema } from './document-lifecycle.js';
+export { activateDocumentResultSchema, closeDocumentResultSchema, openDocumentResultSchema, saveDocumentAsResultSchema, saveDocumentResultSchema } from './document-lifecycle.js';
 const RESPONSE_VIEWS = {
     illustrator_mutate_batch: { outputSchema: mutateBatchViewSchema, render: mutateBatchView,
         nextCall: mutateBatchNextCallWithRefs, expand: expandMutateBatchSnapshotRefs },
+    illustrator_create_batch: { outputSchema: createBatchViewSchema, render: createBatchView,
+        nextCall: createBatchNextCallWithRef, expand: expandCreateBatchStepsRef },
 };
 const SNAPSHOT_REFS = new SnapshotRefCache();
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const RECONCILE = { readOnlyHint: false };
+const ACTIVATE = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const BACKUP = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const DESTRUCTIVE_WITH_BACKUP = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
 function text(value) {
@@ -696,6 +709,8 @@ export const objectDetailSchema = z.union([
 export const objectDetailResultSchema = z.strictObject({
     document: documentContextSchema,
     item: objectDetailSchema,
+    possible_freeform_gradient_fills: z.number().int().min(0).max(1),
+    possible_freeform_gradient_note: z.string().min(1).nullable(),
 });
 const objectFiltersSchema = z.object({
     type: z.string().nullable(),
@@ -782,6 +797,11 @@ const selectionResultSchema = z.object({
         name: z.string(),
         bounds: boundsSchema,
     })),
+    text_selection: z.object({
+        frame_uuids: z.array(z.string().min(1)).max(64),
+        character_offset: z.number().int().nonnegative().nullable(),
+        length: z.number().int().nonnegative().nullable(),
+    }).optional(),
 });
 const swatchProcessColorSchema = z.discriminatedUnion('model', [
     noneColorSummarySchema,
@@ -1048,18 +1068,19 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     const server = new McpServer({ name: 'illustrator-studio-mcp', version: packageVersion }, { instructions: windowsReadOnly ? windowsServerInstructions(windowsMutationTools) : SERVER_INSTRUCTIONS });
     installSharedToolSchemas(server, cacheKey);
     installToolValidationErrors(server);
+    installPercentPathRefusal(server);
     if (windowsReadOnly)
         installWindowsReadOnlyRegistration(server, windowsMutationTools);
     server.registerTool('illustrator_get_context', {
         title: 'Get Illustrator Context',
         description: 'Read the active Illustrator document context without modifying it. Includes keyShort (accepted as expected_document_key), mutationProfile, and the application {bundleId, version, channel} that answered.',
         inputSchema: {},
-        outputSchema: { result: documentContextWithApplicationSchema },
+        outputSchema: { result: getContextResultSchema },
         annotations: READ_ONLY,
     }, async () => text(await operations.getContext()));
     server.registerTool('illustrator_list_documents', {
         title: 'List Illustrator Documents and Artboards',
-        description: 'Read every open document and artboard in Illustrator collection order. Returns a complete, unpaginated snapshot without modifying document state, plus the application {bundleId, version, channel} that answered.',
+        description: 'Read every open document and artboard in Illustrator collection order. Returns a complete, unpaginated snapshot without modifying document state, plus the application {bundleId, version, channel} that answered. Only the active:true document can be bound by the other tools; for an active:false one call illustrator_activate_document with its key first.',
         inputSchema: {},
         outputSchema: { result: documentListSchema },
         annotations: READ_ONLY,
@@ -1080,6 +1101,17 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         outputSchema: { result: swatchListSchema },
         annotations: READ_ONLY,
     }, async (params) => text(await operations.listSwatches({
+        expectedDocumentKey: params.expected_document_key,
+    })));
+    server.registerTool('illustrator_list_variables', {
+        title: 'List Illustrator Variables, Bindings and Datasets',
+        description: 'Read the variables of the active document and what each is bound to (native UUID, type, name, property, rank in variable.pageItems), the datasets by index and name, and the dataset the last display() showed (Document.activeDataSet; it does not follow a hand edit of the bound items). One host call; changes nothing. A bound image gets a new UUID on every dataset display, so find items again through the variable, not by an old UUID.',
+        inputSchema: {
+            expected_document_key: z.string().min(1).max(16_384),
+        },
+        outputSchema: { result: variableListSchema },
+        annotations: READ_ONLY,
+    }, async (params) => text(await operations.listVariables({
         expectedDocumentKey: params.expected_document_key,
     })));
     server.registerTool('illustrator_list_objects', {
@@ -1133,10 +1165,12 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     });
     server.registerTool('illustrator_preflight_images', {
         title: 'Preflight Illustrator Images',
-        description: 'Read linked and embedded image file identity, SHA-256, source/current color facts, native and effective PPI, and structured warnings without modifying Illustrator. Follow nextCursor until hasMore=false before concluding an image is absent. ' + PREFLIGHT_DESCRIPTION_SENTENCE,
+        description: 'Read linked and embedded image file identity, SHA-256, source/current color facts, native and effective PPI, and structured warnings without modifying Illustrator. Follow nextCursor until hasMore=false before concluding an image is absent. With target_ppi, each item also gets resizeSpec (pixels for that PPI and the visible source range); with bleed_mm too, it adds bleedShortfall per artboard edge. ' + PREFLIGHT_DESCRIPTION_SENTENCE,
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             minimum_effective_ppi: z.number().finite().positive().max(100_000),
+            target_ppi: z.number().finite().min(72).max(2400).optional(),
+            bleed_mm: z.number().finite().min(0).max(25).optional(),
             scope: z.discriminatedUnion('mode', [
                 z.strictObject({
                     mode: z.literal('document'),
@@ -1151,6 +1185,8 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     }, async (params) => text(await operations.preflightImages({
         expectedDocumentKey: params.expected_document_key,
         minimumEffectivePpi: params.minimum_effective_ppi,
+        ...(params.target_ppi === undefined ? {} : { targetPpi: params.target_ppi }),
+        ...(params.bleed_mm === undefined ? {} : { bleedMm: params.bleed_mm }),
         scope: params.scope.mode === 'document'
             ? {
                 mode: 'document',
@@ -1184,13 +1220,22 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         allow_overprint: z.boolean(),
         allow_transparency: z.boolean(),
         require_linked_image_icc: z.boolean(),
+        maximum_total_ink_percent: z.number().finite().min(100).max(400).optional(),
+        classify_blacks: z.boolean().optional(),
+        rich_black_min_text_pt: z.number().finite().min(0.1).max(72).optional(),
+        rich_black_min_stroke_pt: z.number().finite().min(0.01).max(10).optional(),
     }).superRefine((value, context) => {
+        for (const key of ['rich_black_min_text_pt', 'rich_black_min_stroke_pt']) {
+            if (value[key] !== undefined && value.classify_blacks !== true) {
+                context.addIssue({ code: 'custom', message: `${key} requires classify_blacks: true.`, path: [key] });
+            }
+        }
         uniqueColorSpaces(value.allowed_document_color_spaces, context, 'allowed_document_color_spaces');
         uniqueColorSpaces(value.allowed_image_color_spaces, context, 'allowed_image_color_spaces');
     });
     server.registerTool('illustrator_preflight_print', {
         title: 'Preflight Illustrator Print Document',
-        description: 'Read a bounded complete print-preflight snapshot across document color, used inks, overprint, transparency, raster effects, bleed availability, artboard geometry, strokes, fonts, and images. Unavailable or truncated required checks can never produce pass. ' + PREFLIGHT_DESCRIPTION_SENTENCE,
+        description: 'Read a bounded complete print-preflight snapshot across document color, used inks, overprint, transparency, raster effects, bleed availability, artboard geometry, strokes, fonts, images, and total ink when maximum_total_ink_percent is given. classify_blacks adds black-kind and Registration-in-artwork findings; rich_black_min_text_pt and rich_black_min_stroke_pt (need classify_blacks) warn on small rich-black text and thin rich-black strokes. Unavailable or truncated required checks can never produce pass. ' + PREFLIGHT_DESCRIPTION_SENTENCE,
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             conditions: printConditionsInputSchema,
@@ -1209,6 +1254,10 @@ export function createServer(operations, mutationAdapters = operations.getMutati
             allowOverprint: params.conditions.allow_overprint,
             allowTransparency: params.conditions.allow_transparency,
             requireLinkedImageIcc: params.conditions.require_linked_image_icc,
+            ...(params.conditions.maximum_total_ink_percent === undefined ? {} : { maximumTotalInkPercent: params.conditions.maximum_total_ink_percent }),
+            ...(params.conditions.classify_blacks === undefined ? {} : { classifyBlacks: params.conditions.classify_blacks }),
+            ...(params.conditions.rich_black_min_text_pt === undefined ? {} : { richBlackMinTextPt: params.conditions.rich_black_min_text_pt }),
+            ...(params.conditions.rich_black_min_stroke_pt === undefined ? {} : { richBlackMinStrokePt: params.conditions.rich_black_min_stroke_pt }),
         });
         return text(await operations.preflightPrint({
             expectedDocumentKey: params.expected_document_key,
@@ -1247,13 +1296,14 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_plan_color_replacement', {
         title: 'Plan Illustrator Color Replacement',
-        description: 'Read-only replacement planning over a stable color snapshot. Returns a plan-only illustrator_mutate_batch request for supported PathItem appearance and uniform complete RGB text-fill targets, paged at the batch maximum. Gradient-stop, swatch-resource, text-stroke, mixed/incomplete text, and color-space mismatches are returned with exact fail-closed reasons.',
+        description: 'Read-only replacement planning over a stable color snapshot. Returns a plan-only illustrator_mutate_batch request for supported PathItem appearance and uniform complete RGB or CMYK text-fill targets, paged at the batch maximum. Gradient-stop, swatch-resource, text-stroke, mixed/incomplete text, and color-space mismatches are returned with exact fail-closed reasons. A path whose fill reads as gray 0 may carry a freeform gradient the DOM cannot tell from gray 0, so it is left out (fill_may_be_freeform_gradient) unless treat_gray0_fills_as_solid is true.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             match: colorMatchSchema,
             replacement: replacementColorSchema,
             limit: z.number().int().min(2).max(16).default(16),
             cursor: z.string().min(1).max(32_768).optional(),
+            treat_gray0_fills_as_solid: z.boolean().default(false).describe('Set true only after confirming the document has no freeform gradient: a fill that reads as gray 0 may be one, and a solid replacement destroys it.'),
         },
         outputSchema: { result: colorReplacementPlanSchema },
         annotations: READ_ONLY,
@@ -1262,6 +1312,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         match: params.match,
         replacement: params.replacement,
         limit: params.limit,
+        treatGray0FillsAsSolid: params.treat_gray0_fills_as_solid,
         ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
     })));
     server.registerTool('illustrator_check_text_consistency', {
@@ -1327,7 +1378,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     });
     server.registerTool('illustrator_capture_preview', {
         title: 'Capture Illustrator Preview',
-        description: `Render one explicit rectangle of the bound document to a PNG and return it as MCP image content, without changing the document. bounds is [left, top, right, bottom] in document points (the coordinates of artboard and object bounds), integer edges, at most ${PREVIEW_MAX_SIDE_PT} pt per side, entirely inside one artboard; the image is 72 ppi (1 px per pt) and anti-aliased, with a transparent background: RGBA when the range has any uncovered pixel, RGB (image.pixelFormat rgb8_opaque) when artwork covers every pixel. Only a document with saved=false (unsaved changes, or new and never saved) is captured: Illustrator's capture marks a saved document as changed, so a saved document is refused before anything is written. Requires the screen unlocked and Illustrator frontmost, or activate_if_needed=true to bring the configured Illustrator to the front (app focus only: no document is selected or saved, focus is not restored); unmeasured versions and channels need no consent. The saved state, document key, item and layer counts, and artboards are re-read after the capture; any change is an error and no image is returned. The temporary PNG is written to a private directory and removed.`,
+        description: 'Render one explicit rectangle of the bound document to a PNG and return it as MCP image content, without changing the document. bounds is [left, top, right, bottom] in document points, integer edges, at most 2048 pt per side, entirely inside one artboard; the image is 72 ppi, anti-aliased, transparent where uncovered (RGBA), or RGB when artwork covers every pixel. Only a document with unsaved changes (saved=false) is captured; a saved document is refused before anything is written. Needs the screen unlocked and Illustrator frontmost, or activate_if_needed=true to bring Illustrator to the front (app focus only; focus is not restored). If the document state changes during the capture, the call is an error and no image is returned. The temporary PNG is removed afterwards.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             bounds: previewBoundsSchema,
@@ -1393,7 +1444,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_list_selection', {
         title: 'List Illustrator Selection',
-        description: 'Read selected objects using Illustrator native UUIDs. This tool never writes metadata.',
+        description: 'Read selected objects using Illustrator native UUIDs. This tool never writes metadata. While a text range is selected, items is empty and text_selection gives the frames, offset and length.',
         inputSchema: {},
         outputSchema: { result: selectionResultSchema },
         annotations: READ_ONLY,
@@ -1465,7 +1516,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_list_text_styles', {
         title: 'List Illustrator Paragraph and Character Styles',
-        description: 'Read-only. Lists every named paragraph and character style of the bound document with its collection index and the attributes it actually defines (an attribute the style does not define is reported as undefined rather than guessed), and names that resolve to more than one style are reported as conflicts — those names are refused by every style mutation. With `target`, also reports a bounded character range of one TextFrame: each character\'s resolved attributes, the styles the range reports as applied, and the override difference against that style, limited to the fields the style defines. The applied-style read is not covered by measured host evidence and carries its own status, so it never silently becomes a refusal. Style resources and text are never written by this tool.',
+        description: 'Read-only. Lists every named paragraph and character style of the bound document with its collection index and the attributes it actually defines (an attribute the style does not define is reported as undefined, not guessed). Names that resolve to more than one style are reported as conflicts, and those names are refused by every style mutation. With target {uuid, start, end}, also reports one TextFrame\'s character range (bounded to 256 characters and 64 paragraphs): each character\'s resolved attributes, the styles it reports as applied, and the override difference against that style, limited to the fields the style defines. Style resources and text are never written by this tool.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             target: z.strictObject({
@@ -1482,7 +1533,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_find_fonts', {
         title: 'Find Installed Illustrator Fonts',
-        description: 'Read-only. Give either `post_script_names` (up to ' + FONT_LOOKUP_MAX_NAMES + ' PostScript names, exact, per name in request order: `installed`, `unverified` or `not_installed`, no fuzzy match) or `query` (1–' + FIND_FONTS_QUERY_MAX_LENGTH + ' characters; case-insensitive partial match on PostScript name, family or style, ASCII letters only; 50 per page sorted by PostScript name; `matched` is the total; pass `next_cursor` as `cursor` for the next page). `unverified`: Illustrator resolves the name but neither the OS nor Illustrator\'s own font lists show it (a font missing on this machine while a document uses it, or an Adobe Fonts face not yet confirmed); font writes refuse it. Needs no open document and touches none. Use the PostScript name with illustrator_set_text_style or illustrator_replace_font. Composite fonts are not supported for font writes.',
+        description: 'Read-only. Look up fonts by PostScript name; needs no open document and touches none. Give either post_script_names (up to 32 exact names; each returns installed, unverified or not_installed, in request order, no fuzzy match) or query (1-64 characters; case-insensitive partial match on PostScript name, family or style, ASCII letters only; 50 per page sorted by PostScript name; matched is the total; pass next_cursor as cursor). unverified means Illustrator resolves the name but no font list shows it; font writes refuse it. Use the PostScript name with illustrator_set_text_style or illustrator_replace_font. Composite fonts are not supported for font writes.',
         inputSchema: {
             post_script_names: z.array(fontPostScriptNameSchema).min(1).max(FONT_LOOKUP_MAX_NAMES).optional(),
             query: fontQuerySchema.optional(),
@@ -1514,9 +1565,22 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         expectedDocumentKey: params.expected_document_key,
         uuid: params.uuid,
     })));
+    server.registerTool('illustrator_measure_scale_reference', {
+        title: 'Measure a Scale Reference',
+        description: 'Read-only. From 1-8 references, each a real length actual_mm (mm) and the same length in the document (kind points: [x, y] from/to in points; kind path: one PathItem by native UUID, measure length (default) or chord), returns per reference the factor and scale_percent (actual_mm * 72 / 25.4 / measured pt), and the median as summary with the spread and a hint for a mm-read-as-pt drawing (283.464567%). Names no dimension text. Bound by expected_document_key; writes nothing.',
+        inputSchema: {
+            expected_document_key: z.string().min(1).max(16_384),
+            references: z.array(z.record(z.string(), z.unknown())).min(1).max(SCALE_REFERENCE_MAX_REFERENCES),
+        },
+        outputSchema: { result: measureScaleReferenceResultSchema },
+        annotations: READ_ONLY,
+    }, async (params) => text(await operations.measureScaleReference({
+        expectedDocumentKey: params.expected_document_key,
+        references: params.references.map((reference) => scaleReferenceInputSchema.parse(reference)),
+    })));
     server.registerTool('illustrator_get_area_text_options', {
         title: 'Get Illustrator Area-Text Options',
-        description: 'Read-only. Returns the column and row layout (columnCount, columnGutter, rowCount, rowGutter, flowLinksHorizontally), frame bounds and matrix, contents, and fit of one unthreaded, horizontal AREATEXT frame directly on a layer, bound by document key and native UUID, with its lock and visibility state and the reasons illustrator_set_area_text_columns would refuse to edit it. `fit` is proved from the visible lines: `fits` (every story character visible), `overflows` (only a leading part is visible), or `indeterminate` (unprovable; the edit refuses it). Illustrator\'s own `overflows` flag is not used because it does not read back on the measured host. Area inset and threading are not reported. Threaded, vertical, and grouped frames are refused.',
+        description: 'Read-only. Returns the column and row layout (columnCount, columnGutter, rowCount, rowGutter, flowLinksHorizontally), frame bounds and matrix, contents, fit, and lock and visibility state of one unthreaded, horizontal AREATEXT frame directly on a layer, bound by document key and native UUID, with the reasons illustrator_set_area_text_columns would refuse to edit it. fit is fits (every story character visible), overflows (only a leading part visible) or indeterminate (the edit refuses it). Area inset is not reported. Threaded, vertical and grouped frames are refused.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             target_uuid: z.string().min(1).max(255),
@@ -1529,24 +1593,22 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_audit_typography', {
         title: 'Audit Typography',
-        description: 'Read-only typography audit, bound by document key (all text frames, or target_uuids). One host read of each story, its exact line ranges, and paragraph values; rules are judged in Node and nothing in the document changes. policy (default ["jp_line_break_v1"]) lists jp_line_break_v1, jp_justify_body_v1 and/or jp_paragraph_shape_v1. '
-            + 'jp_line_break_v1 audits the line breaks Illustrator composed in Japanese text. '
-            + 'Rules: JP_LINE_START_PROHIBITED (JLReq 3.1.7: cl-02..07, 09, 10, 11 at a line start; line_start_relaxations only as the 3.1.7 notes name), JP_LINE_END_PROHIBITED (3.1.8: cl-01 at a line end), JP_UNBREAKABLE_SPLIT (3.1.10: doubled em dash, ellipsis or two-dot leader; European numerals with , . between digits; cl-12 + digit; digit + cl-13), JP_PROTECTED_TERM_SPLIT (a protected_terms entry split across lines), JP_HALFWIDTH_PUNCTUATION (half-width punctuation between Japanese characters), JP_OVERSET (area text with hidden text). '
-            + 'Full-width forms are classified as the character they are the full-width form of (JLReq Appendix A note). Line-break rules apply to soft wraps in the visible text only: forced breaks and hidden overset text are not judged. Not judged: ideographic numerals, ruby, warichu, Latin word breaks, style overrides. '
-            + 'jp_justify_body_v1 reads each paragraph\'s justification and its word / letter spacing and glyph scaling (minimum, desired, maximum; 4 decimals) and runs only the rules whose justify_body input is given (no threshold is assumed): JP_JUSTIFY_LAST_LINE (a justified paragraph whose last-line treatment differs from last_line; FULLJUSTIFY = justify), JP_SPACING_RANGE (a value outside spacing_ranges), JP_SHORT_LAST_LINE (heuristic: the last visible line of a justified paragraph of 2+ lines has at most short_last_line_max_characters characters). justify_body.observed (distribution over the audited paragraphs) and host_new_document_default are evidence, not targets. '
-            + 'jp_paragraph_shape_v1 runs only the rules whose paragraph_shape input is given: JP_SHORT_LINE_HEAD (heuristic: a line after a soft wrap starts with 1..max_characters characters and then a character of punctuation_classes, JLReq classes), JP_SHORT_LAST_LINE (as above, for any paragraph). Loose lines are not judged (unmeasured). '
-            + 'Horizontal point text and horizontal / vertical area text only; path text, threaded, locked or hidden, vertical point, and empty frames are skipped with a reason and make status partial. '
-            + 'On the measured host, the line-start / line-end rules returned 0 findings on documents with kinsoku Hard; the detection rules themselves are verified by unit tests.',
+        description: 'Read-only typography audit of text frames (all, or target_uuids), bound by expected_document_key; nothing in the document changes. policy selects jp_line_break_v1 (line-start and line-end prohibitions, unbreakable splits, protected_terms splits, half-width punctuation, overset; the default), jp_justify_body_v1 (runs only with the justify_body input), jp_paragraph_shape_v1 (runs only with the paragraph_shape input: short line heads and last lines from the composed line ranges; loose_line judges the em increase of the character pitch over the nominal advance on soft-wrapped lines of fully justified paragraphs, measured on an outlined copy in a scratch document, so it needs Illustrator frontmost and the screen unlocked and skips with a reason what it cannot match; setting_combination reports justified paragraphs with the mojikumi sets and kerning methods you name, attributes only) and/or latin_body_v1 (Latin body text; runs only the latin_body.rules asked for, each with the units, threshold or terms it needs; a rule this version cannot judge is listed in latin_body.rules_skipped and makes status partial; language is never inferred) and/or jp_setting_profile_v1 (runs only with setting_profile: preset names one of the three recommended settings of the Adobe manual (beta-gumi, tsume-gumi with metrics or optical kerning), expected lists the settings you require and wins over the preset, reported per range or paragraph, and kinsoku/mojikumi none is an undefined paragraph setting; frame_extent flags a one-column rectangular area frame whose inner width, or height if vertical, is not a whole number of character advances and returns frame_heights as evidence; no value is assumed). Ruby, warichu, ideographic numerals and style overrides are not judged. Path, threaded, locked or hidden, vertical point, empty and too large frames are skipped with a reason and make status partial. A scope too large for one result is read in pages: when next_cursor is present, call again with the same request and cursor (the result says where the page ended; no cursor means nothing is left). result_format grouped (default) says what findings share once and lists each range as [start, end, line_index, position]; findings returns one entry per finding. A page stops at max_findings or max_response_bytes.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             target_uuids: z.array(z.string().min(1).max(255)).min(1).max(JP_AUDIT_LIMITS.targets).optional(),
             policy: z.array(z.enum(JP_AUDIT_POLICIES)).min(1).max(JP_AUDIT_POLICIES.length).default(['jp_line_break_v1']),
             justify_body: jpAuditJustifyBodySchema.optional(),
             paragraph_shape: jpAuditParagraphShapeSchema.optional(),
+            latin_body: jpAuditLatinBodySchema.optional(),
+            setting_profile: jpAuditSettingProfileSchema.optional(),
             line_start_relaxations: z.array(z.enum(LINE_START_RELAXATIONS)).max(LINE_START_RELAXATIONS.length).default([]),
             halfwidth_punctuation: z.enum(['report', 'ignore']).default('report'),
             protected_terms: z.array(jpAuditProtectedTermSchema).max(JP_AUDIT_LIMITS.terms).default([]),
             max_findings: z.number().int().min(1).max(JP_AUDIT_LIMITS.findings).default(200),
+            max_response_bytes: z.number().int().min(4_096).max(JP_AUDIT_RESPONSE_BYTES.max).default(JP_AUDIT_RESPONSE_BYTES.default),
+            result_format: z.enum(JP_AUDIT_RESULT_FORMATS).default('grouped'),
+            cursor: z.string().min(1).max(32_768).optional(),
         },
         outputSchema: { result: jpAuditResultSchema },
         annotations: READ_ONLY,
@@ -1557,19 +1619,18 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         halfwidthPunctuation: params.halfwidth_punctuation,
         protectedTerms: params.protected_terms.map((term) => term.text),
         maxFindings: params.max_findings,
+        maxResponseBytes: params.max_response_bytes,
+        resultFormat: params.result_format,
+        ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
         policies: params.policy,
         ...(params.justify_body === undefined ? {} : { justifyBody: params.justify_body }),
         ...(params.paragraph_shape === undefined ? {} : { paragraphShape: params.paragraph_shape }),
+        ...(params.latin_body === undefined ? {} : { latinBody: params.latin_body }),
+        ...(params.setting_profile === undefined ? {} : { settingProfile: params.setting_profile }),
     })));
     server.registerTool('illustrator_analyze_display_spacing', {
         title: 'Analyze Display Spacing',
-        description: `Read-only letter-spacing analysis of one headline or logotype frame: horizontal point or area text, one line, at most ${DISPLAY_SPACING_LIMITS.characters} UTF-16 units, one font size, Latin or Japanese. `
-            + 'measure "outline" (default) duplicates the frame into a scratch unsaved document, outlines the copy there and returns, for each pair of adjacent inked characters, the box gap, the minimum ink gap on a shared scanline, the white between them with a depth cap (em), collisions, and a heuristic kerning_change (1/1000 em) toward the frame median white or target_white_em. '
-            + 'For about half a second the scratch document is the active document; it is closed without saving. It needs Illustrator frontmost and the screen unlocked. '
-            + '"state_only" only reads the per-character kerning method, manual kerning, proportional metrics, Tsume, aki and tracking, and opens nothing. '
-            + 'include_preview adds a 288 ppi PNG of the outlined copy. The document key, saved flag, counts, selection, active document and view are compared before and after; any change is an error. '
-            + 'Candidates are heuristic: judge at the final size and medium. Path, vertical, threaded, locked, hidden, transformed or multi-line frames are refused. '
-            + 'A timeout is indeterminate: run illustrator_reconcile; a scratch document left open is then reported with its key for illustrator_close_document.',
+        description: 'Read-only letter-spacing analysis of one headline or logotype frame: horizontal point or area text, one line, at most 64 UTF-16 units, one font size, Latin or Japanese. measure="outline" (default) outlines a copy in a scratch unsaved document (briefly active, closed unsaved); it needs Illustrator frontmost and the screen unlocked, and returns per-pair ink gaps, white and heuristic kerning_change (1/1000 em) toward the median white or target_white_em. measure="state_only" reads kerning and tracking settings and opens nothing. include_preview adds a 288 ppi PNG. Path, vertical, threaded, locked, hidden, transformed and multi-line frames are refused. Candidates are heuristic: judge at the final size. The document, selection and view must not change. A timeout is indeterminate: run illustrator_reconcile, then close any reported scratch document with illustrator_close_document.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             target_uuid: z.string().min(1).max(255),
@@ -1599,6 +1660,46 @@ export function createServer(operations, mutationAdapters = operations.getMutati
             structuredContent: { result: output.result },
         };
     });
+    server.registerTool('illustrator_plan_text_fit', {
+        title: 'Plan Text Fit',
+        description: 'Read-only search for the tracking and/or horizontal scale (the condensed-type percentage) at which one horizontal, unthreaded, unlocked area-text frame (at most 150 UTF-16 units) shows all its text. Measured on Illustrator 30.8.2 (public P0): candidate order, fit and line counts and the first fitting value match an independent reading, the source stays unchanged and no scratch document is left. The real frame is duplicated into a scratch unsaved document (briefly active, closed unsaved; needs Illustrator frontmost and the screen unlocked), the copy is checked equal to the source (text, paragraphs, every character attribute, frame shape, line breaks, fit), and candidates are tried one by one from the original values, never chained; the fit comes from the visible lines, with the line count. Each axis runs from max down to min in steps (set max to the current value). With both axes, tracking_first tries every tracking value at a scale before lowering the scale one step, horizontal_scale_first the reverse. The first candidate that fits, with at most constraint.max_lines lines, is chosen and the search stops; no binary search. max_candidates (default 50, at most 100) bounds the grid before any host call, and a host time budget can end the search early (incomplete_deadline). The caller decides the smallest acceptable tracking and horizontal scale by setting min: this tool does not judge legibility or labeling rules. next_call is the plan call of illustrator_set_text_composition writing the chosen values to the whole frame, given only when that tool accepts them (its own preflight; tracking whole, scale up to 4 decimals); else null with next_call_unavailable. Point, vertical, path, threaded, locked, hidden and mixed-value frames are refused. The source must read back unchanged and the scratch document closed, or there is no result. A timeout is indeterminate: run illustrator_reconcile, then close any reported scratch document with illustrator_close_document.',
+        inputSchema: z.strictObject({
+            expected_document_key: z.string().min(1).max(16_384),
+            target_uuid: z.string().min(1).max(255),
+            search: planTextFitSearchSchema,
+            constraint: planTextFitConstraintSchema.default({ require_fits: true }),
+            max_candidates: z.number().int().min(1).max(PLAN_TEXT_FIT_LIMITS.candidates).default(PLAN_TEXT_FIT_LIMITS.defaultCandidates),
+        }),
+        outputSchema: z.object({ result: planTextFitResultSchema }),
+        annotations: READ_ONLY,
+    }, async (params) => {
+        return text(await operations.planTextFit({
+            expectedDocumentKey: params.expected_document_key,
+            targetUuid: params.target_uuid,
+            tracking: params.search.tracking ?? null,
+            horizontalScale: params.search.horizontal_scale ?? null,
+            order: params.search.order,
+            maxLines: params.constraint.max_lines ?? null,
+            maxCandidates: params.max_candidates,
+        }));
+    });
+    server.registerTool('illustrator_plan_text_increment', {
+        title: 'Plan Text Increment',
+        description: 'Read-only plan that moves the dates, weekdays and numbers of one TextFrame by a rule and returns only the characters that change, as ranges for illustrator_replace_text_range. year is required (the year of dates written without one; weekdays are recomputed from the real calendar, never trusted). rule: date_shift (days, may be negative), date_set (to YYYY-MM-DD; exactly one date in the text), number_add (delta; every number in the text, or only occurrence n, 0-based; digit count and commas kept). Notation is kept as written: full/half-width digits, zero padding, brackets, separators. Dates M/D, M月D日, YYYY/M/D, YYYY年M月D日, and M.D only with a weekday right after it (8.24（月）), with an optional （火） or (火); times are left alone. A month that goes back inside the frame (12/28（月）〜1/4（月）) is year + 1 only when its weekday fits year + 1 and not year. An edit changes the fewest characters (8/10 -> 8/11 is the last digit), so per-character styling of the rest is untouched. A wrong weekday in the text is a warning and is corrected. Not decided, never guessed: Japanese-era years, English weekdays, a dot date without weekday, a day without its month, a month that goes back with no weekday proof, slash dates in two readings, decimals, numbers beside Latin letters or over 9 digits; any of these makes status blocked and next_calls empty. next_calls are plan calls of illustrator_replace_text_range ordered back to front, so a length change never moves an edit still to come; run each plan and its apply in order. Reads the text once with the get_object read; whether replace_text_range accepts the frame is decided by its own plan.',
+        inputSchema: z.strictObject({
+            expected_document_key: z.string().min(1).max(16_384),
+            target_uuid: z.string().min(1).max(255),
+            year: z.number().int().min(1900).max(2200),
+            rule: textIncrementRuleSchema,
+        }),
+        outputSchema: z.object({ result: planTextIncrementResultSchema }),
+        annotations: READ_ONLY,
+    }, async (params) => text(await operations.planTextIncrement({
+        expectedDocumentKey: params.expected_document_key,
+        targetUuid: params.target_uuid,
+        year: params.year,
+        rule: params.rule,
+    })));
     for (const adapter of mutationAdapters.list()) {
         server.registerTool(adapter.tool.name, {
             title: adapter.tool.title,
@@ -1611,6 +1712,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
                 ...(rasterToolStep(adapter.operation) === undefined ? {} : { decode: rasterToolStep(adapter.operation).decodeSchema.optional() }),
                 ...(adapter.hostVersionOperation === undefined ? {} : { host_version: hostVersionNoteSchema.optional() }),
                 ...(DIRTY_FILE_ADMISSION_OPERATIONS.has(adapter.operation) ? { document_admission: documentAdmissionNoteSchema.optional() } : {}),
+                ...(adapter.operation === REPLACE_RGB_BLACK_OPERATION ? { selection: rgbBlackSelectionSchema.optional() } : {}),
             }),
             annotations: adapter.tool.annotations,
         }, async (params) => {
@@ -1619,14 +1721,29 @@ export function createServer(operations, mutationAdapters = operations.getMutati
                 throw new Error(formatToolArgumentError(adapter.tool.name, checked.error.issues));
             let executed;
             const view = RESPONSE_VIEWS[adapter.tool.name];
-            const normalizedInput = adapter.tool.normalizePublicInput(view === undefined ? params : view.expand(params, SNAPSHOT_REFS));
+            let requestParams = params;
+            let rgbBlackSelection;
+            if (adapter.operation === REPLACE_RGB_BLACK_OPERATION && requestParams.apply !== true && requestParams.target_uuids === undefined) {
+                const picked = await operations.selectRgbConvertedBlackTargets({ expectedDocumentKey: String(requestParams.expected_document_key) });
+                rgbBlackSelection = picked.summary;
+                if (picked.targets.length === 0) {
+                    const nothing = text({ outcome: { operation: REPLACE_RGB_BLACK_OPERATION, applied: false, no_eligible_targets: true, document: picked.document } });
+                    const selectionOnly = { selection: picked.summary };
+                    return {
+                        content: [...nothing.content, { type: 'text', text: JSON.stringify(selectionOnly) }],
+                        structuredContent: { ...nothing.structuredContent, ...selectionOnly },
+                    };
+                }
+                requestParams = { ...requestParams, target_uuids: picked.targets.map((target) => target.uuid) };
+            }
+            const normalizedInput = adapter.tool.normalizePublicInput(view === undefined ? requestParams : view.expand(requestParams, SNAPSHOT_REFS));
             const rasterStep = rasterToolStep(adapter.operation);
             const rasterPre = rasterStep === undefined ? null : await rasterStep.pre(normalizedInput);
             try {
                 executed = await operations.executeAdapterWithHostVersion(adapter.operation, normalizedInput);
             }
             catch (error) {
-                if (!(error instanceof SvgTextPlanBlockedError))
+                if (!(error instanceof SvgTextPlanBlockedError || error instanceof GuidedRefusalError))
                     throw error;
                 const refusal = { code: error.reason, message: error.message, next_steps: error.nextSteps() };
                 return { isError: true, content: [{ type: 'text', text: JSON.stringify(refusal) }] };
@@ -1639,14 +1756,15 @@ export function createServer(operations, mutationAdapters = operations.getMutati
                     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ ...post.mismatch, result: response }) }] };
                 rasterDecode = { decode: post.decode };
             }
-            const builtNextCall = buildNextCall(adapter.tool, params, response);
+            const builtNextCall = buildNextCall(adapter.tool, requestParams, response);
             const nextCall = builtNextCall === undefined || view === undefined ? builtNextCall : view.nextCall(builtNextCall, SNAPSHOT_REFS);
             const guidance = nextCall === undefined ? buildBlockedNextSteps(response) : undefined;
             const guided = nextCall !== undefined ? { next_call: nextCall } : guidance !== undefined ? { next_steps: guidance } : undefined;
             const withDecode = rasterDecode === undefined ? guided : { ...guided, ...rasterDecode };
             const withVersion = hostVersion === null ? withDecode : { ...withDecode, host_version: hostVersion };
             const admission = DIRTY_FILE_ADMISSION_OPERATIONS.has(adapter.operation) ? documentAdmissionNote(response) : null;
-            const extra = admission === null ? withVersion : { ...withVersion, document_admission: admission };
+            const withAdmission = admission === null ? withVersion : { ...withVersion, document_admission: admission };
+            const extra = rgbBlackSelection === undefined ? withAdmission : { ...withAdmission, selection: rgbBlackSelection };
             const shown = view === undefined ? response : view.render(response);
             if (extra === undefined)
                 return text(shown);
@@ -1694,32 +1812,28 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     }, async (params) => text(await operations.runRecipe(params)));
     server.registerTool('illustrator_create_document', {
         title: 'Create New Illustrator Document',
-        description: 'Create one new, unsaved Illustrator document (RGB or CMYK, one artboard of width_pt x height_pt, optional artboard name) and return its context. Measured on Illustrator 30.8.1: the new document is inserted at collection index 0 and becomes the active document; existing documents keep their path, saved state, and file revision (their document keys change only in the index segment, so re-read them). The created document is mutable as mutationProfile unsaved_document. Verification failures close only the created document without saving. Refused while a backup or export session is unresolved. A timeout is indeterminate and may leave the new document open.',
+        description: 'Create one new, unsaved Illustrator document (RGB or CMYK, one artboard of width_pt x height_pt, optional artboard name) and return its context. It becomes the active document, and existing document keys change in the index segment, so re-read them. It is mutable as mutationProfile unsaved_document and needs no backup (it has no file). Verification failures close only the created document, without saving. Refused while a backup or export session is unresolved. A timeout is indeterminate and may leave the new document open.',
         inputSchema: createDocumentPublicInputSchema.shape,
         outputSchema: { result: createDocumentResultSchema },
         annotations: BACKUP,
     }, async (params) => text(await operations.createDocument(normalizeCreateDocumentPublicInput(params))));
     server.registerTool('illustrator_save_document_as', {
         title: 'Save Illustrator Document As New File',
-        description: 'Save the bound active Illustrator document (saved, unsaved, or with pending changes) to a new .ai file at output_path and return its new context. output_path must be absolute, end with .ai, not exist, and sit in an existing directory owned by the current user. Illustrator never writes output_path: it saves into a private staging directory next to it, Node verifies the file (identity, SHA-256, size against the host file revision) and publishes it with link(2), which cannot overwrite (an existing entry fails as output_exists with the staged file retained); the document is then switched to output_path by closing the clean staged document and opening the published file, so the result document is a new object with a new key (page-item UUIDs are not preserved, undo history is lost). Measured on Illustrator 30.8.1: the file the document pointed at before stays byte-identical (previousFilePreserved). The run is recorded as a save-as session before anything is staged: while it is unresolved every mutation, backup, export and save-as is refused, and an indeterminate or retained result returns saveAsId with a nextCall to illustrator_reconcile_save_as. Refused while a backup, export or save-as session is unresolved. Locked-screen behaviour is unmeasured.',
+        description: 'Save the bound active Illustrator document (saved, unsaved, or with pending changes) to a new .ai file at output_path and return its new context. output_path must be absolute, end with .ai, not exist, and sit in an existing directory owned by the current user. Illustrator never writes output_path itself: the file is staged, verified and published without overwriting, and the document switches to it as a new object with a new key (page-item UUIDs are not preserved, undo history is lost); re-read it from the result. Optional compatibility cc or cs6 writes an older-compatible file (checked by its header marks); the document stays bound to that file and is shown as having unsaved changes (reopenedAsConverted). A later save by Illustrator itself writes the current version, not the older one, and illustrator_create_backup cannot yet back up an older-version file, so an in-place save through this server is refused. The output keeps the embedded ICC profile on and follows the PDF-compatible content and the compression of the file the document came from (the result\'s options says so; a document without a file yet keeps the default of on, and a document whose file cannot show them is refused with save_attributes_unreadable before anything is written). The file the document pointed at before stays unchanged. The run is recorded as a save-as session first; until it is resolved, every mutation, backup, export and save-as is refused. An indeterminate or retained result returns saveAsId and a nextCall to illustrator_reconcile_save_as.',
         inputSchema: saveDocumentAsPublicInputSchema.shape,
         outputSchema: { result: saveDocumentAsResultSchema },
         annotations: BACKUP,
     }, async (params) => text(await operations.saveDocumentAs(normalizeSaveDocumentAsPublicInput(params))));
     server.registerTool('illustrator_save_document', {
         title: 'Save Illustrator Document In Place (Overwrite With Backup)',
-        description: 'Overwrite the file of the bound, file-backed active Illustrator document with its pending changes. This is a destructive operation: backup_id must name a verified illustrator_create_backup record whose sourcePath and sourceFileRevision match the document and whose SHA-256 equals both the file currently on disk and the backup file itself; otherwise the call is rejected (backup_not_found, backup_mismatch, backup_stale, backup_file_unavailable) before Illustrator is touched. The document path must be canonical (a symbolic link is refused). The digest is re-verified under the active-command lock immediately before the host call, and Illustrator re-checks the file length and modification time right before save(); a change there writes nothing and is reported as indeterminate. A clean document is rejected with nothing_to_save; an unsaved document has no file to overwrite (use illustrator_save_document_as). Measured on Illustrator 30.8.1: save() rewrites the file with a new inode and a new file revision, so the document key changes; re-read it from the result. Refused while a backup or export session is unresolved. A timeout is indeterminate. Locked-screen behaviour is unmeasured. When the file belongs to an open edit session, backup_id must be that session\'s backup and, at up to 3,000 items, the same host call scans the whole document first; it writes only when the structure digest and item aggregate still equal the session head (then the session closes), otherwise nothing is written and the session is suspended (edit_session_mismatch). A scan that cannot finish (60 s deadline, e.g. a slow Illustrator; or too many items) writes nothing and leaves the session open (edit_session_scan_incomplete): run it again, and do not restart Illustrator before the changes are saved. A suspended session refuses the save (edit_session_suspended) until it is closed. Session cap: 20,779 items; production-copy P0 5/5 (30.8.2). Above 3,000 items, ask before accept_chunked_scan_window=true: attribute edits after their chunk scan but before save can be missed. Resume scan_in_progress with its single-use scan_continuation and the same key, backup_id and consent. verification.mode=chunked reports the window and scan/save/verify timing in ms. The 40 s budget decides whether another chunk may start; the final synchronous save can take longer depending on document size (host timeout 300 s). On timeout or a lost response, keep the command lock and use illustrator_reconcile with the same command_id plus document inspection; do not automatically resend the save. Save result data is not replayed.',
+        description: 'Overwrite the file of the bound, file-backed active Illustrator document with its pending changes. Destructive: backup_id must be a verified illustrator_create_backup record whose SHA-256 matches the file on disk, otherwise the call is rejected before Illustrator is touched. The path must be canonical (no symbolic link). A clean document is rejected with nothing_to_save; an unsaved document has no file (use illustrator_save_document_as). If the file changes just before the save, nothing is written and the result is indeterminate. The document key changes after a save: re-read it. Refused while a backup or export session is unresolved. With an open edit session, backup_id must be that session\'s backup; above 3,000 items ask before accept_chunked_scan_window=true. If a scan does not finish, nothing is written; run it again and do not restart Illustrator before saving. A timeout is indeterminate: keep the lock, use illustrator_reconcile with the same command_id, and do not resend the save. The save keeps the embedded ICC profile, the PDF-compatible content and the compression of the file (it saves the way File > Save does, with Illustrator\'s own remembered options); the result reads these from the file bytes before and after (attributes: each attribute is preserved, changed or unknown, and verified is true only when all are preserved). An attribute the bytes cannot show, such as the compression of an older-version file, is unknown and is not reported as kept. If an attribute changed, the outcome is saved_attributes_changed (the file was written; the message gives the backup path to copy back by hand, which loses later edits; no tool here restores a backup), never saved. On Windows a file that holds an ICC profile is refused (icc_profile_save_unsupported) until that save is measured there.',
         inputSchema: saveDocumentPublicInputSchema.shape,
         outputSchema: { result: saveDocumentResultSchema },
         annotations: DESTRUCTIVE_WITH_BACKUP,
     }, async (params) => text(await operations.saveDocument(normalizeSaveDocumentPublicInput(params))));
     server.registerTool('illustrator_open_edit_session', {
         title: 'Open Edit Session',
-        description: 'Declare occupancy of one saved, clean Illustrator file so that verified changes can continue while the document is dirty. ' +
-            'backup_id must name a verified illustrator_create_backup record of the exact bytes on disk (same path, revision and SHA-256); it is the session\'s only restore point. ' +
-            'Read-only chunks: cap 20,779 items, foreground/unlocked; production-copy P0 5/5 (30.8.2). Each chunk checks key, saved file revision and structure before/after reading. Within a 40 s work budget, scan_in_progress requests another call with the same key and backup_id plus scan_continuation. Single-use tokens expire after 10 idle minutes or server restart; aggregates stay server-side. No session is created on change, incomplete reads, no progress, excessive time estimates, 20 total minutes or 200 chunks. Changes that do not flip saved or change the structure remain outside detection during the scan window. ' +
-            'While the session is open, only operations that declare the items they change run on the file (the others are refused with EDIT_SESSION_OPERATION_UNSUPPORTED before any change); ' +
-            'illustrator_save_document with the same backup_id scans the document again and writes only if it still matches, which closes the session. ' + EDIT_SESSION_SUPPORT_PROFILE,
+        description: 'Open an edit session on one saved, clean Illustrator file so verified changes can continue while the document is dirty. An edit session is an occupancy declaration: while it is open, nobody else may edit the document. backup_id must name a verified illustrator_create_backup record of the exact bytes on disk; it is the only restore point (restoring it loses later changes). On scan_in_progress, call again with the same expected_document_key, backup_id and scan_continuation (single use; tokens expire after 10 idle minutes). Scan limits: 40 s per call, 20 minutes or 200 calls in total; a limit hit ends the scan with a rejection. illustrator_save_document with the same backup_id writes and closes the session. Detected external edits: structure, item attributes outside groups, stacking order, placed-image links. Not detected: appearance stacks, graphic styles, symbols, image pixels, profiles, document settings.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             backup_id: z.uuid(),
@@ -1739,10 +1853,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     }, async () => text(await operations.getEditSessions()));
     server.registerTool('illustrator_close_edit_session', {
         title: 'Close or Quarantine Edit Session',
-        description: 'action=close ends an open or suspended edit session without saving: the document keeps its changes and stays unsaved. That is the usual end when the user checks the changes and saves the file (Cmd+S) themselves; until then this server refuses further changes to the document, and the save changes its key (read it again). ' +
-            'If the user saved while the session was open, the next context read or change suspends it (file_changed); close it then. The session backup stays the restore point. ' +
-            'action=quarantine moves one unreadable session record, unchanged, out of the live state so mutations can continue; a readable record is refused. ' +
-            'Both require session_id and an identical confirm_session_id, and run under the active-command lock (one trivial Illustrator call). There is no way to resume a suspended session.',
+        description: 'action=close ends an open or suspended edit session without saving: the document keeps its changes and stays unsaved. Use it when the user has saved the file (Cmd+S) themselves; until then further changes are refused, and the save changes the document key (read it again). If the user saved while the session was open, the next context read or change suspends it (file_changed); close it then. The session backup stays the restore point. action=quarantine moves one unreadable session record out of the live state so mutations can continue; a readable record is refused. Both need session_id and an identical confirm_session_id, and run under the active-command lock. A suspended session cannot be resumed.',
         inputSchema: {
             session_id: sessionIdSchema,
             confirm_session_id: sessionIdSchema,
@@ -1753,21 +1864,28 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     }, async (params) => text(await operations.closeEditSession({ sessionId: params.session_id, confirmSessionId: params.confirm_session_id, action: params.action })));
     server.registerTool('illustrator_open_document', {
         title: 'Open Illustrator Document (Read-Only Open)',
-        description: 'Open one existing .ai file in Illustrator and return its context. path must be absolute, end with .ai, and resolve to a regular file outside the MCP state root. A file that is already open is rejected with already_open together with the identity of the open document (bind that key instead); if Illustrator hands back an already-open document under an alias path, that document is never closed and the same rejection is returned. Measured on Illustrator 30.8.1: the opened document is inserted at collection index 0 and becomes the active document; existing documents keep their path, saved state, and file revision (their keys change only in the index segment, so re-read them). Verification failures close only a document this call can prove it created, without saving. Nothing is written. Refused while a backup or export session is unresolved. A timeout is indeterminate (a dialog for missing fonts or profiles is unmeasured and would time out). Locked-screen behaviour is unmeasured.',
+        description: 'Open one existing .ai file in Illustrator and return its context; nothing is written. path must be absolute, end with .ai, and be a regular file outside the MCP state root. A file that is already open is rejected with already_open and the open document\'s identity; bind that key instead. The opened document becomes the active document, and existing document keys change in the index segment, so re-read them. Refused while a backup or export session is unresolved. Only a document this call created is closed on a verification failure, without saving. A timeout is indeterminate; a missing-font or profile dialog is unmeasured and can time out. Locked-screen behaviour is unmeasured.',
         inputSchema: openDocumentPublicInputSchema.shape,
         outputSchema: { result: openDocumentResultSchema },
         annotations: BACKUP,
     }, async (params) => text(await operations.openDocument(normalizeOpenDocumentPublicInput(params))));
+    server.registerTool('illustrator_activate_document', {
+        title: 'Activate Illustrator Document',
+        description: 'Bring one open document to the front so the tools that bind the active document can use it: list_documents, then this, then backup / read / change / save / export / close. expected_document_key is the full key from the list_documents you just read; a stale key is rejected with document_key_mismatch and is never corrected (read the list again, do not guess the new index). Nothing in any document is changed or saved, and the selection, active layer, active artboard and view of every open document are compared before and after (a difference is returned as unverified, not reverted). Use result.document.key for every following call on this document: the index segment of every key may change. A dirty or never-saved document can be activated; the following tools apply their own rules. An already-active document returns already_active without a write. Measured on Illustrator 30.8.2 with Illustrator in front and the screen unlocked only: otherwise it is refused with host_profile_unsupported and nothing is sent. It does not bring the application to the front. A timeout, or a verification that finds the document set or an identity changed, is indeterminate and blocks later changes until illustrator_reconcile: call illustrator_list_documents first (the document with active:true is the current one), then reconcile and use a fresh key. A refused or failed activation (failed) and a moved view member (unverified) block nothing.',
+        inputSchema: activateDocumentPublicInputSchema.shape,
+        outputSchema: { result: activateDocumentResultSchema },
+        annotations: ACTIVATE,
+    }, async (params) => text(await operations.activateDocument(normalizeActivateDocumentPublicInput(params))));
     server.registerTool('illustrator_close_document', {
         title: 'Close Illustrator Document',
-        description: 'Close the bound active Illustrator document without saving. A clean document (saved=true) closes by default; a document with unsaved changes is rejected with unsaved_changes unless discard_changes is true, in which case the changes are discarded and the file is proven unchanged (filePreserved). Nothing is ever written by this tool; to keep changes, call illustrator_save_document_as or illustrator_save_document first. Measured on Illustrator 30.8.1: close returns in well under a second and the remaining documents keep their identity apart from the index segment. The result reports the closed identity, the remaining inventory, and the new active document (null when none is open). Refused while a backup or export session is unresolved. A timeout is indeterminate. Locked-screen behaviour is unmeasured.',
+        description: 'Close the bound active Illustrator document without saving. A clean document (saved=true) closes by default. A document with unsaved changes is rejected with unsaved_changes unless discard_changes is true, which discards those changes. Nothing is written by this tool, and the file is proven unchanged. To keep changes, call illustrator_save_document_as or illustrator_save_document first. Refused while a backup or export session is unresolved. The result reports the closed identity, the remaining inventory and the new active document (null when none). Other documents keep their identity apart from the index segment of their key. Behaviour on a locked screen is unmeasured.',
         inputSchema: closeDocumentPublicInputSchema.shape,
         outputSchema: { result: closeDocumentResultSchema },
         annotations: BACKUP,
     }, async (params) => text(await operations.closeDocument(normalizeCloseDocumentPublicInput(params))));
     server.registerTool('illustrator_create_backup', {
         title: 'Create Verified Illustrator Backup',
-        description: 'Copy the saved file of the bound Illustrator document to a new backup file, verify the copy by opening only the restore-test copy in Illustrator and comparing its structure with the source, close that copy without saving, and publish a private backup record. The source document and file are never written. Unsaved, dirty, or stale-key documents are rejected before any copy. A document above 1,000 items is compared as a full record stream on macOS up to 20,778 items (the largest measured); a larger one is rejected as document_too_large with its item count. backup_root must be a directory owned by the current user with mode 0700. An indeterminate result leaves a session that blocks mutations until illustrator_reconcile_backup releases it. Backups are never deleted automatically.',
+        description: 'Copy the saved file of the bound document to a new backup file and verify the copy: only a restore-test copy is opened in Illustrator and compared with the source structure, then closed without saving; the source document and file are never written. A private backup record is published. Unsaved, dirty, or stale-key documents are rejected before any copy. A document above the structure-comparison limit is rejected as document_too_large, with its item count and the limit. backup_root must be a directory owned by the current user with mode 0700. An indeterminate result blocks mutations until illustrator_reconcile_backup releases it. Backups are never deleted automatically.',
         inputSchema: {
             expected_document_key: z.string().min(1).max(16_384),
             backup_root: z.string().min(1).max(4_096).optional(),
@@ -1800,42 +1918,41 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     }, async (params) => text(await operations.reconcileBackup({ backupId: params.backup_id, action: params.action })));
     server.registerTool('illustrator_reconcile_delete', {
         title: 'Reconcile or Revert an Illustrator Deletion',
-        description: 'Check and, if needed, undo a deletion made by illustrator_delete_objects by reopening the unchanged file. It runs as an ordinary command, so it needs the Illustrator lock to be free: after an indeterminate delete apply the lock stays held (illustrator_reconcile cannot abandon it) until illustrator_reconcile with action=release_unverified (command_id and an identical confirm_command_id, once inspect reports canReleaseUnverified); while it is held this tool refuses with command_locked. action inspect (read-only) reports the open documents on the backup\'s source path, their keys and saved state, and which target UUIDs resolve: not_applied only when exactly one clean document carries the apply key, every target resolves, and the file still matches the backup; otherwise revert_required. action revert closes that document without saving and reopens the same file, only after the backup record, the file, and the backup file are re-verified under the command lock and confirm_document_key equals the key inspect reported (null when no document was open); it succeeds (restored) only when the reopened document shows the path, the backup revision, saved, saved_file, and the apply key apart from the collection index, other documents are unchanged, and the file still hashes to the backup. Unsaved changes in that document are discarded. It never changes a command\'s recorded outcome. Target UUID resolution after the reopen is informational. Nothing is retried automatically.',
+        description: 'Check, and if needed revert, a deletion made by illustrator_delete_objects by reopening the unchanged file. It runs as an ordinary command, so it needs the Illustrator lock to be free. After an indeterminate delete the lock stays held until illustrator_reconcile with action=release_unverified (command_id and an identical confirm_command_id, once inspect reports canReleaseUnverified); while it is held this tool refuses with command_locked. action=inspect (read-only) reports whether the deletion was applied (not_applied) or revert_required. action=revert closes the open document without saving and reopens the file; unsaved changes in that document are discarded. It succeeds only when the reopened file matches the backup. It never changes a command\'s recorded outcome, and nothing is retried automatically.',
         inputSchema: reconcileDeletePublicInputSchema.shape,
         outputSchema: { result: reconcileDeleteResultSchema },
         annotations: DESTRUCTIVE_WITH_BACKUP,
     }, async (params) => text(await operations.reconcileDelete(normalizeReconcileDeletePublicInput(params))));
     server.registerTool('illustrator_export_outlined', {
         title: 'Export Outlined AI or PDF',
-        description: 'Export the bound, saved Illustrator document as one new outlined AI or PDF file without touching the source document or file: the saved file is copied into the private state root, only that copy is opened, every text frame on the copy is outlined, the copy is saved once to output_path (which must not exist), the file is verified in Node (PDF header, one page object per artboard, SHA-256), the copy is closed without saving, the source is verified unchanged, and a private export record is published. Unsaved, dirty, or stale-key documents and an existing output_path are rejected before any host write. For format "pdf", pdf_preset must name an entry of Illustrator\'s PDF preset list (a rejection returns availablePresets). An indeterminate result leaves a session that blocks mutations until illustrator_reconcile_export releases it. Output files are never deleted or overwritten.',
+        description: 'Export the saved document as outlined AI or PDF using a private work copy; the source stays unchanged. pdf_preset is required for PDF. Existing output is refused by default. overwrite=true plans; apply its nextCall unchanged to archive the previous file and publish the verified output. Recovery uses illustrator_reconcile_export with explicit restore_previous or finalize_publish. Archives are retained manually.',
         inputSchema: {
+            ...workCopyOverwriteFields,
+            apply: z.boolean().optional(),
+            expected_plan_digest: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
             expected_document_key: z.string().min(1).max(16_384),
             format: z.enum(['ai', 'pdf']),
             output_path: z.string().min(1).max(4_096),
             pdf_preset: z.string().min(1).max(512).optional(),
         },
-        outputSchema: { result: exportOutlinedResultSchema },
-        annotations: BACKUP,
+        outputSchema: { result: z.union([exportOutlinedResultSchema, workCopyOutlinedResultSchema]) },
+        annotations: DESTRUCTIVE_WITH_BACKUP,
     }, async (params) => text(await operations.exportOutlined({
         expectedDocumentKey: params.expected_document_key,
+        ...(params.overwrite === undefined ? {} : { overwrite: params.overwrite }),
+        ...(params.apply === undefined ? {} : { apply: params.apply }),
+        ...(params.expected_plan_digest === undefined ? {} : { expectedPlanDigest: params.expected_plan_digest }),
+        ...(params.expected_output === undefined ? {} : { expectedOutput: params.expected_output }),
+        ...(params.command_id === undefined ? {} : { commandId: params.command_id }),
         format: params.format,
         outputPath: params.output_path,
         ...(params.pdf_preset === undefined ? {} : { pdfPreset: params.pdf_preset }),
     })));
     server.registerTool('illustrator_export_pdf', {
         title: 'Export PDF with Page Selection, Marks and Bleed',
-        description: 'Save chosen artboards of the bound, saved Illustrator document as one new PDF, with optional page marks and bleed, without touching the source document or file. ' +
-            'apply=false (default) plans in one host read: artboard range/sizes, marks, bleed, planDigest and nextCall; apply nextCall unchanged. ' +
-            'artboards is "all" or "1,3"/"2-4", strictly ascending and in range (Illustrator writes ascending pages). ' +
-            'Marks (trim, registration, color_bars, page_information; roman/japanese) default off. Bleed defaults to 0; explicit sides accept whole points 0-72, refusing fractions such as 8.5 with nearest integers. Explicit bleed needs a preset with Use Document Bleed Settings OFF: ON uses document values; mismatches refuse publication. bleed={mode:"document",expected_mm:3} leaves bleed properties to the preset; document values are not read from the DOM. Publish only if every page has an explicit BleedBox with 3 mm per side (0.01 pt tolerance). Invalid bleed is refused before any host read. ' +
-            'These marks exist only in the PDF; when the document already has editable trim marks (illustrator_create_trim_marks), leave trim off so the output does not carry two sets. ' +
-            'With trim/registration on, the plan scans up to 5000 paths in the same read and warns about Registration strokes or incomplete scans; warnings never block. ' +
-            'pdf_preset must uniquely match an entry of Illustrator\'s PDF preset list by NFC (the listed raw name is passed); PDF/X presets are refused (scripting did not produce PDF/X); preset.settingsVerified=false. PDF version and output intents are file facts. ' +
-            'pdfx sets the PDF/X standard: x3_2002, x3_2003 or x4 (x1a_* is refused: ignored silently); output_condition needs x4. A font not proven available is refused. The file must carry GTS_PDFXVersion (Info, XMP) and the OutputIntent; conformance is always "not_validated". ' +
-            'preserve_editability: omit to keep the preset; false for sharing and mail (measured: 16.4 MB to 387 KB for one page), true to reopen and edit in Illustrator; options.preserveEditability reports the read-back. ' +
-            'Apply opens a private copy, saves one staged PDF, checks trailer, page count, every TrimBox size and bleed, and SHA-256 in Node, closes the copy without saving, verifies source preservation, then publishes with link(2) (no overwrite). ' +
-            'A stale plan (document, file revision, artboards or options changed) is refused. An indeterminate result leaves an export session that blocks mutations until illustrator_reconcile_export releases it.',
+        description: 'Save chosen artboards of the bound, saved Illustrator document as one new PDF, with optional page marks and bleed, without changing the source document or file. apply=false plans and returns nextCall; apply nextCall unchanged. artboards is "all" or ranges such as "1,3" or "2-4". Marks (trim, registration, color_bars, page_information) are added only to the PDF and default off; leave trim off if the document has editable trim marks (illustrator_create_trim_marks). Bleed defaults to 0 (whole points 0-72 per side), or bleed={mode:"document",expected_mm:3}; explicit sides need a preset with Use Document Bleed Settings OFF. pdf_preset must uniquely match Illustrator\'s PDF preset list; PDF/X presets are refused. pdfx: x3_2002, x3_2003 or x4 (output_condition needs x4). preserve_editability: false for sharing and mail, true to reopen and edit. A stale plan is refused; existing output is refused by default. overwrite=true archives the previous file before verified publication; apply nextCall unchanged. An indeterminate result blocks mutations until illustrator_reconcile_export releases it.',
         inputSchema: {
+            ...workCopyOverwriteFields,
             expected_document_key: z.string().min(1).max(16_384),
             output_path: z.string().min(1).max(4_096),
             pdf_preset: z.string().min(1).max(512),
@@ -1860,10 +1977,13 @@ export function createServer(operations, mutationAdapters = operations.getMutati
             apply: z.boolean().default(false),
             expected_plan_digest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
         },
-        outputSchema: { result: pdfExportResultSchema },
-        annotations: BACKUP,
+        outputSchema: { result: z.union([pdfExportResultSchema, workCopyPdfResultSchema]) },
+        annotations: DESTRUCTIVE_WITH_BACKUP,
     }, async (params) => text(await operations.exportPdf({
         expectedDocumentKey: params.expected_document_key,
+        ...(params.overwrite === undefined ? {} : { overwrite: params.overwrite }),
+        ...(params.expected_output === undefined ? {} : { expectedOutput: params.expected_output }),
+        ...(params.command_id === undefined ? {} : { commandId: params.command_id }),
         outputPath: params.output_path,
         pdfPreset: params.pdf_preset,
         artboards: params.artboards,
@@ -1889,7 +2009,7 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_optimize_images', {
         title: 'Optimize Embedded Images to a PPI Cap',
-        description: `Downsample embedded RGB images whose effective PPI exceeds max_ppi, on a private work copy of the bound saved document, and save the result as one new .ai at output_path (which must not exist); the source document and file are never written. apply=false (default) is a read-only plan: the eligible targets with their pixels, effective PPI and expected pixels, every excluded image with its reason, the save options, and the render size. apply=true needs target_uuids from the plan (at most ${IMAGE_OPTIMIZE_MAX_TARGETS}) and output_path, and the foreground host: the saved file is copied into the private state root, only the copy is opened, rendered at max_ppi as the baseline (nothing is saved before the rasterize), each target is rasterized at max_ppi (Document.rasterize, anti-aliased, transparency kept) with its name restored, and every target is verified (pixels, effective PPI, bounds, position, colour space, bit depth, layer, stacking order) together with the artboard render at max_ppi before the one saveAs; the output is verified in Node and published without overwrite. Saves use explicit IllustratorSaveOptions: pdfCompatible follows source PDF image objects, compressed=true, embedLinkedFiles=false, embedICCProfile=false. The source ICC profile is NOT carried over, affecting colour-managed print (plan/results repeat this in iccProfile and save). Bytes compare whole source and output files; no reduction or per-image codec/quality is promised. Render comparison failures retain bounded private PNG evidence at evidenceDirectory; see docs/tools.md for retention and removal. Version scope: Illustrator ${describeHostVersionScope('optimize_images')}, or another stable version, which is admitted and reported as unmeasured in host_version. Other limits (RGB document, one artboard whose render at max_ppi fits ${IMAGE_OPTIMIZE_RENDER_MAX_PIXELS} px): linked, CMYK or grayscale, non-8-bit, rotated, flipped or non-uniformly scaled, grouped or clipped, locked or hidden, non-opaque or non-normal-blend images and images outside the artboard are excluded and left unchanged. Image dimensions must span integer pixels at max_ppi, and document/artboard ruler origins must be zero. Work-copy-only translation aligns the rasterization grid and is reversed before the unchanged geometry and render checks; gridTranslation records that offset. An indeterminate result leaves an export session that blocks mutations until illustrator_reconcile_export releases it. Stable same-minor patches need no consent; ask only for other stable versions. Pass their accepted exact version in accept_unmeasured_host_version. No backup: the source stays unchanged.`,
+        description: 'Downsample embedded RGB images whose effective PPI exceeds max_ppi, on a private work copy of the bound saved document, and save the result as one new .ai at output_path (must not exist); the source document and file are never written. apply=false (default) is a read-only plan: eligible targets, every excluded image with its reason, the save options and the render size. apply=true needs target_uuids from the plan (at most 10), output_path, and Illustrator in the foreground. Every target and the artboard render are verified before the one save; the output is verified and published without overwrite. The source ICC profile is not carried over, and no size reduction or codec quality is promised. Other stable versions are admitted and reported as host_version. An indeterminate result blocks mutations until illustrator_reconcile_export releases its export session.',
         inputSchema: {
             accept_unmeasured_host_version: hostVersionPublicFields.accept_unmeasured_host_version,
             expected_document_key: z.string().min(1).max(16_384),
@@ -1917,37 +2037,15 @@ export function createServer(operations, mutationAdapters = operations.getMutati
         return { ...result, content: [...result.content, { type: 'text', text: JSON.stringify(extra) }], structuredContent: { ...result.structuredContent, ...extra } };
     });
     server.registerTool('illustrator_export', {
-        title: 'Export Artboards as PNG or JPEG',
-        description: 'Export one artboard of the bound, clean, saved RGB Illustrator document as one new PNG24 or JPEG file, ' +
-            'without touching the source document or file. apply=false (default) is a read-only plan (one host call) that returns the ' +
-            'expected pixel size and nextCall; apply with those arguments unchanged. The saved file is copied into the private state root, ' +
-            'only the copy is opened, the target artboard is selected and exported once to a private staging folder, the file is fully ' +
-            'decoded and its pixel size must equal the plan (a board whose size is not whole: fall inside the planned range), the copy is closed without saving, and the file is published at output_path ' +
-            'with link(2), which never overwrites (an existing path is refused). Legacy: scale 1 or 2 (size = artboard pt x scale, ' +
-            'exact), artboard edges in whole points or with .5 pt (1x) or .25/.5 pt (2x) fractions (another edge fraction is written with a warning and a size range), at most ' +
-            '4000 px per side and 12,000,000 px in total, an artboard ruler origin in whole points; ' +
-            'legacy opaque PNG only at 1x. ' +
-            'Single artboard exact-px: width_px or height_px instead of scale, preserving aspect ratio; whole-point board dimensions and an integer derived side, exact decoded-size verification. ' +
-            'Configured stable 30.8.x (measured 30.8.2): JPEG and PNG transparent/opaque 25–400%; the plan echoes intent and renderScalePercent. Fresh exact-px plan/apply require foreground/unlocked (one check before the first Host call, no automatic activation). Batch exact-px is refused. ' +
-            'Anything else is refused in the plan. Unsaved changes, never-saved documents, open edit sessions, ' +
-            'CMYK and linked images are refused (save first). SVG is not supported yet. Exports run one at a time. ' +
-            'Several artboards: output_dir with artboard_indexes or all_artboards (at most 32) writes <artboard name>.<ext> files from one work copy in one plan and apply; ' +
-            'an unusable or repeated name or an existing file blocks the whole plan (items), and publication is all-or-nothing. The same command_id ' +
-            'replays the stored result without calling Illustrator; a timeout leaves a session that blocks mutations until ' +
-            'illustrator_reconcile_export resolves it.',
+        title: 'Export Artboards as PNG, JPEG or SVG',
+        description: 'Export one artboard of the bound, saved, clean RGB document as one new PNG, JPEG or SVG file; the source document and file are never changed. apply=false returns a read-only plan and nextCall; apply those arguments unchanged. Existing outputs are refused unless single-artboard overwrite=true requests verified archival replacement; its nextCall binds expected_output. PNG/JPEG: scale 1 or 2, or single-artboard exact px (width_px/height_px, whole-point boards, frontmost and unlocked). output_dir with artboard_indexes/all_artboards exports up to 32 raster artboards all-or-nothing. Every placed image link must be readable; the plan lists links. SVG measured by public P0 on macOS stable30.8.2, foreground/unlocked: vectors, unitless pt dimensions, verified geometry (not visual equivalence). Requires artboard_index/.svg output_path; no raster/exclude_non_printing_layers/batch options. Refuses images, hidden/nonrendering/non-printing/crossing items and overlapping boards. Clipping masks and gradient fills fail verification and are never published; text is unmeasured. Unknown SVG elements/attributes are not published. Unsaved, dirty, CMYK and open-edit-session documents are refused. A timeout blocks mutations until illustrator_reconcile_export resolves it.',
         inputSchema: rasterExportToolInputShape,
         outputSchema: { result: rasterExportResultSchema },
-        annotations: BACKUP,
+        annotations: { ...BACKUP, destructiveHint: true },
     }, async (params) => text(await operations.rasterExport(params)));
     server.registerTool('illustrator_reconcile_save_as', {
         title: 'Reconcile Illustrator Save-As Session',
-        description: 'Resolve an illustrator_save_document_as run that stopped (indeterminate, or failed with the saved file retained). ' +
-            'A session whose MCP server is still running it is never touched (in_progress). Otherwise one read-only Illustrator call lists the documents on the staged file or the output and the files are checked against the recorded publication. ' +
-            'inspect reports the state and the next step (nextCall), and itself releases only a run that saved nothing or has already converged. ' +
-            'switch_document (confirm_document_key from inspect) closes the clean document on the staged file without saving and opens the published output; nothing is written. ' +
-            'cleanup_staging removes the hidden staging name once no document uses it (the output keeps its content). ' +
-            'abandon (confirm_save_as_id equal to save_as_id) releases the session and deletes nothing; it is the last resort. ' +
-            'A saved file that was never published is never deleted. Mutations stay blocked until the session is released.',
+        description: 'Resolve an illustrator_save_document_as run that stopped (indeterminate, or failed with the saved file retained). A session still running in a live MCP server is never touched (in_progress). Call with action=inspect first (read-only): it reports the state and nextCall, and releases only a run that saved nothing or has already converged. switch_document (with confirm_document_key from inspect) closes the clean staged document without saving and opens the published output; nothing is written. cleanup_staging removes the hidden staging name once no document uses it; the output is untouched. abandon (confirm_save_as_id equal to save_as_id) releases the session and deletes nothing; it is the last resort. A saved file that was never published is never deleted. Mutations stay blocked until the session is released.',
         inputSchema: {
             save_as_id: z.uuid(),
             action: saveAsReconcileActionSchema.default('inspect'),
@@ -1964,15 +2062,10 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_reconcile_export', {
         title: 'Reconcile Illustrator Export Session',
-        description: 'Resolve an unresolved illustrator_export_outlined, illustrator_export_pdf, illustrator_optimize_images or illustrator_export session after a timeout or indeterminate result. ' +
-            'For outlined/PDF/optimize sessions (actions inspect, close_work_copy): reads which open documents still use the work copy or the output path; releases the session only when none does; close_work_copy closes the single matching document without saving after re-verifying it. ' +
-            'For illustrator_export sessions the result names the stop point (window) and what is allowed there: inspect; close_work_copy (only a copy that matches the recorded state); ' +
-            'finalize (record a publication that already happened, then clean up); abandon (record the export as failed without publishing; keeps every file); ' +
-            'release_quarantined with confirm_export_id equal to export_id (release a quarantined or unreadable export after you have checked its files). ' +
-            'Nothing is exported, linked or deleted again, output files are never touched, and every change runs under the command lock. Mutations stay blocked until every session is released.',
+        description: 'Resolve an unresolved illustrator_export_outlined, illustrator_export_pdf, illustrator_optimize_images or illustrator_export session after a timeout or indeterminate result. Legacy outlined/PDF/optimize sessions take action `inspect` (reads which open documents still use the work copy or output path; releases the session only when none does) or `close_work_copy` (closes the single matching document without saving, after re-verifying it). For illustrator_export sessions the result names the stop point (window) and the allowed actions: `inspect`; `close_work_copy` (only a copy matching the recorded state); `finalize` (records a publication that already happened, then cleans up); `abandon` (records the export as failed without publishing; keeps every file); or `release_quarantined` with confirm_export_id equal to export_id, after checking its files. SVG sessions also cover every document under their private stage. For overwrite sessions only, restore_previous restores a detached old inode and finalize_publish publishes the bound stage using create-only links; each requires confirm_export_id. Foreign slots are retained and named by inspect. Legacy output files are never touched, and mutations stay blocked until every session is released.',
         inputSchema: {
             export_id: canonicalCommandIdSchema,
-            action: z.enum(['inspect', 'close_work_copy', 'finalize', 'abandon', 'release_quarantined']).default('inspect'),
+            action: z.enum(['inspect', 'close_work_copy', 'finalize', 'abandon', 'release_quarantined', 'restore_previous', 'finalize_publish']).default('inspect'),
             confirm_export_id: z.uuid().optional(),
         },
         outputSchema: { result: z.union([reconcileExportResultSchema, rasterReconcileResultSchema]) },
@@ -1984,13 +2077,13 @@ export function createServer(operations, mutationAdapters = operations.getMutati
     })));
     server.registerTool('illustrator_reconcile', {
         title: 'Reconcile Illustrator Command',
-        description: windowsReadOnly ? `Inspect an indeterminate read or abandon it with confirm_command_id when execution is proven inactive. No host mutation is performed.${windowsRelease ? WINDOWS_RELEASE_SENTENCE : ''}` : 'Check durable command and transaction-phase status after a timeout or other indeterminate result before another mutation is allowed. action=quarantine moves one command whose unsafe state is confined to it (reported by the state scan) out of the live state, unchanged, so other mutations can continue; that command is never replayed or reapplied. It requires command_id and an identical confirm_command_id. action=release_unverified is the last resort for a stopped command whose outcome cannot be verified (inspect reports canReleaseUnverified): check the document in Illustrator first, then it records the command as released without verification and frees the lock; the document state stays unknown and the command is never replayed or reapplied. It also requires command_id and an identical confirm_command_id.',
+        description: windowsReadOnly ? `Inspect an indeterminate read or abandon it with confirm_command_id when execution is proven inactive. No host mutation is performed.${windowsRelease ? WINDOWS_RELEASE_SENTENCE : ''}` : 'Check durable command and transaction-phase status after a timeout or other indeterminate result, before another mutation is allowed. action=quarantine moves one command whose unsafe state is confined to it (reported by the state scan) out of the live state, unchanged, so other mutations can continue. action=release_unverified is the last resort for a stopped command whose outcome cannot be verified (inspect reports canReleaseUnverified): check the document in Illustrator first; it then records the command as released without verification, frees the lock, and leaves the document state unknown. Both actions require command_id and an identical confirm_command_id. A command is never replayed or reapplied.',
         inputSchema: {
             command_id: canonicalCommandIdSchema.optional(),
             action: (windowsReadOnly ? (windowsRelease ? z.enum(['inspect', 'abandon', 'release_unverified']) : z.enum(['inspect', 'abandon'])) : z.enum(['inspect', 'abandon', 'quarantine', 'release_unverified'])).default('inspect'),
             confirm_command_id: canonicalCommandIdSchema.optional(),
         },
-        outputSchema: { result: (windowsReadOnly && !windowsRelease ? windowsDefaultCommandStatusSchema : commandStatusSchema).nullable() },
+        outputSchema: { result: (windowsReadOnly && !windowsRelease ? windowsDefaultCommandStatusSchema : commandStatusSchema).nullable().meta({ [PUBLISHED_DEPTH_KEY]: COMPLETE_RESULT_DEPTH }) },
         annotations: RECONCILE,
     }, async (params) => {
         const action = params.action;

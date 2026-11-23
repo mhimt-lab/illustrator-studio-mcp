@@ -308,7 +308,7 @@ const hostStateSchema = z.strictObject({
     size: hostNumber.positive(),
     font: z.string().max(255),
 });
-const snapshotSchema = z.strictObject({
+export const snapshotSchema = z.strictObject({
     key: z.string(), index: z.number().int(), saved: z.boolean(), documents: z.number().int(), active: z.boolean(),
     pageItems: z.number().int(), layers: z.number().int(), selection: z.number().int(), activeLayer: z.boolean(),
     views: z.number().int(), zoom: hostNumber, center: z.tuple([hostNumber, hostNumber]), screenMode: z.string(),

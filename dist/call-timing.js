@@ -2,6 +2,31 @@ export const CALL_TIMING_ENV = 'ILLUSTRATOR_STUDIO_MCP_CALL_TIMING';
 export function callTimingEnabled(env = process.env) {
     return env[CALL_TIMING_ENV] === '1';
 }
+let lastHostPhasesLine = '';
+export function takeHostPhases(tool, data, log = true, env = process.env) {
+    if (data === null || typeof data !== 'object' || Array.isArray(data) || !Object.prototype.hasOwnProperty.call(data, 'phaseMs'))
+        return data;
+    const { phaseMs, ...rest } = data;
+    if (log && callTimingEnabled(env)) {
+        const line = `illustrator-studio-mcp: host-phases ${JSON.stringify({ tool: TOOL_NAME.test(tool) ? tool : 'other', phaseMs })}\n`;
+        if (line !== lastHostPhasesLine) {
+            lastHostPhasesLine = line;
+            try {
+                process.stderr.write(line);
+            }
+            catch { }
+        }
+    }
+    return rest;
+}
+export function writeAuditReadTiming(record, env = process.env) {
+    if (!callTimingEnabled(env))
+        return;
+    try {
+        process.stderr.write(`illustrator-studio-mcp: audit-read ${JSON.stringify({ frames: record.frames, characters: record.characters })}\n`);
+    }
+    catch { }
+}
 const TOOL_NAME = /^illustrator_[a-z0-9_]{1,64}$/u;
 export class CallTimingTransport {
     inner;

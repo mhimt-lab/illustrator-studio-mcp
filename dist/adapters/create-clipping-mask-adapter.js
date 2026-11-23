@@ -8,7 +8,6 @@ import { MUTATION_TRANSACTION_SCRIPT } from '../mutation-transaction.js';
 import { boundsSchema, documentContextSchema, mutationAuditSchema } from '../mutation-result-schema-core.js';
 import { assertOperationSafetyAdapterConformance, bindOperationSafetyPlan, canonicalDigest, operationSafetyPolicyToMcpAnnotations, operationSafetyRegistrationSchema, operationSafetyResultSchema, } from '../operation-safety-policy-core.js';
 import { CLIPPING_MASK_HOST_SCRIPT, clipAuditMatches, clipBlockerSchema, clipCmykWithinMeasuredScope, clipLayerStateSchema, clipParentOrderSchema, clipPathSnapshotSchema, expectedContentAfterCreate, sameCanonical, sameMaskAfterCreate, } from './clipping-mask-shared.js';
-import { describeHostVersionScope } from '../host-version-admission.js';
 export const CREATE_CLIPPING_MASK_OPERATION = 'create_clipping_mask';
 export const CREATE_CLIPPING_MASK_VALIDATOR = { kind: CREATE_CLIPPING_MASK_OPERATION, version: 1 };
 const CANONICAL_VERSION = 3;
@@ -658,7 +657,7 @@ function normalizedRequest(input) {
 export const createClippingMaskToolContract = {
     name: 'illustrator_create_clipping_mask',
     title: 'Plan or Create Clipping Mask',
-    description: 'Plan or create a clipping group from adjacent mask/content UUIDs on the same top-level layer. Content may be a PathItem, one supported path clip group, or an upright uniformly scaled image: RGB PNG link in RGB, CMYK TIFF link in CMYK, or embedded RGB/CMYK raster matching its document. Images require an axis-aligned rectangular mask, normal opaque appearance and neither target selected; image release/nesting are unsupported. Other image profiles, CompoundPathItem, text, and sublayers are refused. Illustrator ' + describeHostVersionScope('clipping_mask') + ', foreground only. Plan binds mask paint, image link/matrix/bounds/selection and parent order. Apply echoes expected_mask_before, expected_content_before and expected_parent_order, verifies native structure and unchanged content, and uses the measured inverse when recovery evidence remains valid. Mask paint is cleared; group bounds are not the visible crop. Existing path clips allow RGB or CMYK paint in a CMYK document; nested CMYK remains unsupported.',
+    description: 'Plan or create a clipping group from adjacent mask and content UUIDs on the same top-level layer. Content may be a PathItem, one supported path clip group, or an upright, uniformly scaled image (RGB PNG link in RGB, CMYK TIFF link in CMYK, or embedded raster matching the document). Images need an axis-aligned rectangular mask with normal opaque appearance, and neither target selected; image release and nesting are unsupported. Other image profiles, CompoundPathItem, text, sublayers and nested CMYK are refused. Foreground only. Mask paint is cleared; group bounds are not the visible crop. Apply echoes expected_mask_before, expected_content_before and expected_parent_order.',
     inputSchema,
     publicInputSchema: createClippingMaskPublicInputSchema,
     outputSchema: createClippingMaskResponseSchema,

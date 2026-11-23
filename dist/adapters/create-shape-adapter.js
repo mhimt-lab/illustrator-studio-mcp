@@ -197,6 +197,10 @@ const publicStarSchema = z.strictObject({
         context.addIssue({ code: 'custom', message: 'A star needs an outer radius larger than its inner radius.' });
 });
 export const publicShapeSchema = z.discriminatedUnion('kind', [publicEllipseSchema, publicPolygonSchema, lineSchema, pathSchema, publicStarSchema, curveSchema]);
+export const compactPresetShapeSchema = z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('line') }),
+    z.strictObject({ kind: z.literal('ellipse') }),
+], { error: 'A preset shape is line or ellipse; send other shapes (polygon, star, path, curve) as steps.' });
 const handleSchema = z.strictObject({ left: z.tuple([z.number().finite(), z.number().finite()]), right: z.tuple([z.number().finite(), z.number().finite()]), smooth: z.boolean() });
 export const geometrySchema = z.strictObject({
     closed: z.boolean(),
@@ -947,6 +951,20 @@ function shapeLayerOrder(layer) {
   return order;
 }
 
+/** The order for a preflight that only decides capacity (#954): at most \`limit\` UUIDs from the front. The whole order above is for verify and rollback. */
+function shapeLayerOrderUpTo(layer, limit) {
+  var items = layer.pageItems;
+  var count = items.length;
+  var take = count > limit ? limit : count;
+  var order = [];
+  for (var index = 0; index < take; index++) {
+    var uuid = items[index].uuid;
+    if (typeof uuid !== "string" || uuid.length === 0) throw mutationError("preflight_failed", "A layer item native UUID is unavailable.");
+    order.push(uuid);
+  }
+  return order;
+}
+
 function shapeLayerAncestry(layer) {
   var chain = [];
   var node = layer;
@@ -1032,7 +1050,7 @@ function shapeResolve(forApply) {
   if (params.appearance !== undefined) creationAppearanceValidate(document, context, params.appearance);
   var layer = shapeResolveLayer(document, params.expectedLayerPath);
   var ancestry = shapeLayerAncestry(layer);
-  var order = shapeLayerOrder(layer);
+  var order = shapeLayerOrderUpTo(layer, CREATE_SHAPE_MAX_DIRECT_ITEMS);
   var reference = null;
   if (params.placement !== undefined) {
     var placement = params.placement;
@@ -1057,6 +1075,8 @@ function shapeResolve(forApply) {
       seen[orderKey] = true;
       if (order[o] === placement.referenceUuid) referenceCount++;
     }
+    // The order of a layer at capacity is cut at the capacity (#954), and a plan binds the reference inside it.
+    if (referenceCount !== 1 && order.length >= CREATE_SHAPE_MAX_DIRECT_ITEMS) throw mutationError("preflight_failed", "The layer is at or over its capacity of " + CREATE_SHAPE_MAX_DIRECT_ITEMS + " direct items and the relative reference is not among the first " + CREATE_SHAPE_MAX_DIRECT_ITEMS + ".");
     if (referenceCount !== 1) throw mutationError("preflight_failed", "Relative reference is not uniquely present in the requested parent order.");
   }
   var rect = shapeArtboardRect(document, params.artboardIndex);
@@ -1307,7 +1327,7 @@ function normalizedRequest(input) {
 export const createShapeToolContract = {
     name: 'illustrator_create_shape',
     title: 'Plan or Create Shape',
-    description: `Plan or create one ellipse, regular polygon (${CREATE_SHAPE_MIN_POLYGON_SIDES}-${CREATE_SHAPE_MAX_POLYGON_SIDES} sides), star (${CREATE_SHAPE_MIN_STAR_POINTS}-${CREATE_SHAPE_MAX_STAR_POINTS} points, outer radius larger than inner), straight line, straight-segment path, or curve with explicit direction handles and smooth/corner point types (2-${CREATE_SHAPE_MAX_PATH_POINTS} points, open or closed) on an explicit layer path in artboard-top-left points. Degenerate shapes (zero size, coincident consecutive points or star vertices, closed curves that enclose no area) and self-intersecting straight paths are rejected before any write; curve self-intersection is not checked. Apply creates once, verifies the native UUID, layer order, closed state, anchors, handles, point types and bounds against the plan, and rolls back only its own created item with absence proven. Optional placement creates immediately above/below an unlocked, visible, editable PathItem UUID directly on the requested layer; omitted placement creates at the front. Above/below public P0 passed on 30.8.2. Optional appearance (opacity, fill, stroke) is set and read back in the same apply.`,
+    description: 'Plan or create one ellipse, regular polygon (3-24 sides), star (3-24 points, outer radius larger than inner), straight line, straight-segment path, or curve with explicit direction handles and smooth/corner point types (2-256 points, open or closed) on an explicit layer path in artboard-top-left points. Degenerate shapes (zero size, coincident points, or closed curves enclosing no area) and self-intersecting straight paths are rejected before any write; curve self-intersection is not checked. Optional placement creates just above or below an unlocked, visible, editable PathItem UUID on that layer; omitted placement creates at the front. Optional opacity, fill and stroke are set and read back in the same apply. If verification fails, apply rolls back only the item it created. A layer that holds 128 or more direct items is blocked (layer_item_capacity_exceeded); that plan lists only the first 128 item UUIDs, whatever the layer holds.',
     inputSchema,
     publicInputSchema: createShapePublicInputSchema,
     outputSchema: createShapeResponseSchema,

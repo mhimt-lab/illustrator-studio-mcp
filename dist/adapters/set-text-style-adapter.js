@@ -1,4 +1,6 @@
-import { textResultBytes, textResultSizeMessage, TEXT_RESULT_ADMISSION_BYTES } from './text-result-size.js';
+import { TEXT_STYLE_DELIMITER_SCRIPT, delimiterEffectSchema, delimiterPlanError, textDelimiterRefusal } from './text-style-delimiter-profile.js';
+import { textResultSizeMessage, TEXT_RESULT_ADMISSION_BYTES } from './text-result-size.js';
+import { TEXT_RECORDED_RUNS_SCRIPT, decodeRecordedRuns, recordedRunsTextResultBytes, recordedRunsWireSchema } from './text-recorded-runs.js';
 import { z } from 'zod';
 import { applyCommandIdSchema, canonicalCommandIdSchema } from '../command-id.js';
 import { canonicalSha256 } from '../mutation-canonical.js';
@@ -10,26 +12,31 @@ import { normalizePointTextPublicFillColor, pointTextApplyBlockers, POINT_TEXT_C
 import { POINT_TEXT_MULTILINE_SCRIPT, } from './point-text-multiline.js';
 import { TEXT_ALIGNMENT_MODULE_SCRIPT, assertAlignmentAlone, textAlignmentSchema, setTextStyleSnapshotSchema as recordedStyleSnapshotSchema, } from './text-alignment-profile.js';
 import { TEXT_LEADING_TYPE_MODULE_SCRIPT, assertLeadingTypeAlone, checkLeadingTypeRequest, isLeadingSnapshot, leadingParagraphSpans, leadingParagraphUniform, paragraphStyleRequestSchema, publicParagraphStyleSchema, } from './text-leading-type-profile.js';
-import { RECORDED_ADMITTED_STYLE_FIELDS, RECORDED_PROFILE_NAME, TEXT_RECORDED_MODULE_SCRIPT, assertSizeRepresentable, sameRecordedSnapshots, } from './text-recorded-profile.js';
-import { RECORDED_MULTILINE_PROFILE, TEXT_RECORDED_MULTILINE_SCRIPT, multilineStyleSnapshotSchema as setTextStyleSnapshotSchema, checkRecordedMultilineStyle, hasBreakUnits, isBreakEntry as isParagraphBreak } from './text-recorded-multiline-profile.js';
+import { RECORDED_ADMITTED_STYLE_FIELDS, RECORDED_PROFILE_NAME, TEXT_RECORDED_MODULE_SCRIPT, assertSizeRepresentable, assertTsumeRepresentable, sameRecordedSnapshots, } from './text-recorded-profile.js';
+import { RECORDED_MULTILINE_PROFILE, TEXT_RECORDED_MULTILINE_SCRIPT, multilineStyleSnapshotSchema as fullStyleSnapshotSchema, batchStylePlanSnapshotSchema as fullBatchStylePlanSnapshotSchema, checkRecordedMultilineStyle, emptyParagraphRefusal, hasBreakUnits, isBreakEntry as isParagraphBreak } from './text-recorded-multiline-profile.js';
 import { isRecordedSnapshot as isLegacyRecordedSnapshot } from './text-recorded-profile.js';
 import { validateClusterRange } from './point-text-cluster.js';
 import { textLookupFailureError } from './text-lookup-error.js';
 import { defineBatchStep } from './batch-step-contract.js';
 import { SET_TEXT_STYLE_BATCH_NEXT_CALL, SET_TEXT_STYLE_BATCH_STYLE_FIELDS, batchTextStyleInternal } from './batch-step-next-call.js';
 const isRecordedSnapshot = (snapshot) => isLegacyRecordedSnapshot(snapshot) || snapshot.profile === RECORDED_MULTILINE_PROFILE;
+const setTextStyleSnapshotSchema = recordedRunsWireSchema(fullStyleSnapshotSchema, 'set_text_style');
+const batchStylePlanSnapshotSchema = recordedRunsWireSchema(fullBatchStylePlanSnapshotSchema, 'set_text_style batch plan');
+const batchStyleSnapshotSchema = recordedRunsWireSchema(recordedStyleSnapshotSchema, 'set_text_style batch');
 export const SET_TEXT_STYLE_OPERATION = 'set_text_style';
 export const SET_TEXT_STYLE_VALIDATOR = { kind: SET_TEXT_STYLE_OPERATION, version: 1 };
-const CANONICAL_VERSION = 9;
-const RESULT_SCHEMA_VERSION = 10;
+const CANONICAL_VERSION = 12;
+const RESULT_SCHEMA_VERSION = 13;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 1;
-const ERROR_MAPPING_VERSION = 2;
+const ERROR_MAPPING_VERSION = 3;
+const tsumeSchema = z.number().finite().min(0).max(100);
 const requestedStyleSchema = z.strictObject({
     size: z.number().finite().positive().optional(),
     tracking: z.number().finite().optional(),
     horizontalScale: z.number().finite().positive().optional(),
     verticalScale: z.number().finite().positive().optional(),
+    tsume: tsumeSchema.optional(),
     fillColor: pointTextFillColorSchema.optional(),
     fontPostScriptName: z.string().min(1).max(255).optional(),
     alignment: textAlignmentSchema.optional(),
@@ -39,6 +46,7 @@ const requestedStyleRequestSchema = z.strictObject({
     tracking: z.number().finite().optional(),
     horizontalScale: z.number().finite().positive().optional(),
     verticalScale: z.number().finite().positive().optional(),
+    tsume: tsumeSchema.optional(),
     fillColor: pointTextFillColorRequestSchema.optional(),
     fontPostScriptName: z.string().min(1).max(255).optional(),
     alignment: textAlignmentSchema.optional(),
@@ -48,6 +56,7 @@ const publicStyleSchema = z.strictObject({
     tracking: z.number().finite().optional(),
     horizontal_scale: z.number().finite().positive().optional(),
     vertical_scale: z.number().finite().positive().optional(),
+    tsume: tsumeSchema.optional(),
     fill_color: pointTextPublicFillColorSchema.optional(),
     font_post_script_name: z.string().min(1).max(255).optional(),
     alignment: textAlignmentSchema.optional(),
@@ -76,10 +85,12 @@ export const setTextStylePlanSchema = z.strictObject({
     paragraphStyle: paragraphStyleRequestSchema.optional(),
     before: setTextStyleSnapshotSchema,
     after: setTextStyleSnapshotSchema,
+    delimiterEffect: delimiterEffectSchema.optional(),
     applyBlockedReasonCodes: z.array(blockerSchema),
     confirmationStatus: z.enum(['required', 'confirmed']),
     applyAllowed: z.boolean(),
-}).superRefine((plan, context) => {
+}).superRefine((wirePlan, context) => {
+    const plan = { ...wirePlan, before: decodeRecordedRuns(wirePlan.before), after: decodeRecordedRuns(wirePlan.after) };
     if (plan.start >= plan.end || plan.end > plan.before.characters.length) {
         context.addIssue({ code: 'custom', message: 'A point-text style range must be a non-empty span inside the target.' });
     }
@@ -126,7 +137,7 @@ export const setTextStylePlanSchema = z.strictObject({
     else if (recordedPlan) {
         const admitted = new Set(RECORDED_ADMITTED_STYLE_FIELDS);
         if (plan.paragraphStyle !== undefined || Object.keys(plan.style).some((key) => plan.style[key] !== undefined && !admitted.has(key))) {
-            context.addIssue({ code: 'custom', message: 'A recorded-profile plan admits size, tracking, scales, fill and font only.' });
+            context.addIssue({ code: 'custom', message: 'A recorded-profile plan admits size, tracking, scales, tsume, fill and font only.' });
         }
         if (canonicalSha256(plan.before.attributeRecord) !== canonicalSha256(plan.after.attributeRecord)) {
             context.addIssue({ code: 'custom', message: 'A recorded-profile plan must leave the attribute record unchanged.' });
@@ -135,8 +146,11 @@ export const setTextStylePlanSchema = z.strictObject({
             context.addIssue({ code: 'custom', message: 'A recorded-profile plan binds the observed bounds before and predicts none after.' });
         }
     }
+    const delimiterError = delimiterPlanError(plan);
+    if (delimiterError !== null)
+        context.addIssue({ code: 'custom', message: delimiterError });
     for (let index = 0; index < plan.before.characters.length; index += 1) {
-        if (index >= plan.start && index < plan.end)
+        if (index >= plan.start && index < plan.end || delimiterError === null && plan.delimiterEffect?.offset === index)
             continue;
         if (canonicalSha256(plan.before.characters[index]) !==
             canonicalSha256(plan.after.characters[index])) {
@@ -155,6 +169,8 @@ export const setTextStylePlanSchema = z.strictObject({
         mutableFields.add('horizontalScale');
     if (plan.style.verticalScale !== undefined)
         mutableFields.add('verticalScale');
+    if (plan.style.tsume !== undefined)
+        mutableFields.add('tsume');
     if (plan.style.fillColor !== undefined)
         mutableFields.add('fillColor');
     if (plan.style.fontPostScriptName !== undefined)
@@ -167,6 +183,15 @@ export const setTextStylePlanSchema = z.strictObject({
         const expected = plan.style.alignment === undefined ? 0 : snapshot.characters.filter((entry) => !isParagraphBreak(entry)).length;
         if (recorded !== expected) {
             context.addIssue({ code: 'custom', message: 'A point-text style plan must record alignment exactly when alignment is requested.' });
+            break;
+        }
+    }
+    for (const snapshot of [plan.before, plan.after]) {
+        const units = snapshot.characters.filter((entry) => snapshot.profile === RECORDED_MULTILINE_PROFILE || !isParagraphBreak(entry));
+        const recorded = units.filter((entry) => entry.tsume !== undefined).length;
+        const expected = plan.style.tsume === undefined ? 0 : units.length;
+        if (recorded !== expected) {
+            context.addIssue({ code: 'custom', message: 'A point-text style plan must record tsume exactly when tsume is requested.' });
             break;
         }
     }
@@ -202,6 +227,9 @@ export const setTextStylePlanSchema = z.strictObject({
         if (plan.style.verticalScale !== undefined && afterCharacter.verticalScale !== plan.style.verticalScale) {
             context.addIssue({ code: 'custom', message: 'A point-text style plan must apply the requested vertical scale.' });
         }
+        if (plan.style.tsume !== undefined && afterCharacter.tsume !== plan.style.tsume) {
+            context.addIssue({ code: 'custom', message: 'A point-text style plan must apply the requested tsume.' });
+        }
         if (plan.style.fillColor !== undefined &&
             canonicalSha256(plan.style.fillColor) !==
                 canonicalSha256(afterCharacter.fillColor)) {
@@ -216,6 +244,15 @@ export const setTextStylePlanSchema = z.strictObject({
     if (plan.applyAllowed !== allowed) {
         context.addIssue({ code: 'custom', message: 'Point-text style applyAllowed must require confirmation and no blockers.' });
     }
+});
+const { delimiterEffect: _delimiterEffect, ...batchStylePlanShape } = setTextStylePlanSchema.shape;
+const batchStylePlanSchema = z.strictObject({ ...batchStylePlanShape,
+    before: batchStylePlanSnapshotSchema, after: batchStylePlanSnapshotSchema,
+}).superRefine((plan, context) => {
+    const checked = setTextStylePlanSchema.safeParse(plan);
+    if (!checked.success)
+        for (const issue of checked.error.issues)
+            context.addIssue({ code: 'custom', path: issue.path, message: issue.message });
 });
 const failureSchema = z.strictObject({
     phase: z.enum(['apply', 'verify']),
@@ -337,7 +374,7 @@ export const setTextStyleResultSchema = z.union([
             blockers.push('layer_hidden');
         if (before.layerAncestry.some((ancestor) => ancestor.locked))
             blockers.push('layer_locked');
-        if (textResultBytes(result.plan) > TEXT_RESULT_ADMISSION_BYTES)
+        if (recordedRunsTextResultBytes(result.plan) > TEXT_RESULT_ADMISSION_BYTES)
             blockers.push('result_too_large');
         if (result.plan.confirmationStatus !== 'required' ||
             canonicalSha256(result.plan.applyBlockedReasonCodes) !==
@@ -429,6 +466,7 @@ function normalizePublicInput(input) {
         ...(requested.tracking === undefined ? {} : { tracking: requested.tracking }),
         ...(requested.horizontal_scale === undefined ? {} : { horizontalScale: requested.horizontal_scale }),
         ...(requested.vertical_scale === undefined ? {} : { verticalScale: requested.vertical_scale }),
+        ...(requested.tsume === undefined ? {} : { tsume: requested.tsume }),
         ...(requested.fill_color === undefined
             ? {} : { fillColor: normalizePointTextPublicFillColor(requested.fill_color) }),
         ...(requested.font_post_script_name === undefined
@@ -437,6 +475,7 @@ function normalizePublicInput(input) {
     };
     const paragraphStyle = value.paragraph_style === undefined ? undefined : { leadingType: value.paragraph_style.leading_type };
     assertSizeRepresentable(style.size);
+    assertTsumeRepresentable(style.tsume);
     assertRequestsAnAttribute(style, paragraphStyle);
     assertAlignmentAlone(style);
     assertLeadingTypeAlone(style, paragraphStyle);
@@ -493,8 +532,8 @@ export const SET_TEXT_STYLE_SAFETY = operationSafetyRegistrationSchema.parse({
 });
 export const SET_TEXT_STYLE_SAFETY_IDENTITY = canonicalDigest(SET_TEXT_STYLE_SAFETY);
 function safetyPlan(result, requestDigest, admissionDocumentKey = result.document.key) {
-    const beforeStateHash = canonicalDigest(result.plan.before);
-    const afterStateHash = canonicalDigest(result.plan.after);
+    const beforeStateHash = canonicalDigest(decodeRecordedRuns(result.plan.before));
+    const afterStateHash = canonicalDigest(decodeRecordedRuns(result.plan.after));
     const changeSetHash = canonicalDigest({ targetUuid: result.plan.targetUuid, start: result.plan.start,
         end: result.plan.end, style: result.plan.style,
         ...(result.plan.paragraphStyle === undefined ? {} : { paragraphStyle: result.plan.paragraphStyle }),
@@ -751,6 +790,7 @@ function styleWrite(target, start, end, values) {
     if (values.tracking !== undefined) attributes.tracking = values.tracking;
     if (values.horizontalScale !== undefined) attributes.horizontalScale = values.horizontalScale;
     if (values.verticalScale !== undefined) attributes.verticalScale = values.verticalScale;
+    if (values.tsume !== undefined) attributes.Tsume = values.tsume;
     if (values.fillColor !== undefined) attributes.fillColor = pointTextNativeFillColor(values.fillColor);
     if (values.fontPostScriptName !== undefined) {
       attributes.textFont = app.textFonts.getByName(values.fontPostScriptName);
@@ -850,6 +890,7 @@ export const STYLE_RECORDED_BASE_PATCHES = [
     [`function styleSame(left, right) {
   return pointTextGroupSame(left, right);
 }`, `function styleSame(left, right) {
+  left = styleRunsDecode(left); right = styleRunsDecode(right);
   if (left && right && left.profile === STYLE_V3_PROFILE && right.profile === STYLE_V3_PROFILE) return styleV3Same(left, right);
   return pointTextGroupSame(left, right);
 }`, 1],
@@ -860,12 +901,14 @@ export const STYLE_RECORDED_BASE_PATCHES = [
 `, 1],
     [`"Rollback did not restore the exact before point-text state."`, `"Rollback did not restore the exact before point-text state." + styleV3DiffSuffix()`, 1],
     [`  try { current = styleResolve(true); }`, `  try { STYLE_V3_STATE.revalidating = true; try { current = styleResolve(true); } finally { STYLE_V3_STATE.revalidating = false; } }`, 1],
+    [`rollbackEvidence.restoredSnapshot = current;`, `rollbackEvidence.restoredSnapshot = styleRunsEncode(current);`, 1],
+    [`rollbackEvidence.restoredSnapshot = restored;`, `rollbackEvidence.restoredSnapshot = styleRunsEncode(restored);`, 1],
 ];
 const STYLE_RECORDED_BATCH_PATCHES = [
     ...STYLE_RECORDED_BASE_PATCHES,
     [`  if (!styleSame(current, stylePredictAfter(target, preflight.before))) {`, `  if (!styleV3RollbackOk(current, target, preflight.before)) {`, 1],
 ];
-export const SET_TEXT_STYLE_BATCH_MODULE_SCRIPT = TEXT_RECORDED_MODULE_SCRIPT + patchedModule(SET_TEXT_STYLE_MODULE_SCRIPT, STYLE_RECORDED_BATCH_PATCHES);
+export const SET_TEXT_STYLE_BATCH_MODULE_SCRIPT = TEXT_RECORDED_MODULE_SCRIPT + TEXT_RECORDED_RUNS_SCRIPT + patchedModule(SET_TEXT_STYLE_MODULE_SCRIPT, STYLE_RECORDED_BATCH_PATCHES);
 const batchStyleUuidSchema = z.string().min(1).max(255);
 const batchStyleRangeShape = {
     start: z.number().int().safe().nonnegative(),
@@ -878,6 +921,12 @@ const batchStyleRgbChannels = {
     green: z.number().finite().min(0).max(255),
     blue: z.number().finite().min(0).max(255),
 };
+const batchStyleCmykChannels = {
+    cyan: z.number().finite().min(0).max(100),
+    magenta: z.number().finite().min(0).max(100),
+    yellow: z.number().finite().min(0).max(100),
+    black: z.number().finite().min(0).max(100),
+};
 const oneStyleAttribute = (key, schema) => z.strictObject({ [key]: schema });
 const BATCH_STYLE = SET_TEXT_STYLE_BATCH_STYLE_FIELDS;
 const batchPublicStyle = z.union([
@@ -885,14 +934,20 @@ const batchPublicStyle = z.union([
     oneStyleAttribute('tracking', batchStyleTracking),
     oneStyleAttribute('horizontal_scale', batchStylePositive),
     oneStyleAttribute('vertical_scale', batchStylePositive),
-    oneStyleAttribute('fill_color', z.strictObject(batchStyleRgbChannels)),
+    oneStyleAttribute('fill_color', z.union([
+        z.strictObject(batchStyleRgbChannels),
+        z.strictObject({ model: z.literal('cmyk'), ...batchStyleCmykChannels }),
+    ])),
 ]);
 const batchInternalStyle = z.union([
     oneStyleAttribute(BATCH_STYLE.size, batchStylePositive),
     oneStyleAttribute(BATCH_STYLE.tracking, batchStyleTracking),
     oneStyleAttribute(BATCH_STYLE.horizontal_scale, batchStylePositive),
     oneStyleAttribute(BATCH_STYLE.vertical_scale, batchStylePositive),
-    oneStyleAttribute(BATCH_STYLE.fill_color, z.strictObject({ model: z.literal('rgb'), ...batchStyleRgbChannels })),
+    oneStyleAttribute(BATCH_STYLE.fill_color, z.discriminatedUnion('model', [
+        z.strictObject({ model: z.literal('rgb'), ...batchStyleRgbChannels }),
+        z.strictObject({ model: z.literal('cmyk'), ...batchStyleCmykChannels }),
+    ])),
 ]);
 const batchPublicStylePlan = z.strictObject({
     operation: z.literal(SET_TEXT_STYLE_OPERATION), target_uuid: batchStyleUuidSchema, ...batchStyleRangeShape,
@@ -911,12 +966,12 @@ export const setTextStyleBatchStep = defineBatchStep({
     recipeAllowed: true,
     publicPlan: batchPublicStylePlan,
     publicApply: z.strictObject({ ...batchPublicStylePlan.shape,
-        expected_before: recordedStyleSnapshotSchema, confirmed_after: recordedStyleSnapshotSchema }),
+        expected_before: batchStyleSnapshotSchema, confirmed_after: batchStyleSnapshotSchema }),
     internalPlan: batchInternalStylePlan,
     internalApply: z.strictObject({ ...batchInternalStylePlan.shape,
-        expectedBefore: recordedStyleSnapshotSchema, confirmedAfter: recordedStyleSnapshotSchema }),
-    planSchema: setTextStylePlanSchema,
-    snapshotSchema: recordedStyleSnapshotSchema,
+        expectedBefore: batchStyleSnapshotSchema, confirmedAfter: batchStyleSnapshotSchema }),
+    planSchema: batchStylePlanSchema,
+    snapshotSchema: batchStyleSnapshotSchema,
     normalize: (step) => {
         const style = (batchTextStyleInternal(step.style) ?? {});
         if ('size' in style)
@@ -950,7 +1005,21 @@ export const setTextStyleBatchStep = defineBatchStep({
         paramFields: ['start', 'end', 'style'],
     },
 });
-export const SET_TEXT_STYLE_PRODUCT_MODULE_SCRIPT = TEXT_RECORDED_MODULE_SCRIPT + TEXT_ALIGNMENT_MODULE_SCRIPT + TEXT_RECORDED_MULTILINE_SCRIPT
+const STYLE_RUNS_ADMIT_SCRIPT = `
+function styleRunsAdmitPlan(plan) {
+  if (plan.before.profile !== STYLE_V3_PROFILE) return textResultAdmitPlan(plan);
+  var wire = styleRunsPlan(plan);
+  var bytes = textResultBytes(wire) - Math.max(textResultJsonBytes(wire.before), textResultJsonBytes(wire.after))
+    + Math.max(textResultJsonBytes(plan.before), textResultJsonBytes(plan.after));
+  if (bytes > TEXT_RESULT_ADMISSION_BYTES) {
+    plan.applyBlockedReasonCodes.push("result_too_large");
+    plan.applyAllowed = false;
+    if (params.apply === true) throw new Error("result_too_large: estimated " + bytes + " UTF-8 bytes; limit " + TEXT_RESULT_ADMISSION_BYTES + ". Split the range or frame.");
+  }
+  return plan;
+}
+`;
+export const SET_TEXT_STYLE_PRODUCT_MODULE_SCRIPT = TEXT_RECORDED_MODULE_SCRIPT + TEXT_ALIGNMENT_MODULE_SCRIPT + TEXT_RECORDED_RUNS_SCRIPT + STYLE_RUNS_ADMIT_SCRIPT + TEXT_RECORDED_MULTILINE_SCRIPT + TEXT_STYLE_DELIMITER_SCRIPT
     + patchedModule(TEXT_LEADING_TYPE_MODULE_SCRIPT, [[`  if (params.paragraphStyle === undefined) return styleSame(current, stylePredictAfter(target, before));`,
             `  if (params.paragraphStyle === undefined) return styleV3RollbackOk(current, target, before);`, 1]])
     + patchedModule(SET_TEXT_STYLE_MODULE_SCRIPT, [
@@ -1017,7 +1086,8 @@ function styleSnapshotRaw(document, target, expectedUuid) {
   return {`, `function stylePlan(preflight) {
   var plan = stylePlanCore(preflight);
   if (params.paragraphStyle !== undefined) plan.paragraphStyle = params.paragraphStyle;
-  return textResultAdmitPlan(plan);
+  styleDelimiterEffect(plan);
+  return styleRunsAdmitPlan(plan);
 }
 
 function stylePlanCore(preflight) {
@@ -1026,20 +1096,25 @@ function stylePlanCore(preflight) {
   return preflight.target;`, `  if (params.paragraphStyle !== undefined) styleLeadingForward(preflight.target, preflight.before);
   else styleWrite(preflight.target, params.start, params.end, params.style);
   return preflight.target;`, 1],
-        [`  if (!styleSame(actual, plan.after)) {`, `  if (!styleSameAfter(actual, plan.after)) {`, 1],
+        [`  if (!styleSame(actual, plan.after)) {`, `  if (!styleSameAfter(actual, plan.after) || !styleDelimiterVerify(plan.before, actual)) {`, 1],
         [`function styleRestore(target, before) {
 `, `function styleRestore(target, before) {
   if (params.paragraphStyle !== undefined) { styleLeadingRestore(target, before); return; }
 `, 1],
         [`  if (!styleSame(current, stylePredictAfter(target, preflight.before))) {`, `  if (!styleRollbackAcceptable(current, target, preflight.before)) {`, 1],
+        [`  return styleSame(restored, preflight.before)
+    ? { status: "verified" }`, `  if (styleDelimiterBoundary(preflight.before) && (!styleSame(restored, preflight.before) || !styleDelimiterRestored(preflight.before)))
+    return { status: "indeterminate", message: "The delimiter inverse did not restore every recorded attribute." };
+  return styleSame(restored, preflight.before)
+    ? { status: "verified" }`, 1],
         [`function styleSnapshotRaw(document, target, expectedUuid) {
 `, `function styleSnapshotRaw(document, target, expectedUuid) {
-  if (recordedMultilineStyleSelected(target)) return recordedMultilineSnapshot(document, target, expectedUuid);
+  if (recordedMultilineStyleSelected(target)) return styleDelimiterSnapshot(document, target, expectedUuid);
   if (String(target.contents).indexOf("\\x03") >= 0) throw mutationError("preflight_failed", "multiline_style_unsupported: alignment and paragraph_style with U+0003 are outside slice 1.");
 `, 1],
         [`function stylePredictAfter(target, before) {
 `, `function stylePredictAfter(target, before) {
-  if (before.profile === RECORDED_MULTILINE_PROFILE) return recordedMultilinePredictStyle(target, before);
+  if (before.profile === RECORDED_MULTILINE_PROFILE) return styleDelimiterPredict(before, recordedMultilinePredictStyle(target, before));
 `, 1],
         [`function styleSame(left, right) {
 `, `function styleSame(left, right) {
@@ -1050,7 +1125,7 @@ function stylePlanCore(preflight) {
   if (before.profile === RECORDED_MULTILINE_PROFILE) { recordedMultilineRestoreStyle(target, before); return; }
 `, 1],
         [`  pointTextMultilineAssertStyle(before, params.start, params.end, params.style);`,
-            `  if (before.profile === RECORDED_MULTILINE_PROFILE) recordedMultilineAssertStyle(before, params.start, params.end, params.style);
+            `  if (before.profile === RECORDED_MULTILINE_PROFILE) { recordedMultilineAssertStyle(before, params.start, params.end, params.style); styleDelimiterAssert(before); }
   else pointTextMultilineAssertStyle(before, params.start, params.end, params.style);`, 1],
         [`pointTextCharacters(target)[index]`, `(recordedMultilineHasBreak(String(target.contents)) ? target.textRange.characters : pointTextCharacters(target))[index]`, 2],
     ]);
@@ -1082,8 +1157,8 @@ if (app.documents.length > 0 && app.activeDocument === styleExecution.preflight.
 }
 var result = { operation: "set_text_style",
   applied: styleExecution.transaction.state === "verified",
-  document: styleDocument, plan: styleExecution.plan, transaction: styleExecution.transaction };
-if (styleExecution.transaction.state === "verified") result.postcondition = styleExecution.value;
+  document: styleDocument, plan: styleRunsPlan(styleExecution.plan), transaction: styleExecution.transaction };
+if (styleExecution.transaction.state === "verified") result.postcondition = styleRunsEncode(styleExecution.value);
 `;
 export const SET_TEXT_STYLE_SCRIPT = `${MUTATION_TRANSACTION_SCRIPT}
 ${POINT_TEXT_SNAPSHOT_SCRIPT}
@@ -1104,13 +1179,14 @@ export const SET_TEXT_STYLE_ADAPTER_IDENTITY = mutationAdapterIdentity({
 function normalizedRequest(input) {
     const request = internalInputSchema.parse(input);
     assertSizeRepresentable(request.style.size);
+    assertTsumeRepresentable(request.style.tsume);
     assertRequestsAnAttribute(request.style, request.paragraphStyle);
     assertAlignmentAlone(request.style);
     assertLeadingTypeAlone(request.style, request.paragraphStyle);
     if (request.apply) {
         const rejection = checkTextStyleRequest(request.expectedBefore, request.start, request.end, request.style)
             ?? (request.paragraphStyle === undefined ? null
-                : checkParagraphStyleRequest(request.expectedBefore, request.start, request.end, request.paragraphStyle.leadingType));
+                : checkParagraphStyleRequest(decodeRecordedRuns(request.expectedBefore), request.start, request.end, request.paragraphStyle.leadingType));
         if (rejection !== null) {
             throw new Error(`Point-text style request is unsupported: ${rejection.reason}.`);
         }
@@ -1122,8 +1198,8 @@ function normalizedRequest(input) {
             targetUuid: request.targetUuid, start: request.start, end: request.end, style: request.style,
             ...(request.paragraphStyle === undefined ? {} : { paragraphStyle: request.paragraphStyle }),
             before: request.expectedBefore, after: request.confirmedAfter };
-        if (textResultBytes(plan) > TEXT_RESULT_ADMISSION_BYTES)
-            throw new Error(textResultSizeMessage(plan));
+        if (recordedRunsTextResultBytes(plan) > TEXT_RESULT_ADMISSION_BYTES)
+            throw new Error(textResultSizeMessage(plan, recordedRunsTextResultBytes(plan)));
     }
     const digestRequest = 'commandId' in request
         ? (({ commandId: _commandId, ...rest }) => rest)(request)
@@ -1137,22 +1213,7 @@ function normalizedRequest(input) {
 export const setTextStyleToolContract = {
     name: 'illustrator_set_text_style',
     title: 'Plan or Set Point-Text Character Style',
-    description: 'Plan or apply measured character attributes — size, tracking, horizontal and vertical scale, '
-        + 'explicit fill (RGB `{red, green, blue}`, CMYK `{model: "cmyk", cyan, magenta, yellow, black}` or Gray '
-        + '`{model: "gray", gray}`; RGB only in an RGB document, CMYK only in a CMYK document, Gray in either, '
-        + 'and a mismatch is refused rather than converted) and installed font — to a bounded UTF-16 range of a '
-        + 'POINTTEXT frame (one line, or up to 32 host items separated by CR or U+0003: the range stays inside one item) in a layer or in unlocked, visible groups (plain or clipped), bound by explicit document key and native UUID. Everything outside the '
-        + 'range and every attribute that was not requested stay unchanged; on auto-leading characters, `leading` follows `size` using that host item’s amount. '
-        + 'Ranges that split a character or include a delimiter are refused. `alignment` (`center` or `roman_baseline`) is a request of its own, never combined with another attribute, for single-line text '
-        + 'on characters whose applied character style is the standard one (any other is refused with a reason). `paragraph_style.leading_type` '
-        + '(`top_to_top` or `bottom_to_bottom`) is likewise a request of its own: it selects exactly one whole paragraph of a layer-direct frame '
-        + 'with two or more paragraphs, whose characters share every attribute under the standard character and paragraph styles; it never '
-        + 'writes `leading` or `autoLeading` (a top_to_top change resets the paragraph with the standard paragraph style and writes the before '
-        + 'auto leading, size and leading back; the verify compares every character and paragraph, the bounds are observed, and a rollback is also compared on the bounds). Apply performs exact compare-and-set over a per-character fingerprint, native read-back '
-        + 'verification, and a per-character verified inverse. Size, tracking, scales, fill and font need no default typography on a single line or within CR/U+0003 text: '
-        + 'every other attribute (language, kinsoku, auto leading, spacing, kerning, ...) is recorded and compared before and after; a collateral change prevents verification, '
-        + 'and what was never measured rests on that comparison alone. A size with more than five decimals is refused.'
-        + ' Every frame also requires an estimated apply result <=209715 UTF-8 bytes (80% of 262144): about 200 units with short font metadata (180 with CR/U+0003), fewer with longer metadata or large enclosing groups. Split the range or frame when refused (result_too_large).',
+    description: 'Plan or apply size, tracking, horizontal and vertical scale, tsume (0-100), explicit fill, or installed font on a bounded UTF-16 range of a point-text frame (one line, or up to 32 items separated by CR or U+0003; a range cannot split a character or include a delimiter) in a layer or unlocked, visible group, bound by document key and native UUID. Fill must match the document color space (RGB, CMYK or Gray); a mismatch is refused, not converted. When the range ends immediately before CR or U+0003, every range character and that delimiter must share all recorded attributes; the plan reports the delimiter change and its before/after attributes. A differing or unreadable delimiter is refused before writing. All other characters and unrequested attributes stay unchanged and are compared before and after. `alignment` (`center` or `roman_baseline`) and `paragraph_style.leading_type` (`top_to_top` or `bottom_to_bottom`) are separate requests, not combined with other attributes. A size with more than five decimals is refused. A result over the apply size limit is refused with result_too_large: split the range or frame.',
     inputSchema,
     publicInputSchema: setTextStylePublicInputSchema,
     outputSchema: setTextStyleResponseSchema,
@@ -1198,6 +1259,12 @@ export function createSetTextStyleAdapter() {
             if (detail?.code === 'OBJECT_NOT_FOUND') {
                 return new Error(`No PageItem with UUID ${JSON.stringify(detail.uuid ?? '')} exists in the bound document.`);
             }
+            const delimiter = textDelimiterRefusal(detail);
+            if (delimiter !== null)
+                return delimiter;
+            const emptyStructure = emptyParagraphRefusal(detail);
+            if (emptyStructure !== null)
+                return emptyStructure;
             if (detail?.code === 'TEXT_STYLE_APPLY_BLOCKED') {
                 return new Error(`Point-text style edit is blocked: ${(detail.reasonCodes ?? []).join(', ') || 'unknown reason'}.`);
             }

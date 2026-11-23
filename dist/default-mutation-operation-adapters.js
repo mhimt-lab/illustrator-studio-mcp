@@ -1,4 +1,11 @@
 import { createUpdateArtboardAdapter } from './adapters/update-artboard-adapter.js';
+import { createDuplicateArtboardAdapter } from './adapters/duplicate-artboard-adapter.js';
+import { createInsertVerticalSpaceAdapter } from './adapters/insert-vertical-space-adapter.js';
+import { createScaleArtworkAdapter } from './adapters/scale-artwork-adapter.js';
+import { createApplyDatasetAdapter } from './adapters/apply-dataset-adapter.js';
+import { createBindVariableAdapter } from './adapters/bind-variable-adapter.js';
+import { createCreateDatasetAdapter } from './adapters/create-dataset-adapter.js';
+import { createUpdateDatasetAdapter } from './adapters/update-dataset-adapter.js';
 import { MutationOperationAdapterRegistry } from './mutation-operation-adapter.js';
 import { createRectangleAdapter } from './adapters/create-rectangle-adapter.js';
 import { createSetPathAppearanceAdapter } from './adapters/set-path-appearance-adapter.js';
@@ -44,22 +51,27 @@ import { createSetAreaTextColumnsAdapter } from './adapters/set-area-text-column
 import { createApplyPathfinderAdapter } from './adapters/apply-pathfinder-adapter.js';
 import { createDeleteObjectsAdapter } from './adapters/delete-objects-adapter.js';
 import { createImportVectorArtworkAdapter } from './adapters/import-vector-artwork-adapter.js';
+import { createNormalizeStrokeWidthsAdapter } from './adapters/normalize-stroke-widths-adapter.js';
+import { createReplaceRgbBlackAdapter } from './adapters/replace-rgb-black-adapter.js';
 import { createSetStrokeStyleAdapter } from './adapters/set-stroke-style-adapter.js';
-export function createCanonicalMutationOperationRegistry() {
+import { createSetTextCompositionAdapter } from './adapters/set-text-composition-adapter.js';
+export function createCanonicalMutationOperationRegistry(variants = {}) {
     return new MutationOperationAdapterRegistry()
         .register(createUpdateArtboardAdapter())
         .register(createRectangleAdapter())
         .register(createSwatchResourceAdapter())
         .register(createSetPathAppearanceAdapter())
+        .register(createNormalizeStrokeWidthsAdapter())
+        .register(createReplaceRgbBlackAdapter())
         .register(createTransformObjectAdapter())
-        .register(createDuplicateObjectAdapter())
+        .register(variants.duplicateObject?.() ?? createDuplicateObjectAdapter())
         .register(createGroupObjectsAdapter())
         .register(createMoveObjectToLayerAdapter())
         .register(createReplacePointTextAdapter())
         .register(createPointTextAdapter())
         .register(createAreaTextAdapter())
         .register(createReplaceTextRangeAdapter())
-        .register(createReplaceAreaTextRangeAdapter())
+        .register((variants.replaceAreaTextRange ?? createReplaceAreaTextRangeAdapter)())
         .register(createSetTextStyleAdapter())
         .register(createSetTextOrientationAdapter())
         .register(createSetNoBreakAdapter())
@@ -68,16 +80,16 @@ export function createCanonicalMutationOperationRegistry() {
         .register(createUpdateCharacterStyleAdapter())
         .register(createReplaceFontAdapter())
         .register(createReplacePointTextBatchAdapter())
-        .register(createMutateBatchAdapter())
+        .register((variants.mutateBatch ?? createMutateBatchAdapter)())
         .register(createCreateBatchAdapter())
         .register(createShapeAdapter())
         .register(createAlignObjectsAdapter())
         .register(createSetStackingOrderAdapter())
-        .register(createPlaceImageAdapter())
-        .register(createRelinkImageAdapter())
+        .register((variants.placeImage ?? createPlaceImageAdapter)())
+        .register((variants.relinkImage ?? createRelinkImageAdapter)())
         .register(createEmbedImageAdapter())
         .register(createSetObjectStateAdapter())
-        .register(createCreateLayerAdapter())
+        .register(variants.createLayer?.() ?? createCreateLayerAdapter())
         .register(createSetLayerStateAdapter())
         .register(createReorderLayerAdapter())
         .register(createEditPathPointsAdapter())
@@ -92,7 +104,15 @@ export function createCanonicalMutationOperationRegistry() {
         .register(createCreateTrimMarksAdapter())
         .register(createCreateBarcodeAdapter())
         .register(createCreateQrCodeAdapter())
-        .register(createSetStrokeStyleAdapter())
+        .register((variants.setStrokeStyle ?? createSetStrokeStyleAdapter)())
+        .register(createSetTextCompositionAdapter())
+        .register(createDuplicateArtboardAdapter())
+        .register(createInsertVerticalSpaceAdapter())
+        .register(createScaleArtworkAdapter())
+        .register(createApplyDatasetAdapter())
+        .register(createBindVariableAdapter())
+        .register(createCreateDatasetAdapter())
+        .register(createUpdateDatasetAdapter())
         .seal();
 }
 export function defaultMutationOperationRegistry() {

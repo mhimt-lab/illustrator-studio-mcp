@@ -493,15 +493,16 @@ function charStyleSnapshot(document, target, expectedUuid) {
   if (!textRange || typeof textRange.length !== "number" || textRange.length < 1) {
     throw mutationError("preflight_failed", "Target native text-run state is unavailable.");
   }
+  var paragraphProfile = pointTextParagraphProfile(textRange);
   return {
     uuid: target.uuid,
     type: target.typename,
     kind: "TextType.POINTTEXT",
-    profile: POINT_TEXT_PROFILE,
+    profile: paragraphProfile.name,
     frameShape: pointTextFrameShape(target),
     storyFrameCount: 1,
     manualKerning: "none",
-    tabStopCount: pointTextParagraphState(textRange),
+    tabStopCount: pointTextParagraphState(textRange, paragraphProfile),
     justification: pointTextSupportedJustification(textRange.paragraphAttributes.justification),
     characters: pointTextCharacterFingerprints(target),
     frame: pointTextFrameState(target),
@@ -1030,24 +1031,7 @@ function normalizedRequest(input) {
 export const applyCharacterStyleToolContract = {
     name: 'illustrator_apply_character_style',
     title: 'Plan or Apply an Existing Named Character Style',
-    description: 'Plan or apply one existing named character style to a bounded UTF-16 range of a single-line '
-        + 'layer-direct POINTTEXT frame, bound by explicit document key, native UUID and the exact style resource '
-        + 'as `illustrator_list_text_styles` reported it. The style is only read: this tool never creates or edits '
-        + 'a style resource, and it refuses a name that does not resolve to exactly one character style, a style '
-        + 'that defines an attribute outside the measured point-text profile, a missing font, and a style that '
-        + 'defines any paint. A style whose fill is undefined (it reads as `none`; every style made by '
-        + '`illustrator_create_character_style` is one) is accepted only when every character in the range is filled '
-        + 'rgb(0,0,0), or, in a CMYK document, CMYK text whose fill already equals the default character style fill '
-        + '(such a style resets the fill to that default, so only these cases leave it unchanged); any other fill is '
-        + 'refused. Only the attributes the style actually defines may move, plus `leading`, '
-        + 'which auto leading derives from the size; everything else, and every character outside the range, stays '
-        + 'unchanged. The plan also binds the one named character style each character reports as applied '
-        + '(`appliedCharacterStyles`): the range takes the style, every other character keeps its own, and a character '
-        + 'that reports none, several, or a style name that does not resolve uniquely is refused. Apply performs exact '
-        + 'compare-and-set over the per-character fingerprint, the applied styles and the style resource, native '
-        + 'read-back verification (a mismatch names the first differing field), and a measured per-character verified '
-        + 'inverse that re-applies each character\'s prior style and writes its values back; rollback is verified only '
-        + 'when the values and the applied styles both match the before state. Paragraph styles are read-only here.',
+    description: 'Plan or apply one existing named character style to a bounded UTF-16 range of a single-line, layer-direct POINTTEXT frame, bound by expected_document_key, native UUID and the exact style resource from illustrator_list_text_styles. The style is only read; this tool never creates or edits a style. It refuses a name that does not resolve to exactly one character style, a style that defines any paint, an attribute outside the measured point-text profile, and a missing font. A style with undefined fill is accepted only where the fill stays unchanged. Only attributes the style defines move, plus auto leading; other attributes and characters outside the range stay unchanged. Apply uses compare-and-set and native read-back, with a verified inverse for rollback. Paragraph styles are read-only here.',
     inputSchema,
     publicInputSchema: applyCharacterStylePublicInputSchema,
     outputSchema: applyCharacterStyleResponseSchema,

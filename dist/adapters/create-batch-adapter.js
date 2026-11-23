@@ -9,18 +9,21 @@ import { normalizePointTextPublicFillColor, POINT_TEXT_JUSTIFICATIONS, POINT_TEX
 import { CREATE_POINT_TEXT_MAX_DIRECT_ITEMS, CREATE_POINT_TEXT_MODULE_SCRIPT, CREATE_POINT_TEXT_OPERATION, } from './create-point-text-adapter.js';
 import { CREATE_RECTANGLE_MODULE_SCRIPT } from './create-rectangle/jsx.js';
 import { CREATION_APPEARANCE_MODULE_SCRIPT, creationAppearanceMatches, creationAppearanceSchema, creationAppearanceStateSchema, } from './create-appearance.js';
-import { CREATE_SHAPE_MODULE_SCRIPT, CREATE_SHAPE_OPERATION, createShapeShapeSchema, geometrySchema as shapeGeometrySchema, deriveShapeGeometry, geometryWithinTolerance, normalizePublicShape, publicShapeSchema, } from './create-shape-adapter.js';
+import { CREATE_SHAPE_MODULE_SCRIPT, CREATE_SHAPE_OPERATION, compactPresetShapeSchema, createShapeShapeSchema, geometrySchema as shapeGeometrySchema, deriveShapeGeometry, geometryWithinTolerance, normalizePublicShape, publicShapeSchema, } from './create-shape-adapter.js';
 import { RECTANGLE_BOUNDS_PRECISION_DIGITS } from './create-rectangle/domain.js';
+import { SNAPSHOT_SHA256_PATTERN } from '../snapshot-ref-cache.js';
+import { SNAPSHOT_RESULT_SIZE_SCRIPT } from './snapshot-result-size.js';
+import { CREATE_BATCH_RESULT_ADMISSION_BYTES, CREATE_BATCH_RESULT_SIZE_SCRIPT, createBatchResultBytes } from './create-batch-result-size.js';
 export const CREATE_BATCH_OPERATION = 'create_batch';
 export const CREATE_BATCH_VALIDATOR = { kind: CREATE_BATCH_OPERATION, version: 1 };
 export const CREATE_BATCH_MIN_STEPS = 2;
-export const CREATE_BATCH_MAX_STEPS = 16;
+export const CREATE_BATCH_MAX_STEPS = 64;
 export const CREATE_BATCH_MAX_TEXT_CODE_UNITS = 4_000;
 export const CREATE_BATCH_MAX_SHAPE_ANCHORS = 256;
 export const CREATE_BATCH_MAX_LAYER_ITEMS = CREATE_POINT_TEXT_MAX_DIRECT_ITEMS;
 export const CREATE_RECTANGLE_OPERATION = 'create_rectangle';
 const CANONICAL_VERSION = 2;
-const RESULT_SCHEMA_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 3;
 const CLASSIFIER_VERSION = 1;
 const CONFORMANCE_VERSION = 2;
 const ERROR_MAPPING_VERSION = 1;
@@ -34,6 +37,7 @@ export const CREATE_BATCH_BLOCKERS = [
     'layer_locked',
     'ancestor_locked',
     'layer_item_capacity_exceeded',
+    'result_too_large',
 ];
 const blockerSchema = z.enum(CREATE_BATCH_BLOCKERS);
 function sameCanonical(left, right) {
@@ -197,20 +201,127 @@ function normalizeStep(step) {
         ...(step.appearance === undefined ? {} : { appearance: step.appearance }),
     };
 }
+export const createBatchStepsInputSchema = z.array(publicStepSchema).min(CREATE_BATCH_MIN_STEPS).max(CREATE_BATCH_MAX_STEPS)
+    .superRefine((steps, context) => refineSteps(steps.map(normalizeStep), context));
+const COMPACT_INDEX_MESSAGE = `A preset or target is named by its position in presets or targets (0 to ${CREATE_BATCH_MAX_STEPS - 1}).`;
+const compactIndexSchema = z.number({ error: COMPACT_INDEX_MESSAGE }).int({ error: COMPACT_INDEX_MESSAGE })
+    .nonnegative({ error: COMPACT_INDEX_MESSAGE }).max(CREATE_BATCH_MAX_STEPS - 1, { error: COMPACT_INDEX_MESSAGE });
+const compactTargetSchema = z.strictObject(publicStepCommon);
+const compactPresetSchema = z.discriminatedUnion('operation', [
+    z.strictObject({ operation: z.literal(CREATE_POINT_TEXT_OPERATION), style: publicStyleSchema }),
+    z.strictObject({ operation: z.literal(CREATE_RECTANGLE_OPERATION), name: rectangleNameSchema.optional(),
+        appearance: creationAppearanceSchema.optional() }),
+    z.strictObject({ operation: z.literal(CREATE_SHAPE_OPERATION), shape: compactPresetShapeSchema, name: rectangleNameSchema.optional(),
+        appearance: creationAppearanceSchema.optional() }),
+]);
+const compactRowSchema = z.tuple([compactIndexSchema, compactIndexSchema], z.union([z.number().finite(), z.string()]));
+const compactPresetsSchema = z.array(compactPresetSchema).min(1).max(CREATE_BATCH_MAX_STEPS);
+const compactTargetsSchema = z.array(compactTargetSchema).min(1).max(CREATE_BATCH_MAX_STEPS);
+const compactRowsSchema = z.array(compactRowSchema).min(CREATE_BATCH_MIN_STEPS).max(CREATE_BATCH_MAX_STEPS);
+const stepsRefSchema = z.string().regex(SNAPSHOT_SHA256_PATTERN);
+function rowColumns(preset) {
+    if (preset.operation === CREATE_POINT_TEXT_OPERATION)
+        return ['x', 'y', 'contents'];
+    if (preset.operation === CREATE_RECTANGLE_OPERATION)
+        return ['x', 'y', 'width', 'height'];
+    return preset.shape.kind === 'line' ? ['x1', 'y1', 'x2', 'y2'] : ['x', 'y', 'width', 'height'];
+}
+const presetLabel = (preset) => preset.operation === CREATE_SHAPE_OPERATION ? `${preset.operation} ${preset.shape.kind}` : preset.operation;
+function rowStep(forms, row) {
+    const [presetIndex, targetIndex, ...values] = row;
+    const preset = forms.presets[presetIndex];
+    const target = forms.targets[targetIndex];
+    const common = { expected_layer_path: [...target.expected_layer_path], artboard_index: target.artboard_index };
+    const [a, b, c, d] = values;
+    if (preset.operation === CREATE_POINT_TEXT_OPERATION) {
+        return { operation: preset.operation, ...common, anchor: [a, b], contents: c, style: structuredClone(preset.style) };
+    }
+    const extras = {
+        ...(preset.name === undefined ? {} : { name: preset.name }),
+        ...(preset.appearance === undefined ? {} : { appearance: structuredClone(preset.appearance) }),
+    };
+    if (preset.operation === CREATE_RECTANGLE_OPERATION)
+        return { operation: preset.operation, ...common, x: a, y: b, width: c, height: d, ...extras };
+    const shape = preset.shape.kind === 'line' ? { kind: 'line', from: [a, b], to: [c, d] } : { kind: 'ellipse', x: a, y: b, width: c, height: d };
+    return { operation: preset.operation, ...common, shape, ...extras };
+}
+export function expandCreateBatchRows(forms) {
+    return forms.rows.map((row) => rowStep(forms, row));
+}
+function refineForms(apply) {
+    return (value, context) => {
+        const issue = (message, path = []) => context.addIssue({ code: 'custom', path, message });
+        const compact = ['presets', 'targets', 'rows'].filter((key) => value[key] !== undefined);
+        if (compact.length > 0 && compact.length < 3) {
+            issue('presets, targets and rows are sent together.');
+            return;
+        }
+        const forms = Number(value.steps !== undefined) + Number(compact.length === 3) + Number(value.steps_sha256 !== undefined);
+        if (forms !== 1) {
+            issue(apply ? 'Send exactly one of steps, presets/targets/rows, or steps_sha256.' : 'Send exactly one of steps or presets/targets/rows.');
+            return;
+        }
+        if (compact.length !== 3)
+            return;
+        const presets = compactPresetsSchema.safeParse(value.presets);
+        const targets = compactTargetsSchema.safeParse(value.targets);
+        const rows = compactRowsSchema.safeParse(value.rows);
+        if (!presets.success || !targets.success || !rows.success)
+            return;
+        const expansion = { presets: presets.data, targets: targets.data, rows: rows.data };
+        const plural = (count, noun) => `${count} ${noun}${count === 1 ? '' : 's'}`;
+        let rowsValid = true;
+        rows.data.forEach((row, index) => {
+            const [presetIndex, targetIndex, ...values] = row;
+            const at = `rows[${index}]`;
+            const refuse = (message) => { rowsValid = false; issue(message); };
+            if (presetIndex >= presets.data.length)
+                return refuse(`${at}[0]: preset ${presetIndex} does not exist (${plural(presets.data.length, 'preset')}).`);
+            if (targetIndex >= targets.data.length)
+                return refuse(`${at}[1]: target ${targetIndex} does not exist (${plural(targets.data.length, 'target')}).`);
+            const preset = presets.data[presetIndex];
+            const columns = rowColumns(preset);
+            const layout = `[preset, target, ${columns.join(', ')}]`;
+            if (values.length !== columns.length)
+                return refuse(`${at} (${presetLabel(preset)}) must be ${layout}.`);
+            const wrong = columns.findIndex((column, position) => (column === 'contents') !== (typeof values[position] === 'string'));
+            if (wrong >= 0) {
+                return refuse(`${at}[${wrong + 2}]: ${columns[wrong]} must be ${columns[wrong] === 'contents' ? 'a string' : 'a number'}; the row is ${layout}.`);
+            }
+            const step = publicStepSchema.safeParse(rowStep(expansion, row));
+            if (!step.success) {
+                rowsValid = false;
+                for (const found of step.error.issues)
+                    issue(`${at} (${presetLabel(preset)}): ${found.path.length === 0 ? 'step' : found.path.join('.')}: ${found.message}`);
+            }
+        });
+        if (!rowsValid)
+            return;
+        const budget = createBatchStepsInputSchema.safeParse(expandCreateBatchRows(expansion));
+        if (!budget.success)
+            for (const found of budget.error.issues)
+                issue(found.message, ['rows']);
+    };
+}
+const publicForms = {
+    steps: createBatchStepsInputSchema.optional(),
+    presets: compactPresetsSchema.optional(),
+    targets: compactTargetsSchema.optional(),
+    rows: compactRowsSchema.optional(),
+};
 export const createBatchPublicInputSchema = z.discriminatedUnion('apply', [
     z.strictObject({
         expected_document_key: documentKeySchema,
-        steps: z.array(publicStepSchema).min(CREATE_BATCH_MIN_STEPS).max(CREATE_BATCH_MAX_STEPS)
-            .superRefine((steps, context) => refineSteps(steps.map(normalizeStep), context)),
+        ...publicForms,
         apply: z.literal(false).default(false),
-    }),
+    }).superRefine(refineForms(false)),
     z.strictObject({
         expected_document_key: documentKeySchema,
-        steps: z.array(publicStepSchema).min(CREATE_BATCH_MIN_STEPS).max(CREATE_BATCH_MAX_STEPS)
-            .superRefine((steps, context) => refineSteps(steps.map(normalizeStep), context)),
+        ...publicForms,
+        steps_sha256: stepsRefSchema.optional(),
         apply: z.literal(true),
         command_id: applyCommandIdSchema,
-    }),
+    }).superRefine(refineForms(true)),
 ]);
 const inputSchema = z.strictObject({
     expected_document_key: documentKeySchema,
@@ -228,7 +339,11 @@ const inputSchema = z.strictObject({
         name: rectangleNameSchema.optional(),
         shape: publicShapeSchema.optional(),
         appearance: creationAppearanceSchema.optional(),
-    })).min(CREATE_BATCH_MIN_STEPS).max(CREATE_BATCH_MAX_STEPS),
+    })).min(CREATE_BATCH_MIN_STEPS).max(CREATE_BATCH_MAX_STEPS).optional(),
+    presets: z.array(z.unknown()).optional(),
+    targets: z.array(z.unknown()).optional(),
+    rows: z.array(z.unknown()).optional(),
+    steps_sha256: z.string().optional(),
     apply: z.boolean().default(false),
     command_id: applyCommandIdSchema.optional(),
 });
@@ -236,7 +351,11 @@ const { $schema: _schemaDialect, ...publishedInputSchema } = z.toJSONSchema(crea
 inputSchema._zod.toJSONSchema = () => ({ type: 'object', ...publishedInputSchema });
 function normalizePublicInput(input) {
     const value = createBatchPublicInputSchema.parse(input);
-    const steps = value.steps.map(normalizeStep);
+    if ('steps_sha256' in value && value.steps_sha256 !== undefined) {
+        throw new Error('A steps reference must be expanded to the planned steps before normalization.');
+    }
+    const publicSteps = value.steps ?? createBatchStepsInputSchema.parse(expandCreateBatchRows({ presets: value.presets, targets: value.targets, rows: value.rows }));
+    const steps = publicSteps.map(normalizeStep);
     return value.apply
         ? { expectedDocumentKey: value.expected_document_key, steps, apply: true, commandId: value.command_id }
         : { expectedDocumentKey: value.expected_document_key, steps, apply: false };
@@ -322,6 +441,9 @@ const planSchema = z.strictObject({
     if (shapeAnchors > CREATE_BATCH_MAX_SHAPE_ANCHORS) {
         context.addIssue({ code: 'custom', message: 'Create batch plan exceeds the shape anchor budget.' });
     }
+    if ((createBatchResultBytes(plan) > CREATE_BATCH_RESULT_ADMISSION_BYTES) !== plan.applyBlockedReasonCodes.includes('result_too_large')) {
+        context.addIssue({ code: 'custom', message: 'Create batch result_too_large must be reported exactly when the estimated stored result exceeds the admission limit.' });
+    }
     if (plan.applyAllowed !== (plan.applyBlockedReasonCodes.length === 0)) {
         context.addIssue({ code: 'custom', message: 'Create batch applyAllowed must require no blockers.' });
     }
@@ -379,22 +501,32 @@ const rollbackEvidence = {
     steps: z.array(rollbackStepSchema).min(CREATE_BATCH_MIN_STEPS).max(CREATE_BATCH_MAX_STEPS),
     layers: z.array(rollbackLayerSchema).max(CREATE_BATCH_MAX_STEPS),
 };
+const rollbackNotRequiredSchema = z.strictObject({ status: z.literal('not_required') });
+const rollbackVerifiedSchema = z.strictObject({ status: z.literal('verified'), ...rollbackEvidence });
+const rollbackFailedSchema = z.strictObject({ status: z.literal('failed'), reasonCode: z.literal('rollback_failed'),
+    message: z.string().min(1).max(500), ...rollbackEvidence });
+const rollbackCreatedStateUnknownSchema = z.strictObject({ status: z.literal('indeterminate'), reasonCode: z.literal('created_state_unknown'),
+    message: z.string().min(1).max(500), ...rollbackEvidence });
+const rollbackIndeterminateSchema = z.strictObject({ status: z.literal('indeterminate'), reasonCode: z.literal('rollback_indeterminate'),
+    message: z.string().min(1).max(500), ...rollbackEvidence });
+export const createBatchTransactionParts = {
+    failure: z.union([failureSchema, indeterminateFailureSchema]),
+    rollback: z.union([rollbackNotRequiredSchema, rollbackVerifiedSchema, rollbackFailedSchema, rollbackCreatedStateUnknownSchema,
+        rollbackIndeterminateSchema]),
+};
 const transactionSchema = z.discriminatedUnion('state', [
     z.strictObject({ state: z.literal('planned'), audit: mutationAuditSchema }),
     z.strictObject({ state: z.literal('verified'), audit: mutationAuditSchema }),
     z.strictObject({ state: z.literal('apply_failed'), failure: failureSchema,
-        rollback: z.strictObject({ status: z.literal('not_required') }), audit: mutationAuditSchema }),
+        rollback: rollbackNotRequiredSchema, audit: mutationAuditSchema }),
     z.strictObject({ state: z.literal('rolled_back'), failure: failureSchema,
-        rollback: z.strictObject({ status: z.literal('verified'), ...rollbackEvidence }), audit: mutationAuditSchema }),
+        rollback: rollbackVerifiedSchema, audit: mutationAuditSchema }),
     z.strictObject({ state: z.literal('rollback_failed'), failure: failureSchema,
-        rollback: z.strictObject({ status: z.literal('failed'), reasonCode: z.literal('rollback_failed'),
-            message: z.string().min(1).max(500), ...rollbackEvidence }), audit: mutationAuditSchema }),
+        rollback: rollbackFailedSchema, audit: mutationAuditSchema }),
     z.strictObject({ state: z.literal('apply_indeterminate'), failure: indeterminateFailureSchema,
-        rollback: z.strictObject({ status: z.literal('indeterminate'), reasonCode: z.literal('created_state_unknown'),
-            message: z.string().min(1).max(500), ...rollbackEvidence }), audit: mutationAuditSchema }),
+        rollback: rollbackCreatedStateUnknownSchema, audit: mutationAuditSchema }),
     z.strictObject({ state: z.literal('rollback_indeterminate'), failure: failureSchema,
-        rollback: z.strictObject({ status: z.literal('indeterminate'), reasonCode: z.literal('rollback_indeterminate'),
-            message: z.string().min(1).max(500), ...rollbackEvidence }), audit: mutationAuditSchema }),
+        rollback: rollbackIndeterminateSchema, audit: mutationAuditSchema }),
 ]).superRefine((transaction, context) => {
     const prefix = ['preflight:started:', 'preflight:succeeded:', 'plan:started:', 'plan:succeeded:'];
     let expected;
@@ -669,6 +801,8 @@ ${CREATE_POINT_TEXT_MODULE_SCRIPT}
 ${CREATION_APPEARANCE_MODULE_SCRIPT}
 ${CREATE_RECTANGLE_MODULE_SCRIPT}
 ${CREATE_SHAPE_MODULE_SCRIPT}
+${SNAPSHOT_RESULT_SIZE_SCRIPT}
+${CREATE_BATCH_RESULT_SIZE_SCRIPT}
 var CREATE_BATCH_MIN_STEPS = ${CREATE_BATCH_MIN_STEPS};
 var CREATE_BATCH_MAX_STEPS = ${CREATE_BATCH_MAX_STEPS};
 var CREATE_BATCH_MAX_TEXT_CODE_UNITS = ${CREATE_BATCH_MAX_TEXT_CODE_UNITS};
@@ -767,6 +901,9 @@ function createBatchUnionBlockers(perStep) {
 /** The exact direct-item order of a layer, reused for baseline, verification and rollback proof. */
 function createBatchLayerOrder(layer) { return createPointTextLayerOrder(layer); }
 
+/** The baseline a plan captures (#954): at most CREATE_BATCH_MAX_LAYER_ITEMS UUIDs from the front; a longer layer is blocked, so the cut list is never compared by verify or rollback. */
+function createBatchBaselineOrder(layer) { return createPointTextLayerOrderUpTo(layer, CREATE_BATCH_MAX_LAYER_ITEMS); }
+
 /**
  * Resolves the document exactly once, then every step through its module, before any write. Called from
  * preflight and again from revalidate. Each distinct layer is captured once, so several creations on one
@@ -776,6 +913,11 @@ function createBatchResolve(forApply) {
   var batchParams = params;
   var context = forApply ? requireDocument(batchParams.expectedDocumentKey) : requireDocumentForRead(batchParams.expectedDocumentKey);
   var document = app.activeDocument;
+  // The total the rollback proof is measured against (#955, #971): read here, in this host call before its first write, never
+  // after a creation or a removal of the same call (a document-wide length read then can be stale). Preflight and revalidate
+  // are both before the first write of the apply call, so comparing their two reads compares two fresh values; a value from
+  // the plan call is never carried over.
+  var totalPageItems = document.pageItems.length;
   var requested = batchParams.steps;
   if (!requested || typeof requested.length !== "number" ||
       requested.length < CREATE_BATCH_MIN_STEPS || requested.length > CREATE_BATCH_MAX_STEPS) {
@@ -812,7 +954,7 @@ function createBatchResolve(forApply) {
       layerIndexByPath[pathKey] = layerIndex;
       layers.push({ path: request.expectedLayerPath, layer: layer, name: String(layer.name || ""),
         visible: layer.visible === true, locked: layer.locked === true,
-        itemUuids: createBatchLayerOrder(layer), ancestry: ancestry, createdCount: 0 });
+        itemUuids: createBatchBaselineOrder(layer), ancestry: ancestry, createdCount: 0 });
     } else if (layers[layerIndex].layer !== layer) {
       throw mutationError("preflight_failed", createBatchStepLabel(step) + ": the same layer path resolved to a different layer.");
     }
@@ -830,11 +972,13 @@ function createBatchResolve(forApply) {
     }
   }
   if (capacityExceeded) perStepBlockers.push(["layer_item_capacity_exceeded"]);
+  var resultPlan = createBatchPlan({ context: context, layers: layers, entries: entries, blockers: [] });
+  if (createBatchResultBytes(resultPlan) > CREATE_BATCH_RESULT_ADMISSION_BYTES) perStepBlockers.push(["result_too_large"]);
   var union = createBatchUnionBlockers(perStepBlockers);
   if (forApply && union.length > 0) {
     throw new Error("MCP_ERROR:" + stringifyJson({ code: "CREATE_BATCH_APPLY_BLOCKED", reasonCodes: union }));
   }
-  return { context: context, document: document, entries: entries, layers: layers, blockers: union };
+  return { context: context, document: document, entries: entries, layers: layers, blockers: union, totalPageItems: totalPageItems };
 }
 
 function createBatchPreflight(forApply) { return createBatchResolve(forApply); }
@@ -878,7 +1022,7 @@ function createBatchRevalidate(preflight, plan) {
   try { current = createBatchResolve(true); }
   catch (error) { throw mutationBeforeSideEffectError(mutationPublicMessage(error, "Create batch preconditions changed before apply.")); }
   if (current.document !== preflight.document || current.entries.length !== preflight.entries.length ||
-      current.layers.length !== preflight.layers.length) {
+      current.layers.length !== preflight.layers.length || current.totalPageItems !== preflight.totalPageItems) {
     throw mutationBeforeSideEffectError("Create batch document, step count or layer set changed before apply.");
   }
   for (var layerIndex = 0; layerIndex < current.layers.length; layerIndex++) {
@@ -1051,6 +1195,8 @@ function createBatchRollback(state) {
   var firstIndeterminate = null;
   var firstOutstanding = null;
   var unidentified = [];
+  var pendingAbsence = [];
+  var pendingUuids = [];
   for (var index = attempted - 1; index >= 0; index--) {
     var entry = preflight.entries[index];
     var stepState = state.operationState.stepStates[index];
@@ -1062,9 +1208,10 @@ function createBatchRollback(state) {
       continue;
     }
     var outcome = createBatchRemoveCreated(preflight, entry, stepState, createdUuid);
-    if (outcome.status === "verified") {
-      steps[index].outcome = "removed";
-      steps[index].createdUuid = createdUuid;
+    if (outcome.status === "pending_absence") {
+      // Removed and read as absent by identity; the walk of the document that proves it runs once for all of them, below.
+      pendingAbsence.push(index);
+      pendingUuids.push(createdUuid);
     } else if (outcome.status === "failed") {
       steps[index].outcome = "outstanding";
       steps[index].createdUuid = createdUuid;
@@ -1073,6 +1220,31 @@ function createBatchRollback(state) {
       steps[index].outcome = "indeterminate";
       steps[index].createdUuid = null;
       if (firstIndeterminate === null) firstIndeterminate = createBatchStepLabel(entry.step) + ": " + outcome.message;
+    }
+  }
+  if (pendingAbsence.length > 0) {
+    // After a rollback that removed everything, the document holds what it held before the call; an item whose removal
+    // failed (outstanding) is still there, so it is counted too.
+    var stillPresent = 0;
+    for (var presentIndex = 0; presentIndex < attempted; presentIndex++) if (steps[presentIndex].outcome === "outstanding") stillPresent += 1;
+    var unproved;
+    try { unproved = createBatchAbsenceUnproved(preflight.document, pendingUuids, preflight.totalPageItems + stillPresent); }
+    catch (scanError) { unproved = "scan_failed"; }
+    for (var settleIndex = 0; settleIndex < pendingAbsence.length; settleIndex++) {
+      var settled = pendingAbsence[settleIndex];
+      if (unproved === null) {
+        steps[settled].outcome = "removed";
+        steps[settled].createdUuid = pendingUuids[settleIndex];
+      } else {
+        steps[settled].outcome = "indeterminate";
+        steps[settled].createdUuid = null;
+      }
+    }
+    // One proof decides every item it covered: when it fails none of them is claimed removed (#955), and the step named
+    // is the first one the loop above reached (the last created).
+    if (unproved !== null && firstIndeterminate === null) {
+      firstIndeterminate = createBatchStepLabel(preflight.entries[pendingAbsence[0]].step) + ": rollback could not prove " +
+        pendingAbsence.length + " created item(s) absent (" + unproved + ").";
     }
   }
   var restoredLayers = [];
@@ -1122,9 +1294,61 @@ function createBatchRollback(state) {
 }
 
 /**
- * Removes one created item and proves its absence by native UUID. Ownership is checked against the
- * object this batch itself created, so a UUID that now resolves to something else is indeterminate
- * rather than removed.
+ * The one proof, for every item the rollback removed, that none of them is left in the document (#955). Each item has
+ * already passed its own two identity checks in createBatchRemoveCreated (getPageItemFromUuid reads it as absent and the
+ * captured reference is invalid, ReferenceError 45); the walk here is the independent route that looks for the UUIDs in
+ * every collection (the groups, then every layer's items, group children and compound path members), as esAbsenceUnproved
+ * does for one UUID, and it is run once however many items were created. Returns null when proved, otherwise the reason.
+ *
+ * The one difference from esAbsenceUnproved is what "the walk reached every item" is measured against. That function
+ * reads document.pageItems.length after the call's own creations and removals, which Illustrator can report stale within
+ * one host call (#971); this one is given the total read before the call's first write (preflight.totalPageItems), so
+ * after a rollback that removed everything the batch created the walk must reach exactly that many items.
+ *
+ * What this does not cover: the walk reads layer collections, and whether those are current right after remove() is
+ * unmeasured (#971). A removed item that is still in a collection and that the walk also misses would be read as absent
+ * if the miss exactly offset the total. Three things stand beside the walk for that reason: the per-item identity checks
+ * above (they must precede a step entering the proof), the comparison of every touched layer's full item order with its
+ * baseline in createBatchRollback, and, in the live runs, a read of the total and of those orders in a separate call after
+ * the rollback.
+ */
+function createBatchAbsenceUnproved(doc, uuids, expectedTotal) {
+  var wanted = {};
+  for (var index = 0; index < uuids.length; index++) wanted[uuids[index]] = true;
+  var groups = esRead(function () { return doc.groupItems; });
+  if (groups[0] === "e") return "collection_unreadable";
+  var groupCount = esLength(function () { return groups[1].length; });
+  if (groupCount === null) return "collection_unreadable";
+  for (var groupIndex = 0; groupIndex < groupCount; groupIndex++) {
+    var groupUuid = esEnum(function () { return groups[1][groupIndex].uuid; });
+    if (groupUuid[0] === "e") return "item_uuid_unreadable";
+    if (wanted.hasOwnProperty(groupUuid[1])) return "uuid_present";
+  }
+  try { resolveScanBegin(doc); } catch (beginError) { return "scan_unavailable"; }
+  scanTotal = expectedTotal;
+  var reason = null;
+  try {
+    walkDocumentTree(doc, function (item) {
+      var uuid = esEnum(function () { return item.uuid; });
+      if (uuid[0] === "e") { reason = "item_uuid_unreadable"; throw esWalkStop; }
+      if (wanted.hasOwnProperty(uuid[1])) { reason = "uuid_present"; throw esWalkStop; }
+    });
+  } catch (walkError) {
+    if (walkError === esWalkStop) return reason;
+    var text = String(walkError && walkError.message ? walkError.message : walkError);
+    if (String(text).indexOf("READ_SCAN_DEADLINE") >= 0) return "scan_deadline";
+    if (String(text).indexOf("ILLUSTRATOR_HOST_REFERENCE_INVALID") >= 0) return "item_uuid_unreadable";
+    return "collection_unreadable";
+  }
+  if (scanVisited !== scanTotal) return "collection_unreadable";
+  return null;
+}
+
+/**
+ * Removes one created item and reads its absence by identity: the native UUID lookup answers absent and the captured
+ * reference is invalid. That is "pending_absence", not "verified": the walk of the document that completes the proof runs
+ * once for every pending item (createBatchAbsenceUnproved). Ownership is checked against the object this batch itself
+ * created, so a UUID that now resolves to something else is indeterminate rather than removed.
  */
 function createBatchRemoveCreated(preflight, entry, stepState, createdUuid) {
   var target;
@@ -1135,7 +1359,7 @@ function createBatchRemoveCreated(preflight, entry, stepState, createdUuid) {
     var referenceState;
     try { referenceState = mutationCreatedObjectReferenceState(createdObject, createdUuid); }
     catch (identityError) { return { status: "indeterminate", message: "object-identity lookup is indeterminate" }; }
-    if (referenceState === "invalid") return mutationCreatedObjectAbsence(preflight.document, createdUuid);
+    if (referenceState === "invalid") return { status: "pending_absence" };
     return { status: "indeterminate", message: "the created native UUID is absent while its object reference is still live" };
   }
   if (target !== createdObject) return { status: "indeterminate", message: "the created native UUID resolves to another object" };
@@ -1155,7 +1379,7 @@ function createBatchRemoveCreated(preflight, entry, stepState, createdUuid) {
     var remainingState;
     try { remainingState = mutationCreatedObjectReferenceState(createdObject, createdUuid); }
     catch (remainingError) { return { status: "indeterminate", message: "post-remove identity lookup is indeterminate" }; }
-    if (remainingState === "invalid") return mutationCreatedObjectAbsence(preflight.document, createdUuid);
+    if (remainingState === "invalid") return { status: "pending_absence" };
     return { status: "indeterminate", message: "the created native UUID is absent while its object reference is still live" };
   }
   return { status: "failed", message: removeThrew
@@ -1232,9 +1456,14 @@ export const createBatchToolContract = {
         + "baseline plus this batch's own items, and on any failure removes every item it created and proves each layer back "
         + `at its baseline. Several steps may target one layer. Point-text contents total at most ${CREATE_BATCH_MAX_TEXT_CODE_UNITS} `
         + `UTF-16 code units, shapes total at most ${CREATE_BATCH_MAX_SHAPE_ANCHORS} anchors, and a touched layer holds at most ${CREATE_BATCH_MAX_LAYER_ITEMS} direct items after the batch. `
+        + 'A layer over that limit is blocked (layer_item_capacity_exceeded); its plan lists only the first 128 item UUIDs, so itemCount and itemUuidsSha256 are made from those 128 although the layer holds more. '
+        + `A request whose estimated stored result exceeds ${CREATE_BATCH_RESULT_ADMISSION_BYTES} bytes is blocked (result_too_large): send fewer steps, or split steps over layers that hold fewer items. `
         + 'A rectangle or shape step may carry an initial appearance (opacity, fill, stroke), set and read back in the same call. '
         + 'The returned native UUIDs identify the items until the document is next saved; Illustrator renumbers UUIDs across '
-        + 'that save.',
+        + 'that save. Instead of steps, send presets (a step without its row values), targets ({expected_layer_path, artboard_index}) '
+        + 'and rows, one [preset, target, ...values] per item: point text x, y, contents; rectangle and ellipse x, y, width, height; '
+        + 'line x1, y1, x2, y2 (the preset shapes are line and ellipse; send other shapes as steps). Step N of a refusal is rows[N-1]. '
+        + "The plan's next_call carries steps_sha256 instead of the steps.",
     inputSchema,
     publicInputSchema: createBatchPublicInputSchema,
     outputSchema: createBatchResponseSchema,

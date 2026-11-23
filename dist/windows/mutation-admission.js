@@ -1,5 +1,5 @@
 import { WINDOWS_PROFILE_FOREGROUND_SOURCE, WINDOWS_PROFILE_TIMEOUT_MS } from './host-profile.js';
-import { parseWindowsForegroundObservation, parseWindowsSessionState } from './observation.js';
+import { FOREGROUND_PID_KEYS, parseWindowsForegroundObservation, parseWindowsSessionState } from './observation.js';
 import { windowsPowerShellExecutable } from './powershell-runner.js';
 const GUIDANCE = {
     locked: 'the Windows session is locked; unlock the console session',
@@ -25,7 +25,7 @@ const MODAL_METHODS = `
   // GW_ENABLEDPOPUP = 6
   public static bool ModalOpen(IntPtr main) { return !IsWindowEnabled(main) || GetWindow(main, 6) != IntPtr.Zero; }
 `;
-const FOREGROUND_TAIL = /\n\}\n'@\n\$foreground = /u;
+const FOREGROUND_TAIL = /\n\}\n'@\n\$foregroundPid = /u;
 export const WINDOWS_MUTATION_ADMISSION_SOURCE = (() => {
     const source = WINDOWS_PROFILE_FOREGROUND_SOURCE.replaceAll('\r\n', '\n');
     const tail = FOREGROUND_TAIL.exec(source);
@@ -37,20 +37,35 @@ try {
   $flags = [McpWindowsProbe]::SessionFlags()
   $protocol = [McpWindowsProbe]::ClientProtocolType()
 } catch { exit 70 }
-$foreground = [McpWindowsProbe]::ForegroundImagePath()
+$foregroundPid = [McpWindowsProbe]::ForegroundProcessId()
+$foreground = $null
+if ($foregroundPid -ne 0) { $foreground = [McpWindowsProbe]::ImagePath($foregroundPid) }
 $processes = @(Get-Process -Name 'Illustrator' -ErrorAction SilentlyContinue)
 $paths = @()
-foreach ($process in $processes) { $paths += , [McpWindowsProbe]::ImagePath([uint32]$process.Id) }
+$illustratorPids = @()
+foreach ($process in $processes) {
+  $paths += , [McpWindowsProbe]::ImagePath([uint32]$process.Id)
+  $illustratorPids += [int]$process.Id
+}
+# P5: FileVersion of each image, read in this same spawn for the channel classification (null when unreadable).
+$fileVersions = @()
+foreach ($path in $paths) {
+  $fileVersion = $null
+  if ($path) { try { $fileVersion = [string][System.Diagnostics.FileVersionInfo]::GetVersionInfo($path).FileVersion } catch { } }
+  $fileVersions += , $fileVersion
+}
 $modal = $null
 if ($processes.Count -eq 1) {
   $handle = $processes[0].MainWindowHandle
   if ($handle -ne [IntPtr]::Zero) { $modal = [McpWindowsProbe]::ModalOpen($handle) }
 }
 [Console]::Out.Write((ConvertTo-Json -InputObject ([ordered]@{ SessionFlags = $flags; WTSClientProtocolType = $protocol;
-  foregroundExecutablePath = $foreground; illustratorExecutablePaths = $paths; modalOpen = $modal }) -Compress) + [string][char]10)
+  foregroundExecutablePath = $foreground; illustratorExecutablePaths = $paths; illustratorFileVersions = $fileVersions; modalOpen = $modal;
+  foregroundProcessId = [int]$foregroundPid; illustratorProcessIds = $illustratorPids }) -Compress) + [string][char]10)
 `;
 })();
 const KEYS = ['SessionFlags', 'WTSClientProtocolType', 'foregroundExecutablePath', 'illustratorExecutablePaths', 'modalOpen'];
+const OPTIONAL_KEYS = ['illustratorFileVersions', ...FOREGROUND_PID_KEYS];
 export function decideWindowsMutationAdmission(output, observedAt = new Date().toISOString()) {
     const lines = output.split(/\r?\n/u).filter((line) => line.trim() !== '');
     let value;
@@ -64,7 +79,7 @@ export function decideWindowsMutationAdmission(output, observedAt = new Date().t
         throw new WindowsMutationAdmissionError('host_state_unknown', 'The admission helper output was not one JSON object.');
     }
     const actual = Object.keys(value);
-    if (actual.length !== KEYS.length || !KEYS.every((key) => Object.hasOwn(value, key))) {
+    if (!KEYS.every((key) => Object.hasOwn(value, key)) || actual.some((key) => !KEYS.includes(key) && !OPTIONAL_KEYS.includes(key))) {
         throw new WindowsMutationAdmissionError('host_state_unknown', 'The admission helper output had unexpected fields.');
     }
     const lockState = parseWindowsSessionState(JSON.stringify({ SessionFlags: value.SessionFlags, WTSClientProtocolType: value.WTSClientProtocolType }));
@@ -77,8 +92,9 @@ export function decideWindowsMutationAdmission(output, observedAt = new Date().t
     if (value.illustratorExecutablePaths.length !== 1) {
         throw new WindowsMutationAdmissionError('illustrator_instance_count', `Observed ${value.illustratorExecutablePaths.length}.`);
     }
+    const pidEvidence = Object.fromEntries(FOREGROUND_PID_KEYS.filter((key) => Object.hasOwn(value, key)).map((key) => [key, value[key]]));
     const profile = parseWindowsForegroundObservation(JSON.stringify({
-        foregroundExecutablePath: value.foregroundExecutablePath, illustratorExecutablePaths: value.illustratorExecutablePaths,
+        foregroundExecutablePath: value.foregroundExecutablePath, illustratorExecutablePaths: value.illustratorExecutablePaths, ...pidEvidence,
     }), lockState, observedAt).profile;
     if (profile === 'background')
         throw new WindowsMutationAdmissionError('not_frontmost');
@@ -88,8 +104,9 @@ export function decideWindowsMutationAdmission(output, observedAt = new Date().t
         throw new WindowsMutationAdmissionError('modal_open');
     if (value.modalOpen !== false)
         throw new WindowsMutationAdmissionError('host_state_unknown', 'The Illustrator main window was not observable.');
+    return { executablePaths: value.illustratorExecutablePaths, fileVersions: value.illustratorFileVersions ?? null };
 }
-export async function assertWindowsMutationAdmission(run) {
+export async function assertWindowsMutationAdmission(run, channelState) {
     const systemRoot = process.env.SystemRoot;
     if (!systemRoot || !/^[A-Za-z]:\\[^\\]/u.test(systemRoot) || systemRoot.includes('\0')) {
         throw new WindowsMutationAdmissionError('host_state_unknown', 'SystemRoot is not an absolute drive path.');
@@ -97,7 +114,16 @@ export async function assertWindowsMutationAdmission(run) {
     const outcome = await run(windowsPowerShellExecutable(systemRoot), ['-NoProfile', '-NonInteractive', '-Sta', '-EncodedCommand',
         Buffer.from(WINDOWS_MUTATION_ADMISSION_SOURCE, 'utf16le').toString('base64')], WINDOWS_PROFILE_TIMEOUT_MS);
     if (outcome.kind !== 'exit' || outcome.code !== 0 || outcome.signal !== null) {
+        channelState?.invalidate();
         throw new WindowsMutationAdmissionError('host_state_unknown', `Helper outcome: ${outcome.kind === 'exit' ? `exit ${outcome.code}` : outcome.kind}.`);
     }
-    decideWindowsMutationAdmission(outcome.stdout);
+    let evidence;
+    try {
+        evidence = decideWindowsMutationAdmission(outcome.stdout);
+    }
+    catch (error) {
+        channelState?.invalidate();
+        throw error;
+    }
+    channelState?.observe(evidence.executablePaths, evidence.fileVersions);
 }
